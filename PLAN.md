@@ -296,7 +296,7 @@ git 最低 2.39.1，見 README 信任說明。S0b：
 - 沒有任何宿主在真實 session 中實測過（Claude、Grok、Codex、Copilot、Droid、Pi、Letta、
   OpenCode 皆同）；尤其 Grok 的 handler 執行順序與逾時時的子程序行為（見 4.5）仍待確認。
 - omp、kilo、hermes：使用者決定的 TODO，尚未研究契約，往後要出貨需重新走契約補遺流程。
-- cursor：需要先修改計畫，改用例如 `{ '<exe>' hook cursor || true; }`（用 `{}` 把
+- cursor：使用者決定（2026-09-29）先不支援。日後要支援需要先修改計畫，改用例如 `{ '<exe>' hook cursor || true; }`（用 `{}` 把
   here-document 接到整個複合指令之後）的指令形式，並補上 env-injectable 處理（project
   `sessionStart` hook 的 `env` 輸出可影響後續 hook 環境），才能重新評估是否可出貨；本輪只記錄，
   不實作。
