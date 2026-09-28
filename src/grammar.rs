@@ -2,9 +2,7 @@
 //! cache and dlopens a library; fetching and building live in `install.rs` alone.
 
 use crate::Language;
-use crate::config::{
-    Kind, Meta, Untrusted, absolute_var, check_symbol, home, lstat, resolve_trusted, user,
-};
+use crate::config::{Kind, Meta, Untrusted, check_symbol, lstat, resolve_trusted, user};
 use std::fmt;
 use std::fs;
 use std::io::Read;
@@ -55,6 +53,8 @@ pub struct Grammar {
     pub(crate) filenames: Vec<String>,
     /// Canonical top level of the analysed repository; a cache inside it is refused.
     repo: Option<PathBuf>,
+    /// The cache base (`$XDG_CACHE_HOME`) installed libraries are looked up under.
+    cache: Option<PathBuf>,
 }
 
 fn strings(items: &[&str]) -> Vec<String> {
@@ -76,6 +76,7 @@ pub(crate) struct Definition {
     pub extensions: Vec<String>,
     pub filenames: Vec<String>,
     pub repo: Option<PathBuf>,
+    pub cache: Option<PathBuf>,
 }
 
 impl Grammar {
@@ -95,6 +96,7 @@ impl Grammar {
             extensions: Vec::new(),
             filenames: Vec::new(),
             repo: None,
+            cache: None,
         }
     }
 
@@ -117,6 +119,7 @@ impl Grammar {
             extensions: definition.extensions,
             filenames: definition.filenames,
             repo: definition.repo,
+            cache: definition.cache,
         }
     }
 
@@ -130,6 +133,11 @@ impl Grammar {
             Source::Builtin(_) => None,
             Source::External { source, symbol } => Some((source, symbol)),
         }
+    }
+
+    /// The cache base this grammar's library is looked up and installed under.
+    pub(crate) fn cache(&self) -> Option<&Path> {
+        self.cache.as_deref()
     }
 
     /// The tree-sitter language, loaded on first call; the error explains what the user can do.
@@ -155,7 +163,7 @@ impl Grammar {
             return Err(format!("{} is a builtin language", self.name));
         };
         let file = library_file(&self.name, &key(source, symbol)?);
-        let parsers = parsers_dir(self.repo.as_deref())?;
+        let parsers = parsers_dir(self.cache.as_deref(), self.repo.as_deref())?;
         let path = parsers.join(file);
         if let Some(repo) = &self.repo
             && path.starts_with(repo)
@@ -257,11 +265,6 @@ pub(crate) fn inputs_key(inputs: &[(String, Vec<u8>)]) -> String {
     format!("{:016x}", fnv1a(&parts))
 }
 
-/// Absolute `$XDG_CACHE_HOME`, else `$HOME/.cache`.
-pub(crate) fn cache_base() -> Option<PathBuf> {
-    absolute_var("XDG_CACHE_HOME").or_else(|| home().map(|home| home.join(".cache")))
-}
-
 /// A real directory (not a symlink) owned by the user with mode exactly 0700.
 pub(crate) fn private_dir(path: &Path) -> Result<(), String> {
     let meta = lstat(path).map_err(|error| format!("{}: {error}", path.display()))?;
@@ -274,11 +277,10 @@ pub(crate) fn private_dir(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// The canonical cache base, through [`resolve_trusted`].
-pub(crate) fn trusted_cache_base() -> Result<PathBuf, String> {
-    let base =
-        cache_base().ok_or("no cache location (HOME and XDG_CACHE_HOME are unset or relative)")?;
-    match resolve_trusted(&base, user(), &lstat) {
+/// The canonical cache base (`Sources::cache`), through [`resolve_trusted`].
+pub(crate) fn trusted_cache_base(base: Option<&Path>) -> Result<PathBuf, String> {
+    let base = base.ok_or("no cache location (HOME and XDG_CACHE_HOME are unset or relative)")?;
+    match resolve_trusted(base, user(), &lstat) {
         Ok(resolved) => Ok(resolved),
         Err(Untrusted::Missing) => Err(format!("{} does not exist", base.display())),
         Err(Untrusted::Refused(why)) => Err(format!("cache {} refused: {why}", base.display())),
@@ -286,8 +288,8 @@ pub(crate) fn trusted_cache_base() -> Result<PathBuf, String> {
 }
 
 /// `<canonical base>/rotter/parsers`, with `rotter/` and `parsers/` checked by [`private_dir`].
-fn parsers_dir(repo: Option<&Path>) -> Result<PathBuf, String> {
-    let base = trusted_cache_base()?;
+fn parsers_dir(cache: Option<&Path>, repo: Option<&Path>) -> Result<PathBuf, String> {
+    let base = trusted_cache_base(cache)?;
     if let Some(repo) = repo
         && base.starts_with(repo)
     {

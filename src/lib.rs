@@ -2,12 +2,13 @@ mod comments;
 pub mod config;
 mod git;
 mod grammar;
+pub mod hosts;
 pub mod install;
 pub mod integration;
 pub mod json;
 
 pub use comments::{Change, error_lines, full_units, units};
-pub use git::{Mode, Options, Report, extract, toplevel};
+pub use git::{Git, Mode, Options, Report, extract, extract_with, toplevel};
 pub use grammar::{ExternalSource, Grammar, Languages};
 
 use std::fmt;

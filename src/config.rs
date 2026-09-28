@@ -7,7 +7,7 @@ use crate::grammar::{Definition, ExternalSource, Grammar};
 use crate::{Language, Languages};
 use serde::Deserialize;
 use std::collections::BTreeMap;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io;
 use std::os::unix::fs::MetadataExt;
@@ -35,10 +35,93 @@ pub(crate) fn home() -> Option<PathBuf> {
     absolute_var("HOME")
 }
 
+/// Every directory one run takes from its environment, and PATH: on the hook path this is the
+/// only source of them (no function below it reads the environment). The binary builds it with
+/// [`Sources::from_env`] or, for hosts whose project configuration can set the hook's
+/// environment, [`Sources::injectable`]; nothing in the environment, argv or a file selects the
+/// constructor. Tests build it directly.
+#[derive(Clone, Debug)]
+pub struct Sources {
+    pub(crate) home: Option<PathBuf>,
+    /// The base of `rotter/config.toml` (`$XDG_CONFIG_HOME`).
+    pub(crate) config: Option<PathBuf>,
+    /// The base of `rotter/parsers` (`$XDG_CACHE_HOME`).
+    pub(crate) cache: Option<PathBuf>,
+    /// rotter's own state directory.
+    pub(crate) state: Option<PathBuf>,
+    /// The temp root private scratch directories are made in.
+    pub(crate) temp: PathBuf,
+    pub(crate) path: Option<OsString>,
+    /// Absolute host directory variables (`CLAUDE_CONFIG_DIR`, `GROK_HOME`, …).
+    pub(crate) vars: Vec<(&'static str, PathBuf)>,
+}
+
+impl Sources {
+    /// The process environment, absolute values only: `$XDG_*` first, then `$HOME/...`;
+    /// `$ROTTER_STATE_DIR` before `$XDG_STATE_HOME/rotter`.
+    pub fn from_env() -> Self {
+        let home = home();
+        let under = |dir: &str| home.as_ref().map(|home| home.join(dir));
+        Self {
+            config: absolute_var("XDG_CONFIG_HOME").or_else(|| under(".config")),
+            cache: absolute_var("XDG_CACHE_HOME").or_else(|| under(".cache")),
+            state: absolute_var("ROTTER_STATE_DIR").or_else(|| {
+                absolute_var("XDG_STATE_HOME")
+                    .or_else(|| under(".local/state"))
+                    .map(|base| base.join("rotter"))
+            }),
+            temp: std::env::temp_dir(),
+            path: std::env::var_os("PATH"),
+            vars: crate::hosts::HOSTS
+                .iter()
+                .filter_map(|host| Some((host.dir_var, absolute_var(host.dir_var)?)))
+                .collect(),
+            home,
+        }
+    }
+
+    /// For hosts whose project configuration reaches the hook's environment: HOME from the
+    /// password database (an absolute `pw_dir`, else none), the XDG defaults under it, `/tmp` as
+    /// the temp root, and no host directory variables; HOME, XDG_*, ROTTER_* and TMPDIR from the
+    /// process are ignored. PATH is still read: the git resolution filters it.
+    pub fn injectable() -> Self {
+        let home = passwd_home();
+        let under = |dir: &str| home.as_ref().map(|home| home.join(dir));
+        Self {
+            config: under(".config"),
+            cache: under(".cache"),
+            state: under(".local/state/rotter"),
+            // Not confstr(_CS_DARWIN_USER_TEMP_DIR): it falls back to reading TMPDIR.
+            temp: PathBuf::from("/tmp"),
+            path: std::env::var_os("PATH"),
+            vars: Vec::new(),
+            home,
+        }
+    }
+
+    /// [`Sources::injectable`] for injectable hosts, else [`Sources::from_env`].
+    pub fn for_host(host: &crate::hosts::Host) -> Self {
+        if host.injectable {
+            Self::injectable()
+        } else {
+            Self::from_env()
+        }
+    }
+
+    /// An absolute host directory variable.
+    pub(crate) fn var(&self, name: &str) -> Option<&Path> {
+        self.vars
+            .iter()
+            .find(|(key, _)| *key == name)
+            .map(|(_, path)| path.as_path())
+    }
+}
+
 /// `$XDG_CONFIG_HOME/rotter/config.toml`, else `$HOME/.config/...`; None without either.
-pub fn location() -> Option<PathBuf> {
-    absolute_var("XDG_CONFIG_HOME")
-        .or_else(|| home().map(|home| home.join(".config")))
+pub fn location(sources: &Sources) -> Option<PathBuf> {
+    sources
+        .config
+        .as_ref()
         .map(|base| base.join("rotter").join("config.toml"))
 }
 
@@ -100,8 +183,8 @@ impl Loaded {
 
 /// Loads the config for a run in `repo` (None: no repository comparison). `Err` is an invalid
 /// config; a missing file gives the defaults and an untrusted one the defaults with a note.
-pub fn load(repo: Option<&Path>) -> Result<Loaded, String> {
-    let Some(path) = location() else {
+pub fn load(repo: Option<&Path>, sources: &Sources) -> Result<Loaded, String> {
+    let Some(path) = location(sources) else {
         return Ok(Loaded::off(
             "no config location (HOME and XDG_CONFIG_HOME are unset or relative)".to_owned(),
         ));
@@ -133,7 +216,7 @@ pub fn load(repo: Option<&Path>) -> Result<Loaded, String> {
         .map_err(|error| format!("cannot read {}: {error}", resolved.display()))?;
     let base = resolved.parent().unwrap_or(Path::new("/"));
     let repo = repo.map(|repo| fs::canonicalize(repo).unwrap_or_else(|_| repo.to_owned()));
-    let config = parse_in(&text, base, repo.as_deref())
+    let config = parse_in(&text, base, repo.as_deref(), sources.cache.as_deref())
         .map_err(|error| format!("{}: {error}", path.display()))?;
     Ok(Loaded { config, note: None })
 }
@@ -303,11 +386,17 @@ pub fn registry_names() -> Vec<String> {
 /// Parses and validates config text; relative `path` values resolve against `base`.
 #[cfg(test)]
 pub(crate) fn parse(text: &str, base: &Path) -> Result<Config, String> {
-    parse_in(text, base, None)
+    parse_in(text, base, None, None)
 }
 
-/// [`parse`] for a run in the canonical repository `repo` (a cache inside it is refused).
-fn parse_in(text: &str, base: &Path, repo: Option<&Path>) -> Result<Config, String> {
+/// [`parse`] for a run in the canonical repository `repo` (a cache inside it is refused), with
+/// installed grammars looked up under the cache base `cache`.
+fn parse_in(
+    text: &str,
+    base: &Path,
+    repo: Option<&Path>,
+    cache: Option<&Path>,
+) -> Result<Config, String> {
     let raw: RawConfig = toml::from_str(text).map_err(|error| error.to_string())?;
     let parse_timeout_seconds = raw.parse_timeout_seconds.unwrap_or(DEFAULT_PARSE_TIMEOUT);
     if !(1..=MAX_PARSE_TIMEOUT).contains(&parse_timeout_seconds) {
@@ -342,6 +431,7 @@ fn parse_in(text: &str, base: &Path, repo: Option<&Path>) -> Result<Config, Stri
         let mut grammar =
             definition(&name, table, base).map_err(|error| format!("{context}: {error}"))?;
         grammar.repo = repo.map(Path::to_owned);
+        grammar.cache = cache.map(Path::to_owned);
         for other in &externals {
             if let Some(extension) = grammar
                 .extensions
@@ -464,6 +554,7 @@ fn definition(name: &str, raw: RawLanguage, base: &Path) -> Result<Definition, S
         extensions: raw.extensions,
         filenames: raw.filenames,
         repo: None,
+        cache: None,
     })
 }
 
@@ -501,12 +592,76 @@ pub(crate) fn lstat(path: &Path) -> io::Result<Meta> {
     })
 }
 
+/// `struct passwd` from `<pwd.h>`; only `dir` is read, the other fields fix the layout.
+#[repr(C)]
+#[allow(dead_code)]
+struct Passwd {
+    name: *mut std::ffi::c_char,
+    passwd: *mut std::ffi::c_char,
+    uid: u32,
+    gid: u32,
+    #[cfg(target_os = "macos")]
+    change: i64,
+    #[cfg(target_os = "macos")]
+    class: *mut std::ffi::c_char,
+    gecos: *mut std::ffi::c_char,
+    dir: *mut std::ffi::c_char,
+    shell: *mut std::ffi::c_char,
+    #[cfg(target_os = "macos")]
+    expire: i64,
+}
+// ponytail: struct passwd laid out per OS without a libc dependency, like O_NOFOLLOW in grammar.rs.
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+compile_error!("struct passwd is not known for this target");
+
 unsafe extern "C" {
     safe fn geteuid() -> u32;
+    fn getpwuid_r(
+        uid: u32,
+        pwd: *mut Passwd,
+        buf: *mut std::ffi::c_char,
+        len: usize,
+        result: *mut *mut Passwd,
+    ) -> i32;
 }
 
 pub(crate) fn user() -> u32 {
     geteuid()
+}
+
+/// The effective user's home from the password database (`getpwuid_r`), never `$HOME`; None
+/// when there is no entry or `pw_dir` is not absolute.
+fn passwd_home() -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    const ERANGE: i32 = 34;
+    let mut size = 1 << 14;
+    loop {
+        let mut buffer = vec![0 as std::ffi::c_char; size];
+        // SAFETY: all-null pointers and zero integers are a valid `struct passwd`.
+        let mut entry: Passwd = unsafe { std::mem::zeroed() };
+        let mut result: *mut Passwd = std::ptr::null_mut();
+        // SAFETY: the buffer and its length match, and the pointers live across the call.
+        let code = unsafe {
+            getpwuid_r(
+                user(),
+                &mut entry,
+                buffer.as_mut_ptr(),
+                buffer.len(),
+                &mut result,
+            )
+        };
+        if code == ERANGE && size < 1 << 20 {
+            size *= 2;
+            continue;
+        }
+        if code != 0 || result.is_null() || entry.dir.is_null() {
+            return None;
+        }
+        // SAFETY: on success pw_dir is a NUL-terminated string inside `buffer`.
+        let dir = unsafe { std::ffi::CStr::from_ptr(entry.dir) };
+        let dir = PathBuf::from(OsStr::from_bytes(dir.to_bytes()));
+        return dir.is_absolute().then_some(dir);
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -659,6 +814,70 @@ units = ["function_declaration"]
 
     fn language(body: &str) -> String {
         format!("[language.x]\nsymbol = \"tree_sitter_x\"\nunits = [\"a\"]\n{body}\n")
+    }
+
+    const CHILD: &str = "ROTTER_TEST_SOURCES_CHILD";
+
+    /// `Sources::injectable` in a child test process whose environment names other directories
+    /// for every variable it must ignore. Only paths are computed: nothing is read or written.
+    #[test]
+    fn injectable_sources_ignore_the_environment() {
+        let evil = "/nonexistent/rotter-evil";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "config::tests::injectable_sources_ignore_the_environment",
+                    "--test-threads=1",
+                ])
+                .env(CHILD, "1")
+                .env("HOME", evil)
+                .env("XDG_CONFIG_HOME", format!("{evil}/config"))
+                .env("XDG_CACHE_HOME", format!("{evil}/cache"))
+                .env("XDG_STATE_HOME", format!("{evil}/state"))
+                .env("ROTTER_STATE_DIR", format!("{evil}/rotter-state"))
+                .env("TMPDIR", format!("{evil}/tmp"))
+                .env("CLAUDE_CONFIG_DIR", format!("{evil}/claude"))
+                .env("GROK_HOME", format!("{evil}/grok"))
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+                "{output:?}"
+            );
+            return;
+        }
+        let injectable = super::Sources::injectable();
+        let home = injectable.home.clone().expect("a password database home");
+        assert!(home.is_absolute() && !home.starts_with(evil), "{home:?}");
+        assert_eq!(injectable.config, Some(home.join(".config")));
+        assert_eq!(injectable.cache, Some(home.join(".cache")));
+        assert_eq!(injectable.state, Some(home.join(".local/state/rotter")));
+        assert_eq!(injectable.temp, Path::new("/tmp"));
+        assert!(injectable.vars.is_empty());
+        assert_eq!(
+            injectable.path,
+            std::env::var_os("PATH"),
+            "PATH is filtered later"
+        );
+        // Control: the environment really names the other directories.
+        let from_env = super::Sources::from_env();
+        assert_eq!(from_env.home.as_deref(), Some(Path::new(evil)));
+        assert_eq!(
+            from_env.config,
+            Some(PathBuf::from(format!("{evil}/config")))
+        );
+        assert_eq!(from_env.cache, Some(PathBuf::from(format!("{evil}/cache"))));
+        assert_eq!(
+            from_env.state,
+            Some(PathBuf::from(format!("{evil}/rotter-state")))
+        );
+        assert_eq!(from_env.temp, PathBuf::from(format!("{evil}/tmp")));
+        assert_eq!(
+            from_env.var("GROK_HOME"),
+            Some(Path::new("/nonexistent/rotter-evil/grok"))
+        );
     }
 
     #[test]

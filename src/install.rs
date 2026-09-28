@@ -6,8 +6,7 @@
 use crate::ExternalSource;
 use crate::config::{self, Config, Kind, Untrusted, absolute_var, lstat, resolve_trusted, user};
 use crate::grammar::{
-    Grammar, cache_base, git_key, inputs_key, library_file, private_dir, read_inputs,
-    trusted_cache_base,
+    Grammar, git_key, inputs_key, library_file, private_dir, read_inputs, trusted_cache_base,
 };
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -103,11 +102,6 @@ fn find_tool(tool: Tool) -> Result<PathBuf, String> {
                 tool.name()
             )
         })
-}
-
-/// `git` from the absolute PATH entries only, for every git call rotter makes.
-pub(crate) fn git_program() -> Result<PathBuf, String> {
-    find_tool(Tool::Git)
 }
 
 /// The complete environment of a git or cc child: nothing else is inherited.
@@ -382,9 +376,10 @@ fn check_sources(dir: &Path) -> Result<Vec<&'static str>, String> {
     Ok(sources)
 }
 
-/// Creates missing components of the cache base one at a time with mode 0700 (never
-/// `create_dir_all`), below the deepest existing ancestor, which must pass `resolve_trusted`.
-fn create_base(base: &Path) -> Result<(), String> {
+/// Creates missing components of `base` (the cache base, the state directory) one at a time
+/// with mode 0700 (never `create_dir_all`), below the deepest existing ancestor, which must pass
+/// `resolve_trusted`.
+pub(crate) fn create_base(base: &Path) -> Result<(), String> {
     let mut existing = base.to_owned();
     let mut missing = Vec::new();
     while lstat(&existing).is_err() {
@@ -392,7 +387,7 @@ fn create_base(base: &Path) -> Result<(), String> {
             Some(Component::Normal(name)) => missing.push(name.to_owned()),
             _ => {
                 return Err(format!(
-                    "cannot create the cache {}: use a path of plain directory names",
+                    "cannot create {}: use a path of plain directory names",
                     base.display()
                 ));
             }
@@ -405,7 +400,7 @@ fn create_base(base: &Path) -> Result<(), String> {
     let mut dir = match resolve_trusted(&existing, user(), &lstat) {
         Ok(dir) => dir,
         Err(Untrusted::Missing) => return Err(format!("{} vanished", existing.display())),
-        Err(Untrusted::Refused(why)) => return Err(format!("cache refused: {why}")),
+        Err(Untrusted::Refused(why)) => return Err(format!("{} refused: {why}", base.display())),
     };
     for name in missing.iter().rev() {
         dir.push(name);
@@ -426,10 +421,10 @@ fn ensure_private_dir(path: &Path) -> Result<(), String> {
 }
 
 /// The canonical `<base>/rotter`, with `rotter/`, `build/` and `parsers/` in place and checked.
-fn prepare_cache() -> Result<PathBuf, String> {
-    let base = cache_base().ok_or("no cache location: set HOME or an absolute XDG_CACHE_HOME")?;
-    create_base(&base)?;
-    let rotter = trusted_cache_base()?.join("rotter");
+fn prepare_cache(base: Option<&Path>) -> Result<PathBuf, String> {
+    let base = base.ok_or("no cache location: set HOME or an absolute XDG_CACHE_HOME")?;
+    create_base(base)?;
+    let rotter = trusted_cache_base(Some(base))?.join("rotter");
     for dir in [rotter.clone(), rotter.join("build"), rotter.join("parsers")] {
         ensure_private_dir(&dir)?;
     }
@@ -441,7 +436,7 @@ fn install_one(grammar: &Grammar) -> Result<PathBuf, String> {
         .external_source()
         .ok_or_else(|| format!("{} is a builtin language", grammar.name()))?;
     config::check_symbol(symbol)?;
-    let rotter = prepare_cache()?;
+    let rotter = prepare_cache(grammar.cache())?;
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |time| time.as_nanos());

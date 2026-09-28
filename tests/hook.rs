@@ -1,3 +1,5 @@
+mod common;
+
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -1302,26 +1304,15 @@ fn grok_stop_blocks_once_per_new_report() {
 
     // The session-end Stop never runs git; the same wrapper does run on a turn end.
     let wrapper = state.join("wrapper");
-    fs::create_dir_all(&wrapper).unwrap();
     let log = state.join("git.log");
-    let real = String::from_utf8(
-        Command::new("/bin/sh")
-            .args(["-c", "command -v git"])
-            .output()
-            .unwrap()
-            .stdout,
-    )
-    .unwrap();
-    fs::write(
-        wrapper.join("git"),
-        format!(
-            "#!/bin/sh\necho \"$*\" >> '{}'\nexec '{}' \"$@\"\n",
-            log.display(),
-            real.trim()
-        ),
-    )
-    .unwrap();
-    set_mode(&wrapper.join("git"), 0o755);
+    let real = common::real_git();
+    common::native_git(
+        &wrapper,
+        &[
+            ("log", &log.display().to_string()),
+            ("real", &real.display().to_string()),
+        ],
+    );
     let path = format!("{}:{}", wrapper.display(), std::env::var("PATH").unwrap());
     let env = [("PATH", path.as_str())];
     for reason in ["shutdown", "channel_closed"] {

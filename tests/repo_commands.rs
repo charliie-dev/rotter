@@ -3,6 +3,8 @@
 //! then plain git on a rebuilt equivalent fixture (positive control), proving the fixture really
 //! reaches the command.
 
+mod common;
+
 use serde_json::Value;
 use std::fs;
 use std::io::Write;
@@ -246,22 +248,17 @@ impl Fixture {
         String::from_utf8(output.stdout).unwrap().trim().to_owned()
     }
 
-    /// A `git` wrapper first on rotter's PATH: `version` prints `version`, `refuse` (a pattern of
-    /// the whole argument list) exits 3, anything else runs the real git. Every call is logged.
+    /// A native `git` helper first on rotter's PATH: `version` prints `version`, `refuse` (text
+    /// in the whole argument list) exits 3, anything else runs the real git. Every call is
+    /// logged.
     fn wrap(&mut self, version: Option<&str>, refuse: Option<&str>) {
         let dir = self.root.join("wrapper");
-        fs::create_dir_all(&dir).unwrap();
-        let log = self.root.join("wrapper.log");
-        let mut script = format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n", log.display());
-        if let Some(version) = version {
-            script += &format!("if [ \"$1\" = version ]; then echo '{version}'; exit 0; fi\n");
-        }
-        if let Some(pattern) = refuse {
-            script += &format!("case \"$*\" in *'{pattern}'*) exit 3;; esac\n");
-        }
-        script += &format!("exec '{}' \"$@\"\n", real_git().display());
-        fs::write(dir.join("git"), script).unwrap();
-        fs::set_permissions(dir.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
+        let log = self.root.join("wrapper.log").display().to_string();
+        let real = real_git().display().to_string();
+        let mut settings = vec![("log", log.as_str()), ("real", real.as_str())];
+        settings.extend(version.map(|version| ("version", version)));
+        settings.extend(refuse.map(|pattern| ("refuse", pattern)));
+        common::native_git(&dir, &settings);
         self.wrapper = Some(dir);
     }
 
@@ -276,14 +273,7 @@ impl Drop for Fixture {
     }
 }
 
-/// The git a plain `git` resolves to from the absolute PATH entries.
-fn real_git() -> PathBuf {
-    std::env::split_paths(&std::env::var_os("PATH").unwrap())
-        .filter(|dir| dir.is_absolute())
-        .map(|dir| dir.join("git"))
-        .find(|path| path.is_file())
-        .expect("git on PATH")
-}
+use common::real_git;
 
 /// The real git's `(major, minor, patch)`.
 fn real_version() -> (u32, u32, u32) {

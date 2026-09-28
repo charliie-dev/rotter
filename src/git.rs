@@ -1,4 +1,4 @@
-use crate::config::{Untrusted, lstat, resolve_trusted, user};
+use crate::config::{Kind, Sources, Untrusted, lstat, resolve_trusted, trusted_file, user};
 use crate::grammar::{create_private, open_regular};
 use crate::json::Json;
 use crate::{
@@ -8,13 +8,13 @@ use crate::{
 use std::cell::Cell;
 use std::ffi::OsStr;
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Which pair of snapshots to compare; there is deliberately no default.
@@ -67,14 +67,15 @@ pub struct Report {
     pub complete: bool,
 }
 
-fn git(
+fn call(
+    git: &Git,
     dir: &Path,
     args: &[&OsStr],
     input: Option<&[u8]>,
     ok: &[i32],
     guard: &[String],
 ) -> Result<Vec<u8>, String> {
-    git_in(dir, args, input, ok, None, None, guard)
+    git_in(git, dir, args, input, ok, Private::Nothing, guard)
 }
 
 /// Oldest git rotter reads a repository with: `safe.bareRepository` exists from 2.38 and the
@@ -124,83 +125,414 @@ pub(crate) fn classify(output: &str) -> GitClass {
     }
 }
 
-/// The class and `git version` text of the git on PATH, asked once per process outside any
-/// repository; below the minimum (or unrecognised) is an error.
-pub(crate) fn git_class() -> Result<(GitClass, &'static str), String> {
-    static CLASS: OnceLock<Result<(GitClass, String), String>> = OnceLock::new();
-    let (class, version) = CLASS
-        .get_or_init(|| {
-            let output = Command::new(crate::install::git_program()?)
-                .arg("version")
-                .current_dir("/")
-                .stdin(Stdio::null())
-                .stderr(Stdio::null())
-                .output()
-                .map_err(|error| format!("cannot run git: {error}"))?;
-            let text = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-            Ok((classify(&text), text))
-        })
-        .as_ref()
-        .map_err(Clone::clone)?;
-    if *class == GitClass::BelowMinimum {
-        return Err(format!(
-            "git reports {version:?}; rotter needs git 2.39.1 or newer to read repositories \
-             safely; put a newer git earlier on PATH"
-        ));
-    }
-    Ok((*class, version))
+/// A filesystem object's identity, `(st_dev, st_ino)`: the same directory under any spelling
+/// (symlinks, firmlinks, case variants on a case-insensitive volume).
+type Identity = (u64, u64);
+
+fn identity(path: &Path) -> io::Result<Identity> {
+    let meta = fs::metadata(path)?;
+    Ok((meta.dev(), meta.ino()))
 }
 
-/// Runs git, resolved from the absolute PATH entries only; `index` points it at a private copy so
-/// index refreshes never touch the repository, `ceiling` stops repository discovery and `guard`
-/// holds the repository's filter and hook resets from [`guard_args`].
+/// Whether `dir` or any directory above it is one of `roots`; an ancestor that cannot be
+/// stat'ed counts as one.
+fn inside(dir: &Path, roots: &[Identity]) -> bool {
+    dir.ancestors().any(|ancestor| match identity(ancestor) {
+        Ok(id) => roots.contains(&id),
+        Err(_) => true,
+    })
+}
+
+/// The trees no git may come from for a run in some directory.
+pub(crate) struct Walk {
+    /// The topmost physical ancestor of the directory (itself included) that holds a `.git`
+    /// entry.
+    pub(crate) repository: Option<PathBuf>,
+    /// Identities of the physical directory and `repository`.
+    roots: Vec<Identity>,
+}
+
+/// Resolves `cwd` physically and walks its parents for `.git` entries (file or directory; an
+/// entry that cannot be checked counts as present). No git runs.
+pub(crate) fn walk(cwd: &Path) -> Result<Walk, String> {
+    let fail = |error: io::Error| format!("cannot resolve {}: {error}", cwd.display());
+    let physical = fs::canonicalize(cwd).map_err(fail)?;
+    let repository = physical
+        .ancestors()
+        .filter(|dir| match fs::symlink_metadata(dir.join(".git")) {
+            Ok(_) => true,
+            Err(error) => error.kind() != io::ErrorKind::NotFound,
+        })
+        .last()
+        .map(Path::to_owned);
+    let mut roots = vec![identity(&physical).map_err(fail)?];
+    if let Some(top) = &repository {
+        roots.push(identity(top).map_err(fail)?);
+    }
+    Ok(Walk { repository, roots })
+}
+
+/// Mach-O (either byte order, 32 or 64 bit) or a universal binary whose big-endian `nfat_arch`
+/// is 1..=20 (a Java class file shares `ca fe ba be` and has its version, ≥ 45, there).
+fn macos_native(header: &[u8]) -> bool {
+    match header {
+        [0xcf, 0xfa, 0xed, 0xfe, ..]
+        | [0xce, 0xfa, 0xed, 0xfe, ..]
+        | [0xfe, 0xed, 0xfa, 0xcf, ..]
+        | [0xfe, 0xed, 0xfa, 0xce, ..] => true,
+        [0xca, 0xfe, 0xba, 0xbe, a, b, c, d, ..] => {
+            (1..=20).contains(&u32::from_be_bytes([*a, *b, *c, *d]))
+        }
+        _ => false,
+    }
+}
+
+fn linux_native(header: &[u8]) -> bool {
+    header.starts_with(b"\x7fELF")
+}
+
+/// Whether the first bytes of a file are this OS's native executable magic; `#!` scripts and
+/// anything else are not.
+fn native(header: &[u8]) -> bool {
+    if cfg!(target_os = "macos") {
+        macos_native(header)
+    } else {
+        linux_native(header)
+    }
+}
+
+/// `<dir>/git` as a candidate: the resolved target of a [`trusted_file`], named `git`, outside
+/// `roots`, and a native executable by its magic, read through [`open_regular`] with owner and
+/// mode taken from that descriptor. None when there is no `git` there; an error names why this
+/// one is skipped. Nothing is run to classify it.
+fn candidate(dir: &Path, roots: &[Identity]) -> Result<Option<PathBuf>, String> {
+    let path = dir.join("git");
+    let resolved = match trusted_file(&path, user(), &lstat) {
+        Ok(resolved) => resolved,
+        Err(Untrusted::Missing) => return Ok(None),
+        Err(Untrusted::Refused(why)) => return Err(format!("{}: {why}", path.display())),
+    };
+    let skip = |why: &str| {
+        Err(format!(
+            "{} ({}): {why}",
+            path.display(),
+            resolved.display()
+        ))
+    };
+    if resolved.file_name() != Some(OsStr::new("git")) {
+        return skip(
+            "resolves to a program not named git (a dispatcher such as a version-manager shim)",
+        );
+    }
+    if resolved.parent().is_none_or(|parent| inside(parent, roots)) {
+        return skip("inside the repository");
+    }
+    let mut file = match open_regular(&resolved) {
+        Ok(Some(file)) => file,
+        Ok(None) => return skip("vanished"),
+        Err(why) => return skip(&why),
+    };
+    let meta = match file.metadata() {
+        Ok(meta) => meta,
+        Err(error) => return skip(&error.to_string()),
+    };
+    if !meta.is_file()
+        || (meta.uid() != user() && meta.uid() != 0)
+        || meta.mode() & 0o022 != 0
+        || meta.mode() & 0o111 == 0
+    {
+        return skip("not an executable owned by you or root that others cannot write");
+    }
+    let mut header = Vec::new();
+    if let Err(error) = Read::by_ref(&mut file).take(8).read_to_end(&mut header) {
+        return skip(&error.to_string());
+    }
+    if !native(&header) {
+        return skip("not a native executable (a script or wrapper)");
+    }
+    Ok(Some(resolved))
+}
+
+/// The first usable `git` on `path` and the usable entries: absolute, through
+/// [`resolve_trusted`], directories, not inside `roots` and without `:` once resolved.
+fn select(path: Option<&OsStr>, roots: &[Identity]) -> Result<(PathBuf, Vec<PathBuf>), String> {
+    let mut program = None;
+    let mut entries: Vec<PathBuf> = Vec::new();
+    let mut skipped = Vec::new();
+    for entry in path.map(std::env::split_paths).into_iter().flatten() {
+        if !entry.is_absolute() {
+            continue;
+        }
+        let Ok(resolved) = resolve_trusted(&entry, user(), &lstat) else {
+            continue;
+        };
+        if lstat(&resolved).map_or(true, |meta| meta.kind != Kind::Dir)
+            || inside(&resolved, roots)
+            || resolved.as_os_str().as_bytes().contains(&b':')
+        {
+            continue;
+        }
+        if program.is_none() {
+            match candidate(&resolved, roots) {
+                Ok(found) => program = found,
+                Err(why) => skipped.push(why),
+            }
+        }
+        entries.push(resolved);
+    }
+    match program {
+        Some(program) => Ok((program, entries)),
+        None if skipped.is_empty() => {
+            Err("cannot find git on the trusted absolute entries of PATH".to_owned())
+        }
+        None => Err(format!(
+            "cannot find a usable git on the trusted absolute entries of PATH; skipped {}",
+            skipped.join("; ")
+        )),
+    }
+}
+
+/// The one git a run uses, chosen before any git call, with the environment its children get
+/// and the private scratch directory that is their TMPDIR.
+pub struct Git {
+    /// The resolved path, spawned exactly.
+    program: PathBuf,
+    /// The usable PATH entries, the PATH of an isolated child.
+    entries: Vec<PathBuf>,
+    /// Some in hook mode: children get only the allowlist, with this HOME.
+    isolated: Option<Option<PathBuf>>,
+    scratch: Scratch,
+    /// `git version`, asked once, outside any repository.
+    version: Result<(GitClass, String), String>,
+}
+
+impl Git {
+    /// Picks the git for a run outside `walk`'s trees; `sources` gives PATH (and, `isolated`,
+    /// HOME).
+    /// The scratch directory already exists, so even the version probe gets it as TMPDIR.
+    pub(crate) fn new(
+        walk: &Walk,
+        scratch: Scratch,
+        sources: &Sources,
+        isolated: bool,
+    ) -> Result<Self, String> {
+        let (program, entries) =
+            select(sources.path.as_deref(), &walk.roots).map_err(|why| match &walk.repository {
+                Some(repository) => format!(
+                    "{why} (entries inside the repository {} are not used)",
+                    repository.display()
+                ),
+                None => why,
+            })?;
+        let mut git = Self {
+            program,
+            entries,
+            isolated: isolated.then(|| sources.home.clone()),
+            scratch,
+            version: Err(String::new()),
+        };
+        git.version = git
+            .command()
+            .arg("version")
+            .current_dir("/")
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .map_err(|error| format!("cannot run git: {error}"))
+            .map(|output| {
+                let text = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+                (classify(&text), text)
+            });
+        Ok(git)
+    }
+
+    /// The git for a CLI run in `dir`, in the inherited environment (TMPDIR aside).
+    pub fn cli(dir: &Path) -> Result<Self, String> {
+        let sources = Sources::from_env();
+        let walk = walk(dir)?;
+        Self::new(&walk, Scratch::new(&sources.temp)?, &sources, false)
+    }
+
+    /// `<resolved path> (<git version>)`, or why that git is not used, for `status`.
+    pub(crate) fn summary(&self) -> String {
+        match self.class() {
+            Ok((_, version)) => format!("{} ({version})", self.program.display()),
+            Err(why) => format!("{}: {why}", self.program.display()),
+        }
+    }
+
+    /// The class and `git version` text; below the minimum (or unrecognised) is an error.
+    pub(crate) fn class(&self) -> Result<(GitClass, &str), String> {
+        let (class, version) = self.version.as_ref().map_err(Clone::clone)?;
+        if *class == GitClass::BelowMinimum {
+            return Err(format!(
+                "git reports {version:?}; rotter needs git 2.39.1 or newer to read repositories \
+                 safely; put a newer git earlier on PATH"
+            ));
+        }
+        Ok((*class, version))
+    }
+
+    /// `git` with the run's environment: TMPDIR is always the scratch directory; isolated, the
+    /// environment is cleared first and gets only PATH (the usable entries), HOME, `LANG=C` and
+    /// `LC_ALL=C`, and the child starts in `/` (every call names its directory with `-C`). No
+    /// loader variables, `DEVELOPER_DIR`, `SDKROOT`, `TOOLCHAINS`, XDG_* or inherited GIT_*.
+    fn command(&self) -> Command {
+        let mut command = Command::new(&self.program);
+        if let Some(home) = &self.isolated {
+            command.env_clear().current_dir("/");
+            if let Ok(path) = std::env::join_paths(&self.entries) {
+                command.env("PATH", path);
+            }
+            if let Some(home) = home {
+                command.env("HOME", home);
+            }
+            command.env("LANG", "C").env("LC_ALL", "C");
+        }
+        command.env("TMPDIR", &self.scratch.dir);
+        command
+    }
+
+    /// `rev-parse --show-toplevel` for `dir` with a time limit, for the install work-tree probe:
+    /// Ok(None) only for a clean "not a git repository", Ok(Some(top)) inside a work tree, and
+    /// an error for anything else (a failure, a timeout, non-UTF-8 output).
+    pub(crate) fn work_tree(&self, dir: &Path) -> Result<Option<PathBuf>, String> {
+        self.class()?;
+        let args = ["rev-parse", "--show-toplevel"].map(OsStr::new);
+        let mut child = self
+            .prepare(dir, &args, false, Private::Nothing, &[])
+            .spawn()
+            .map_err(|error| format!("cannot run git: {error}"))?;
+        let started = Instant::now();
+        while child
+            .try_wait()
+            .map_err(|error| format!("git failed: {error}"))?
+            .is_none()
+        {
+            if started.elapsed() > Duration::from_secs(10) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("git rev-parse --show-toplevel timed out".to_owned());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let output = child
+            .wait_with_output()
+            .map_err(|error| format!("git failed: {error}"))?;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        match output.status.code() {
+            Some(0) => String::from_utf8(output.stdout)
+                .map(|top| Some(PathBuf::from(top.trim_end())))
+                .map_err(|_| "git printed non-UTF-8 output".to_owned()),
+            // Apple's git stub may print xcrun warnings first.
+            Some(128)
+                if stderr
+                    .lines()
+                    .any(|line| line.starts_with("fatal: not a git repository")) =>
+            {
+                Ok(None)
+            }
+            _ => Err(format!(
+                "git rev-parse --show-toplevel failed: {}",
+                stderr.trim()
+            )),
+        }
+    }
+
+    /// The hardened git command for one call in `dir`, with `private` (see [`Private`]) and
+    /// `guard`, the repository's filter and hook resets from [`guard_args`].
+    fn prepare(
+        &self,
+        dir: &Path,
+        args: &[&OsStr],
+        input: bool,
+        private: Private<'_>,
+        guard: &[String],
+    ) -> Command {
+        let mut command = self.command();
+        match private {
+            Private::Nothing => {}
+            Private::Index(index) => {
+                // An unsplit private index keeps git from writing sharedindex files into
+                // $GIT_DIR.
+                command
+                    .env("GIT_INDEX_FILE", index)
+                    .args(["-c", "core.splitIndex=false"]);
+            }
+            Private::Ceiling(ceiling) => {
+                command.env("GIT_CEILING_DIRECTORIES", ceiling);
+            }
+        }
+        command
+            .arg("-C")
+            .arg(dir)
+            .args(["--no-pager", "-c", "core.fsmonitor=false"])
+            // Repository config must not run commands: no implicitly found bare repository, no
+            // $GIT_DIR/hooks, and no index write (what fires index hooks, file or config based).
+            .args([
+                "-c",
+                "safe.bareRepository=explicit",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "diff.autoRefreshIndex=false",
+            ])
+            .args(guard)
+            .args(args)
+            // Never write the index opportunistically; the checked repository stays untouched.
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            // A missing object is an error, never a promisor fetch (honoured from git 2.45.1).
+            .env("GIT_NO_LAZY_FETCH", "1")
+            .env("ROTTER_EMPTY_VALUE", "")
+            .stdin(if input { Stdio::piped() } else { Stdio::null() })
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        command
+    }
+
+    /// Stops when `top` (a repository top level git reported) holds the chosen git or one of the
+    /// PATH entries its children get: git may place the work tree elsewhere than the `.git` walk
+    /// found (GIT_DIR, core.worktree, a gitfile).
+    fn outside(&self, top: &Path) -> Result<(), String> {
+        let id = identity(top).map_err(|error| format!("{}: {error}", top.display()))?;
+        let dirs = self
+            .program
+            .parent()
+            .into_iter()
+            .chain(self.entries.iter().map(PathBuf::as_path));
+        match dirs.into_iter().find(|dir| inside(dir, &[id])) {
+            Some(dir) => Err(format!(
+                "refusing to run git: {} is inside the repository {}",
+                dir.display(),
+                top.display()
+            )),
+            None => Ok(()),
+        }
+    }
+}
+
+/// What a git call is pointed at besides the repository.
+#[derive(Clone, Copy)]
+enum Private<'a> {
+    Nothing,
+    /// A private index copy, so index refreshes never touch the repository.
+    Index(&'a Path),
+    /// A ceiling that stops repository discovery.
+    Ceiling(&'a Path),
+}
+
+/// Runs one git call of the run (see [`Git::prepare`]); an exit code outside `ok` is an error.
 fn git_in(
+    git: &Git,
     dir: &Path,
     args: &[&OsStr],
     input: Option<&[u8]>,
     ok: &[i32],
-    index: Option<&Path>,
-    ceiling: Option<&Path>,
+    private: Private<'_>,
     guard: &[String],
 ) -> Result<Vec<u8>, String> {
-    let mut command = Command::new(crate::install::git_program()?);
-    if let Some(index) = index {
-        // An unsplit private index keeps git from writing sharedindex files into $GIT_DIR.
-        command
-            .env("GIT_INDEX_FILE", index)
-            .args(["-c", "core.splitIndex=false"]);
-    }
-    if let Some(ceiling) = ceiling {
-        command.env("GIT_CEILING_DIRECTORIES", ceiling);
-    }
-    let mut child = command
-        .arg("-C")
-        .arg(dir)
-        .args(["--no-pager", "-c", "core.fsmonitor=false"])
-        // Repository config must not run commands: no implicitly found bare repository, no
-        // $GIT_DIR/hooks, and no index write (what fires index hooks, file or config based).
-        .args([
-            "-c",
-            "safe.bareRepository=explicit",
-            "-c",
-            "core.hooksPath=/dev/null",
-            "-c",
-            "diff.autoRefreshIndex=false",
-        ])
-        .args(guard)
-        .args(args)
-        // Never write the index opportunistically; the checked repository stays untouched.
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        // A missing object is an error, never a promisor fetch (honoured from git 2.45.1).
-        .env("GIT_NO_LAZY_FETCH", "1")
-        .env("ROTTER_EMPTY_VALUE", "")
-        .stdin(if input.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+    let mut child = git
+        .prepare(dir, args, input.is_some(), private, guard)
         .spawn()
         .map_err(|error| format!("cannot run git: {error}"))?;
     if let (Some(input), Some(mut stdin)) = (input, child.stdin.take()) {
@@ -224,32 +556,36 @@ fn git_in(
     }
 }
 
-fn git_text(dir: &Path, guard: &[String], args: &[&str]) -> Result<String, String> {
+fn git_text(git: &Git, dir: &Path, guard: &[String], args: &[&str]) -> Result<String, String> {
     let args: Vec<&OsStr> = args.iter().map(OsStr::new).collect();
-    let output = git(dir, &args, None, &[0], guard)?;
+    let output = call(git, dir, &args, None, &[0], guard)?;
     String::from_utf8(output)
         .map(|text| text.trim_end().to_owned())
         .map_err(|_| "git printed non-UTF-8 output".to_owned())
 }
 
-/// The repository's top-level directory as git reports it; git's version is checked first.
-pub fn toplevel(dir: &Path) -> Result<PathBuf, String> {
-    git_class()?;
-    git_text(dir, &[], &["rev-parse", "--show-toplevel"]).map(PathBuf::from)
+/// The repository's top-level directory as git reports it; git's version is checked first, and
+/// a top level holding the chosen git or its PATH entries stops the run.
+pub fn toplevel(git: &Git, dir: &Path) -> Result<PathBuf, String> {
+    git.class()?;
+    let top = PathBuf::from(git_text(git, dir, &[], &["rev-parse", "--show-toplevel"])?);
+    git.outside(&top)?;
+    Ok(top)
 }
 
 /// `git config --null --name-only --get-regexp <pattern>` in `top`: the matching keys, empty
 /// when none (exit 1); any other failure is an error.
-fn config_keys(top: &Path, pattern: &str) -> Result<Vec<u8>, String> {
+fn config_keys(git: &Git, top: &Path, pattern: &str) -> Result<Vec<u8>, String> {
     let args = ["config", "--null", "--name-only", "--get-regexp", pattern].map(OsStr::new);
-    git_in(top, &args, None, &[0, 1], None, None, &[])
+    git_in(git, top, &args, None, &[0, 1], Private::Nothing, &[])
 }
 
 /// Refuses partial clones and promisor remotes, by key presence: git before 2.45.1 may fetch a
 /// missing object through repository-configured commands. Keys are canonical (lower-case
 /// section and variable); the optional middle also catches a nameless `remote.promisor`.
-fn promisor_gate(top: &Path, version: &str) -> Result<(), String> {
+fn promisor_gate(git: &Git, top: &Path, version: &str) -> Result<(), String> {
     let keys = config_keys(
+        git,
         top,
         r"^(extensions\.partialclone|remote\.(.*\.)?(promisor|partialclonefilter))$",
     )
@@ -306,7 +642,7 @@ fn guard_args(keys: &[u8]) -> Result<Vec<String>, String> {
 /// Whether a working-tree `M` entry differs from its before blob only in stat data (git no
 /// longer checks: diff.autoRefreshIndex=false). The disk file is read through rotter's own
 /// no-follow descriptor and hashed from those bytes without filters; any doubt keeps the entry.
-fn stat_only(top: &Path, entry: &Entry, guard: &[String]) -> bool {
+fn stat_only(git: &Git, top: &Path, entry: &Entry, guard: &[String]) -> bool {
     let (Some((_, old_mode, old_oid)), Some((path, new_mode, new_oid))) = (&entry.old, &entry.new)
     else {
         return false;
@@ -326,15 +662,15 @@ fn stat_only(top: &Path, entry: &Entry, guard: &[String]) -> bool {
         return false;
     }
     let args = ["hash-object", "--no-filters", "--stdin"].map(OsStr::new);
-    git(top, &args, Some(&bytes), &[0], guard)
+    call(git, top, &args, Some(&bytes), &[0], guard)
         .is_ok_and(|out| out.trim_ascii() == old_oid.as_bytes())
 }
 
-/// Private scratch directory under the trusted temp root for the index copy and diff inputs;
-/// removed on drop.
-struct Scratch {
+/// Private scratch directory under the trusted temp root for the index copy and diff inputs,
+/// and every git child's TMPDIR; removed on drop.
+pub(crate) struct Scratch {
     dir: PathBuf,
-    /// `resolve_trusted(temp_dir())`: the ceiling for `git diff --no-index`.
+    /// The resolved temp root: the ceiling for `git diff --no-index`.
     root: PathBuf,
     /// Numbers the per-diff `diff-<n>` subdirectories.
     diffs: Cell<usize>,
@@ -371,8 +707,9 @@ fn temp_root(temp: &Path) -> Result<PathBuf, String> {
 }
 
 impl Scratch {
-    fn new() -> Result<Self, String> {
-        let root = temp_root(&std::env::temp_dir())?;
+    /// A fresh directory under the temp root `temp` (`Sources::temp`).
+    pub(crate) fn new(temp: &Path) -> Result<Self, String> {
+        let root = temp_root(temp)?;
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |time| time.as_nanos());
@@ -454,9 +791,9 @@ fn parse_range(text: &str) -> Option<(usize, usize)> {
 }
 
 /// Line hunks between two texts, computed by Git from exactly these bytes.
-fn diff(scratch: &Scratch, before: &str, after: &str) -> Result<Vec<Hunk>, String> {
-    let dir = scratch.diff_dir()?;
-    let output = diff_in(&dir, &scratch.root, before, after);
+fn diff(git: &Git, before: &str, after: &str) -> Result<Vec<Hunk>, String> {
+    let dir = git.scratch.diff_dir()?;
+    let output = diff_in(git, &dir, &git.scratch.root, before, after);
     let _ = fs::remove_dir_all(&dir);
     let mut hunks = Vec::new();
     for line in String::from_utf8_lossy(&output?).lines() {
@@ -478,7 +815,13 @@ fn diff(scratch: &Scratch, before: &str, after: &str) -> Result<Vec<Hunk>, Strin
 }
 
 /// `git diff --no-index` of `before` and `after`, written once each into the private `dir`.
-fn diff_in(dir: &Path, ceiling: &Path, before: &str, after: &str) -> Result<Vec<u8>, String> {
+fn diff_in(
+    git: &Git,
+    dir: &Path,
+    ceiling: &Path,
+    before: &str,
+    after: &str,
+) -> Result<Vec<u8>, String> {
     let old = write_new(dir, "before", before.as_bytes())?;
     let new = write_new(dir, "after", after.as_bytes())?;
     let args: Vec<&OsStr> = [
@@ -496,7 +839,15 @@ fn diff_in(dir: &Path, ceiling: &Path, before: &str, after: &str) -> Result<Vec<
     .chain([old.as_os_str(), new.as_os_str()])
     .collect();
     // No repository discovery above the scratch directory.
-    git_in(dir, &args, None, &[0, 1], None, Some(ceiling), &[])
+    git_in(
+        git,
+        dir,
+        &args,
+        None,
+        &[0, 1],
+        Private::Ceiling(ceiling),
+        &[],
+    )
 }
 
 fn changes(hunks: &[Hunk], after: bool) -> Vec<Change> {
@@ -590,7 +941,7 @@ enum Source<'a> {
 
 struct Run<'a> {
     top: &'a Path,
-    scratch: Scratch,
+    git: &'a Git,
     options: &'a Options,
     guard: &'a [String],
 }
@@ -639,7 +990,8 @@ impl Run<'_> {
             );
         }
         let bytes = match source {
-            Source::Blob(oid) => git(
+            Source::Blob(oid) => call(
+                self.git,
                 self.top,
                 &[OsStr::new("cat-file"), OsStr::new("blob"), OsStr::new(oid)],
                 None,
@@ -719,7 +1071,8 @@ impl Run<'_> {
         }
         let blob = match source {
             Source::Blob(oid) => Ok(oid.to_owned()),
-            Source::Disk => git(
+            Source::Disk => call(
+                self.git,
                 self.top,
                 &["hash-object", "--no-filters", "--stdin"].map(OsStr::new),
                 Some(&bytes),
@@ -777,7 +1130,7 @@ impl Run<'_> {
                     .and_then(|side| side.text.clone())
                     .unwrap_or_default()
             };
-            diff(&self.scratch, &text(&sides[0]), &text(&sides[1]))?
+            diff(self.git, &text(&sides[0]), &text(&sides[1]))?
         } else {
             Vec::new()
         };
@@ -885,16 +1238,23 @@ impl Run<'_> {
     }
 }
 
-/// Extracts changed units and their comments for one explicitly chosen diff mode.
+/// Extracts changed units and their comments for one explicitly chosen diff mode, with the git
+/// [`Git::cli`] picks for `dir`.
 pub fn extract(dir: &Path, options: &Options) -> Result<Report, String> {
-    let top = toplevel(dir)?;
+    extract_with(&Git::cli(dir)?, dir, options)
+}
+
+/// [`extract`] with an already chosen git; one extraction per [`Git`] (its scratch directory
+/// holds the index copy).
+pub fn extract_with(git: &Git, dir: &Path, options: &Options) -> Result<Report, String> {
+    let top = toplevel(git, dir)?;
     // Before any object is read: the promisor gate for older git, then the filter and hook
     // resets that every later call carries.
-    let (class, version) = git_class()?;
+    let (class, version) = git.class()?;
     if class == GitClass::Gated {
-        promisor_gate(&top, version)?;
+        promisor_gate(git, &top, version)?;
     }
-    let guard = config_keys(&top, r"^(filter|hook)\.")
+    let guard = config_keys(git, &top, r"^(filter|hook)\.")
         .and_then(|keys| guard_args(&keys))
         .map_err(|error| format!("refusing to read {}: {error}", top.display()))?;
     let guard = guard.as_slice();
@@ -904,6 +1264,7 @@ pub fn extract(dir: &Path, options: &Options) -> Result<Report, String> {
                 return Err(format!("invalid base revision: {rev:?}"));
             }
             let commit = git_text(
+                git,
                 &top,
                 guard,
                 &[
@@ -919,10 +1280,15 @@ pub fn extract(dir: &Path, options: &Options) -> Result<Report, String> {
         Mode::Staged | Mode::Worktree | Mode::Full => {
             // "No commits yet" means HEAD does not resolve; a HEAD naming a commit that cannot
             // be read (e.g. missing from a partial clone) is an error, not an empty snapshot.
-            let commit = match git_text(&top, guard, &["rev-parse", "--verify", "--quiet", "HEAD"])
-            {
+            let commit = match git_text(
+                git,
+                &top,
+                guard,
+                &["rev-parse", "--verify", "--quiet", "HEAD"],
+            ) {
                 Ok(_) => Some(
                     git_text(
+                        git,
                         &top,
                         guard,
                         &["rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
@@ -954,7 +1320,7 @@ pub fn extract(dir: &Path, options: &Options) -> Result<Report, String> {
         Some(commit) => commit.clone(),
         None => {
             let args = ["hash-object", "-t", "tree", "--stdin"].map(OsStr::new);
-            String::from_utf8_lossy(&git(&top, &args, Some(b""), &[0], guard)?)
+            String::from_utf8_lossy(&call(git, &top, &args, Some(b""), &[0], guard)?)
                 .trim()
                 .to_owned()
         }
@@ -962,15 +1328,15 @@ pub fn extract(dir: &Path, options: &Options) -> Result<Report, String> {
     // `git diff <tree>` would refresh stat data and rewrite the index even with
     // GIT_OPTIONAL_LOCKS=0 (now off through diff.autoRefreshIndex), so every index read also
     // goes through a private copy.
-    let scratch = Scratch::new()?;
-    let index = scratch.dir.join("index");
+    let index = git.scratch.dir.join("index");
     let real_index = top.join(git_text(
+        git,
         &top,
         guard,
         &["rev-parse", "--git-path", "index"],
     )?);
     copy_index(&real_index, &index)?;
-    let index = Some(index.as_path());
+    let index = Private::Index(&index);
     let mut args = vec!["diff"];
     if matches!(options.mode, Mode::Staged) {
         args.push("--cached");
@@ -989,12 +1355,12 @@ pub fn extract(dir: &Path, options: &Options) -> Result<Report, String> {
     ]);
     let mut entries = if full {
         let listed = git_in(
+            git,
             dir,
             &with_specs(&["ls-files", "-s", "-z", "--full-name"]),
             None,
             &[0],
             index,
-            None,
             guard,
         )?;
         let mut entries: Vec<Entry> = Vec::new();
@@ -1025,23 +1391,23 @@ pub fn extract(dir: &Path, options: &Options) -> Result<Report, String> {
         entries
     } else {
         let mut entries = parse_raw(&git_in(
+            git,
             dir,
             &args_with(&args, &specs),
             None,
             &[0],
             index,
-            None,
             guard,
         )?)?;
         if matches!(options.mode, Mode::Worktree | Mode::Base(_)) {
-            entries.retain(|entry| !stat_only(&top, entry, guard));
+            entries.retain(|entry| !stat_only(git, &top, entry, guard));
         }
         entries
     };
 
     // HEAD→disk diffs report conflicted paths as plain modifications; keep them visible.
     let unmerged_args = with_specs(&["ls-files", "--unmerged", "-z", "--full-name"]);
-    let mut unmerged: Vec<Vec<u8>> = git_in(dir, &unmerged_args, None, &[0], index, None, guard)?
+    let mut unmerged: Vec<Vec<u8>> = git_in(git, dir, &unmerged_args, None, &[0], index, guard)?
         .split(|byte| *byte == 0)
         .filter_map(|record| {
             let tab = record.iter().position(|byte| *byte == b'\t')?;
@@ -1074,7 +1440,7 @@ pub fn extract(dir: &Path, options: &Options) -> Result<Report, String> {
         "-z",
         "--full-name",
     ]);
-    let untracked: Vec<Vec<u8>> = git_in(dir, &untracked_args, None, &[0], index, None, guard)?
+    let untracked: Vec<Vec<u8>> = git_in(git, dir, &untracked_args, None, &[0], index, guard)?
         .split(|byte| *byte == 0)
         .filter(|path| !path.is_empty())
         .map(<[u8]>::to_vec)
@@ -1090,7 +1456,7 @@ pub fn extract(dir: &Path, options: &Options) -> Result<Report, String> {
 
     let run = Run {
         top: &top,
-        scratch,
+        git,
         options,
         guard,
     };
@@ -1156,12 +1522,13 @@ pub fn extract(dir: &Path, options: &Options) -> Result<Report, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Change, GitClass, Hunk, Scratch, changes, classify, diff, guard_args, parse_raw, temp_root,
-        write_new,
+        Change, Git, GitClass, Hunk, changes, classify, diff, guard_args, identity, linux_native,
+        macos_native, parse_raw, select, temp_root, walk, write_new,
     };
+    use std::ffi::OsString;
     use std::fs;
     use std::os::unix::fs::{PermissionsExt, symlink};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     fn temp(name: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!("rotter-git-{name}-{}", std::process::id()));
@@ -1187,18 +1554,174 @@ mod tests {
 
     #[test]
     fn each_diff_uses_a_fresh_subdirectory_removed_afterwards() {
-        let scratch = Scratch::new().unwrap();
-        let hunks = diff(&scratch, "a\n", "b\n").unwrap();
+        let root = temp("diffs");
+        let git = Git::cli(&root).unwrap();
+        let hunks = diff(&git, "a\n", "b\n").unwrap();
         assert_eq!(hunks.len(), 1);
         assert_eq!(
-            fs::read_dir(&scratch.dir).unwrap().count(),
+            fs::read_dir(&git.scratch.dir).unwrap().count(),
             0,
             "diff-0 removed"
         );
-        fs::create_dir(scratch.dir.join("diff-1")).unwrap();
-        let error = diff(&scratch, "a\n", "b\n").unwrap_err();
+        fs::create_dir(git.scratch.dir.join("diff-1")).unwrap();
+        let error = diff(&git, "a\n", "b\n").unwrap_err();
         assert!(error.contains("diff-1"), "{error}");
-        assert_eq!(diff(&scratch, "a\n", "a\nb\n").unwrap().len(), 1, "diff-2");
+        assert_eq!(diff(&git, "a\n", "a\nb\n").unwrap().len(), 1, "diff-2");
+        drop(git);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_magic_is_checked_per_os_with_fat_header_sanity() {
+        let fat = |count: u32| [&[0xca, 0xfe, 0xba, 0xbe][..], &count.to_be_bytes()].concat();
+        for magic in [
+            [0xcf, 0xfa, 0xed, 0xfe],
+            [0xce, 0xfa, 0xed, 0xfe],
+            [0xfe, 0xed, 0xfa, 0xcf],
+            [0xfe, 0xed, 0xfa, 0xce],
+        ] {
+            assert!(macos_native(&magic), "{magic:x?}");
+            assert!(!linux_native(&magic), "{magic:x?}");
+        }
+        assert!(macos_native(&fat(1)) && macos_native(&fat(20)));
+        assert!(!macos_native(&fat(0)) && !macos_native(&fat(21)));
+        // A Java class file: `ca fe ba be`, minor 0, major 52.
+        assert!(!macos_native(&[0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 52]));
+        assert!(!macos_native(&[0xca, 0xfe, 0xba, 0xbe]), "no nfat_arch");
+        assert!(linux_native(b"\x7fELF\x02\x01"));
+        for other in [
+            &b"\x7fELF"[..],
+            b"#!/bin/sh\n",
+            b"\xcf\xfa\xed",
+            b"",
+            b"MZ\x90\x00",
+        ] {
+            assert!(!macos_native(other), "{other:x?}");
+        }
+        for other in [&b"\x7fEL"[..], b"#!/usr/bin/env bash", &fat(2), b""] {
+            assert!(!linux_native(other), "{other:x?}");
+        }
+    }
+
+    /// `<dir>/git` holding `bytes` with `mode`.
+    fn place(dir: &Path, bytes: &[u8], mode: u32) -> PathBuf {
+        fs::create_dir_all(dir).unwrap();
+        let git = dir.join("git");
+        fs::write(&git, bytes).unwrap();
+        fs::set_permissions(&git, fs::Permissions::from_mode(mode)).unwrap();
+        git
+    }
+
+    fn joined(dirs: &[&Path]) -> OsString {
+        std::env::join_paths(dirs).unwrap()
+    }
+
+    #[test]
+    fn unusable_git_candidates_are_skipped_and_the_search_continues() {
+        let root = temp("candidates");
+        // This test binary is a native executable of this OS.
+        let native = fs::read(std::env::current_exe().unwrap()).unwrap();
+        let good = root.join("good");
+        let real = place(&good, &native, 0o755);
+        let cases: Vec<(&str, PathBuf)> = vec![
+            (
+                "script",
+                place(
+                    &root.join("script"),
+                    b"#!/usr/bin/env bash\nexit 0\n",
+                    0o755,
+                ),
+            ),
+            ("short", place(&root.join("short"), b"\x7fE", 0o755)),
+            (
+                "unreadable",
+                place(&root.join("unreadable"), &native, 0o311),
+            ),
+            (
+                "not executable",
+                place(&root.join("noexec"), &native, 0o644),
+            ),
+            (
+                "group-writable",
+                place(&root.join("shared"), &native, 0o775),
+            ),
+        ];
+        // A dispatcher: a link named git to a native program with another name.
+        let shim = root.join("shim");
+        fs::create_dir_all(&shim).unwrap();
+        fs::copy(&real, shim.join("mise")).unwrap();
+        symlink(shim.join("mise"), shim.join("git")).unwrap();
+        let mut dirs: Vec<PathBuf> = cases
+            .iter()
+            .map(|(_, git)| git.parent().unwrap().to_owned())
+            .collect();
+        dirs.push(shim.clone());
+        let bad: Vec<&Path> = dirs.iter().map(PathBuf::as_path).collect();
+        let mut all = bad.clone();
+        all.push(&good);
+        let (program, entries) = select(Some(&joined(&all)), &[]).unwrap();
+        assert_eq!(program, real, "the first usable one, after every skip");
+        assert_eq!(
+            entries.len(),
+            all.len(),
+            "every entry stays on the child PATH"
+        );
+        let error = select(Some(&joined(&bad)), &[]).unwrap_err();
+        for (name, git) in &cases {
+            assert!(
+                error.contains(&git.display().to_string()),
+                "{name}: {error}"
+            );
+        }
+        assert!(error.contains("not a native executable"), "{error}");
+        assert!(error.contains("not named git"), "{error}");
+        // Inside an excluded tree (by identity, the tree's root being an ancestor): the entry is
+        // not even a candidate, nor on the child PATH.
+        let other = temp("candidates-other");
+        let fallback = place(&other.join("bin"), &native, 0o755);
+        let path = joined(&[&good, &other.join("bin")]);
+        let (program, entries) = select(Some(&path), &[identity(&root).unwrap()]).unwrap();
+        assert_eq!((program, entries), (fallback, vec![other.join("bin")]));
+        let error = select(Some(&joined(&[&good])), &[identity(&root).unwrap()]).unwrap_err();
+        assert!(!error.contains("good"), "{error}");
+        fs::remove_dir_all(other).unwrap();
+        // Relative entries and a missing PATH find nothing.
+        assert!(select(Some(&OsString::from("good")), &[]).is_err());
+        assert!(select(None, &[]).is_err());
+        fs::set_permissions(
+            root.join("unreadable/git"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn excluded_roots_are_the_physical_cwd_and_the_topmost_git_ancestor() {
+        let root = temp("walk");
+        let inner = root.join("outer/inner/deep");
+        fs::create_dir_all(&inner).unwrap();
+        fs::create_dir(root.join("outer/.git")).unwrap();
+        fs::write(root.join("outer/inner/.git"), "gitdir: x\n").unwrap();
+        symlink(&inner, root.join("link")).unwrap();
+        let found = walk(&root.join("link")).unwrap();
+        assert_eq!(
+            found.repository,
+            Some(root.join("outer")),
+            "topmost, physically"
+        );
+        assert_eq!(
+            found.roots,
+            [
+                identity(&inner).unwrap(),
+                identity(&root.join("outer")).unwrap()
+            ]
+        );
+        let plain = root.join("plain");
+        fs::create_dir(&plain).unwrap();
+        assert_eq!(walk(&plain).unwrap().repository, None);
+        assert!(walk(&root.join("missing")).is_err());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

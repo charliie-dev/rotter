@@ -1,5 +1,5 @@
-use rotter::config::{self, Config};
-use rotter::{Mode, Options, extract, install, integration, toplevel};
+use rotter::config::{self, Config, Sources};
+use rotter::{Git, Mode, Options, extract_with, hosts, install, integration, toplevel};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -10,7 +10,7 @@ const SKILL: &str = include_str!("../skills/rotter-comment-review/SKILL.md");
 const USAGE: &str = "usage: rotter --skill
        rotter integration (install | uninstall) (claude | grok)
        rotter integration status
-       rotter hook (claude-stop | grok-stop)
+       rotter hook (claude | claude-stop | grok | grok-stop)
        rotter parser install [<name>...]
        rotter parser list
        rotter extract (--staged | --worktree | --base <rev> | --full)
@@ -23,7 +23,9 @@ hook in $CLAUDE_CONFIG_DIR/settings.json (default ~/.claude), keeping a .rotter-
 uninstall removes. integration install grok writes `'<rotter>' hook grok-stop || true` to
 $GROK_HOME/hooks/rotter.json (default ~/.grok; the home must exist), a file rotter owns. Their
 timeout is max(60, parse_timeout_seconds + 30); re-run install after changing
-parse_timeout_seconds. status shows both hosts.
+parse_timeout_seconds. A host directory inside a git work tree is refused. status shows both
+hosts. `hook claude` and `hook grok` are the same hooks as `hook claude-stop` and
+`hook grok-stop`; every `rotter hook ...` exits 0.
 
 parser install fetches each enabled external grammar at its pinned commit (or copies its local
 path), compiles it with cc and caches it under $XDG_CACHE_HOME/rotter/parsers (default
@@ -95,7 +97,7 @@ fn parse_args(args: &[String]) -> Result<(PathBuf, Options, LangArgs), String> {
 
 /// Loads the config for a CLI command; an untrusted config is reported and ignored.
 fn cli_config(repo: Option<&Path>) -> Result<Config, String> {
-    let loaded = config::load(repo)?;
+    let loaded = config::load(repo, &Sources::from_env())?;
     if let Some(note) = loaded.note {
         eprintln!("rotter: {note}");
     }
@@ -103,8 +105,13 @@ fn cli_config(repo: Option<&Path>) -> Result<Config, String> {
 }
 
 /// Applies the config and resolves `--lang` names; `--lang` globs come before `[overrides]`.
-fn configure(dir: &Path, options: &mut Options, languages: LangArgs) -> Result<(), String> {
-    let config = cli_config(Some(&toplevel(dir)?))?;
+fn configure(
+    git: &Git,
+    dir: &Path,
+    options: &mut Options,
+    languages: LangArgs,
+) -> Result<(), String> {
+    let config = cli_config(Some(&toplevel(git, dir)?))?;
     options.grammars = config.languages();
     options.parse_timeout = config.parse_timeout();
     for (pattern, name) in languages {
@@ -127,7 +134,13 @@ fn main() -> ExitCode {
         .collect();
     let Ok(args) = args else {
         eprintln!("rotter: arguments must be UTF-8");
-        return ExitCode::from(2);
+        // Even a malformed `rotter hook …` must not fail the host's turn.
+        let hook = std::env::args_os().nth(1).is_some_and(|arg| arg == "hook");
+        return if hook {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::from(2)
+        };
     };
     let result = match args
         .iter()
@@ -140,33 +153,36 @@ fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         ["hook", rest @ ..] => {
-            // A hook must never fail the host's turn: every `rotter hook …` exits 0, and problems
-            // surface as a systemMessage (Claude) or on stderr (Grok, unknown hooks).
-            match integration::Host::from_hook(rest) {
-                Some(host) => {
+            // A hook must never fail the host's turn: every `rotter hook …` exits 0, even on a
+            // panic, and problems surface as a systemMessage or on stderr, per host.
+            let _ = std::panic::catch_unwind(|| match rest {
+                [name] if let Some(host) = hosts::by_hook(name) => {
                     let mut input = String::new();
                     let _ = std::io::stdin().read_to_string(&mut input);
-                    integration::stop(host, &input);
+                    integration::stop(host, &input, &Sources::for_host(host));
                 }
-                None => eprintln!(
-                    "rotter: unknown hook {:?}; available: claude-stop, grok-stop",
-                    rest.join(" ")
+                _ => eprintln!(
+                    "rotter: unknown hook {:?}; available: {}",
+                    rest.join(" "),
+                    hosts::names()
                 ),
-            }
+            });
             return ExitCode::SUCCESS;
         }
         ["integration", "install", name] => Some(
             cli_config(None)
                 .and_then(|config| integration::install(name, config.parse_timeout_seconds)),
         ),
-        ["parser", "install", names @ ..] => Some(config::load(None).and_then(|loaded| {
-            // Installing needs the user's own config; a refused one is an error here.
-            if let Some(note) = loaded.note {
-                return Err(note);
-            }
-            let names: Vec<String> = names.iter().map(|name| (*name).to_owned()).collect();
-            install::install(&loaded.config, &names)
-        })),
+        ["parser", "install", names @ ..] => {
+            Some(config::load(None, &Sources::from_env()).and_then(|loaded| {
+                // Installing needs the user's own config; a refused one is an error here.
+                if let Some(note) = loaded.note {
+                    return Err(note);
+                }
+                let names: Vec<String> = names.iter().map(|name| (*name).to_owned()).collect();
+                install::install(&loaded.config, &names)
+            }))
+        }
         ["parser", "list"] => Some(cli_config(None).map(|config| install::list(&config))),
         ["integration", "uninstall", name] => Some(integration::uninstall(name)),
         ["integration", "status"] => Some(
@@ -197,11 +213,18 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    if let Err(error) = configure(&dir, &mut options, languages) {
+    let git = match Git::cli(&dir) {
+        Ok(git) => git,
+        Err(error) => {
+            eprintln!("rotter: {error}");
+            return ExitCode::from(2);
+        }
+    };
+    if let Err(error) = configure(&git, &dir, &mut options, languages) {
         eprintln!("rotter: {error}");
         return ExitCode::from(2);
     }
-    match extract(&dir, &options) {
+    match extract_with(&git, &dir, &options) {
         Ok(report) => {
             let text = report.json.to_string();
             if text.len() > 5 << 20 {
