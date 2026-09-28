@@ -250,3 +250,48 @@ Claude Code、Codex、pi 的目前版本及實際載入仍未驗證。本輪尚�
   `rotter integration install claude`（沙箱內無法寫入 Claude 設定）。
 - 每回合比較的是 HEAD 對工作目錄的累積差異，長 session 中每次程式變動都會重審全部變更單元。
 - Codex、pi 依使用者決定不做。
+
+### 外部 parser、設定檔與解析時限（2026-09-28 使用者要求，計畫 revision 16）
+
+計畫經 plan review、security review（無 P0–P2）與外部 review 通過後分三段實作：
+
+- A（grammar／config／timeout）：`Grammar` 取代封閉的語言列舉作為分析單位；
+  `$XDG_CONFIG_HOME/rotter/config.toml`（`parse_timeout_seconds`、`languages`、`[language.<name>]`、
+  `[overrides]`），逐層信任解析（`resolve_trusted`），設定檔在 repo 內或不可信時停用外部語言；
+  每檔解析時限與 hook 整體軟性期限（`min(計算值, 已安裝 timeout) − 15 s`）；`integration install`
+  依設定寫入 `timeout`。
+- B（installer／loader／registry）：`rotter parser install|list`；git grammar 釘 commit、
+  本機 `path` grammar 逐檔信任檢查；在快取內 staging 目錄以 `cc` 編譯，子程序只拿 allowlist
+  環境變數；loader 只在遇到該語言檔案時 lstat 驗證並 dlopen，未安裝為 `parser_not_installed`。
+- C（既有暫存路徑與整合修正）：`Scratch` 的暫存根目錄經 `resolve_trusted`，含 `:` 者拒絕；
+  每次 diff 使用新的 `diff-<n>/`，輸入以 create_new＋O_NOFOLLOW 建立，`GIT_CEILING_DIRECTORIES`
+  限制搜尋；私有 index 只從一般檔案複製（保留 mtime，否則 Git 的 racily-clean 判斷會漏掉同大小的修改）。
+  settings.json 原子寫入（0600、fchmod、不跟隨 symlink），只有 install 建立備份，uninstall 刪除
+  一般檔案的備份；git 只從 PATH 的絕對路徑項目尋找；hook 指令以 `shell_quote` 引用；設定提示
+  每 session 去重；`integration status` 可讀地顯示非整數 timeout；loader 也拒絕位於 repo 內的
+  `parsers/` 與 library。
+
+Registry 手動檢查（需要網路，在沙箱外執行：沙箱 proxy 需要 git 設定檔中的設定，而 installer 的
+allowlist 環境不讀 git 設定檔）。每項 `rotter parser install <name>` 成功，並以 `extract --full`
+在小型樣本檔上回報至少一個帶 leading 註解的單元：
+
+| 名稱 | tag | revision | library 檔名 |
+| --- | --- | --- | --- |
+| python | v0.25.0 | `293fdc02038ee2bf0e2e206711b69c90ac0d413f` | `python-293fdc02…-6c1d2d18.dylib` |
+| javascript | v0.25.0 | `44c892e0be055ac465d5eeddae6d3e194424e7de` | `javascript-44c892e0…-4f8bcb2e.dylib` |
+| typescript | v0.23.2 | `f975a621f4e7f532fe322e13c4f79495e0a7b2e7` | `typescript-f975a621…-c8c65251.dylib` |
+| hcl | v1.2.0 | `fad991865fee927dd1de5e172fb3f08ac674d914` | `hcl-fad99186…-52bd1e51.dylib` |
+| dockerfile | v0.2.0 | `868e44ce378deb68aac902a9db68ff82d2299dd0` | `dockerfile-868e44ce…-0a13bab2.dylib` |
+
+library 檔名由 revision 與 location／symbol 的 FNV-1a hash 算出；各項單元數未記錄在本文件。
+新增依賴 `toml`、`libloading` 以 `=` 釘版；`cargo audit` 在此環境不可用，未執行。
+
+已知限制：
+
+- 解析時限只在 parser 步驟之間檢查，卡在 external scanner 自身 C 迴圈時不會中斷；hook 整體期限
+  是軟性的（git 子程序、單一慢檔案仍可能超過），宿主 timeout 才是硬上限；只讀使用者層級 settings.json。
+- 外部 grammar 的 C 程式在程序內執行，load 時 constructor 即執行；scanner 記憶體安全錯誤等同以使用者
+  身分執行程式碼。不做 fd-based dlopen；不檢查 macOS extended ACL。
+- git 設定檔中的 proxy／CA 不讀取；需 `LD_LIBRARY_PATH` 的工具鏈失敗；ccache 可能寫入 HOME。
+- 群組可寫的 TMPDIR（常見於共用 CI）現在會被拒絕；symlink 或 FIFO 形式的 settings.json 會被拒絕。
+- 只在 `aarch64-apple-darwin` 驗證；O_NOFOLLOW／O_NONBLOCK 常數只定義 macOS 與 Linux x86_64／aarch64。

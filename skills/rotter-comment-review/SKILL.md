@@ -37,7 +37,13 @@ file or directory per batch (use pathspecs, or `jq` over `files[]`), finish and 
 findings of a batch before starting the next, and say which batches were covered.
 
 Exit status: `0` complete, `1` JSON printed but some in-scope file was not analysed,
-`2` error (nothing to review; report the stderr message).
+`2` error (nothing to review; report the stderr message, e.g. an invalid rotter config or a
+refused `TMPDIR`).
+
+A line on stderr such as `rotter: config … refused: …; external languages disabled` (or the
+same text in a hook `systemMessage`) is a config note: the report is still valid for the
+builtin languages, but files of the user's external languages were not analysed. Mention the
+note to the user; do not edit their config or environment yourself.
 
 ## 2. Read the report
 
@@ -46,7 +52,16 @@ Exit status: `0` complete, `1` JSON printed but some in-scope file was not analy
   often a grammar limitation, not a real error): its units are usable, but a unit with
   `overlaps_syntax_error: true` may be cut or misplaced, so read that range in the file.
   Other statuses except `ok` mean that side was not analysed; `not_in_scope` files are outside
-  the seven languages.
+  the seven builtin languages and the external languages the user enabled. In particular:
+  - `parser_not_installed`: the file's language is enabled in the user's rotter config but its
+    grammar is not installed (or its cached library was refused). Tell the user and ask them
+    to run `rotter parser install <name>` (the name is in `language` and `detail`). Never run
+    `rotter parser install` yourself: it downloads and compiles code that then runs in every
+    repository, so it needs the user's approval and the user runs it.
+  - `parse_timeout`: parsing took longer than `parse_timeout_seconds` (rotter config, default
+    60), or the hook's time budget ran out before or during this file. Report the file as not
+    checked; you may rerun `rotter extract` limited to it with `-- <path>`.
+  - `partial` is covered above: usable, with care around syntax errors.
 - `units[]`: a changed declaration, function, binding, or config key.
   `changed_lines` are lines changed on that side; `gaps_between_lines` marks where lines
   exist only on the other side. For example `[[6, 7]]` on the `after` side means lines were
