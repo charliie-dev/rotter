@@ -70,8 +70,10 @@ JSON schema 標為 `rotter.extract.poc/0`，仍可能變動。
   `text` 必須等於快照在該範圍的原文。`blob` 是該快照的 Git blob id，可用來核對。
 
 CLI 只讀：Git 以 `GIT_OPTIONAL_LOCKS=0`、`core.fsmonitor=false` 執行，並透過私有 index 副本
-（`GIT_INDEX_FILE`）讀取，避免 `git diff` refresh 時重寫 `.git/index`。`git` 只從 PATH 中的
-絕對路徑項目尋找（相對項目如 `.` 會被略過）。只讀取內建與已啟用語言的檔案內容；其他檔案只列路徑。
+（`GIT_INDEX_FILE`）讀取，避免 `git diff` refresh 時重寫 `.git/index`。`git` 只用 PATH 中
+受信任、不在目前 repo 內的原生 `git`（相對項目、腳本、mise／asdf 等 shim 都會被略過），每個 git
+子程序的 TMPDIR 是私有的 scratch 目錄；hook 中的 git 另只拿到固定的環境變數。細節見
+[宿主契約](docs/hosts.md)。只讀取內建與已啟用語言的檔案內容；其他檔案只列路徑。
 
 Git 最低版本為 2.39.1（`safe.bareRepository` 自 2.38 起才有，CVE-2022-23521 的 `.gitattributes`
 溢位在 2.39.1 修正；2.38.3 以上的 2.38 修補版也一律拒絕）。在第一次尋找 repo 之前（包括 CLI 與
@@ -239,13 +241,19 @@ binary 被移除或換成不認得該子指令的舊版時，也不會以退出�
 `status` 會顯示 `installed (timeout N, expected M)`。install 前先檢查 binary 本身：它與上層每一層
 目錄須屬於使用者或 root 且不可被群組／他人寫入，路徑不可含 `$`、`` ` ``、NUL 或換行（Grok 會
 展開指令中的 `$VAR`）；不符時退出碼 2、不寫入任何檔案，`status` 的 `executable:` 行也會顯示。
+宿主目錄位於 git work tree 內時 install 一律拒絕（checkout 或 commit 可能改變 hook）；`status` 的
+`git:` 行顯示 hook 會用的 git，或為何沒有可用的 git。擁有權的確切形式與各宿主的來源見
+[宿主契約](docs/hosts.md)。
 
 Claude Code：`install` 在 `$CLAUDE_CONFIG_DIR/settings.json`（預設 `~/.claude/settings.json`）的
 `hooks.Stop` 加入上述指令。修改前把原內容備份成 `settings.json.rotter-bak`（權限 0600），
 重複執行不會重複加入，binary 路徑、timeout 或舊的指令形式（沒有 `|| true`）改變時會更新成一筆；
 其他設定與 hooks 不動。`uninstall` 只移除這一筆（兩種形式皆可），並刪除 `settings.json.rotter-bak`
 （即使沒有安裝過；只刪一般檔案，symlink 等會保留並提示）。settings.json 以暫存檔（0600，不跟隨
-symlink）原子替換並保留原權限；settings.json 本身須是一般檔案（symlink、FIFO 會報錯）。
+symlink）原子替換並保留原權限；settings.json 本身須是一般檔案（symlink、FIFO 會報錯）、屬於
+使用者且群組／他人不可寫（否則提示 `chmod go-w`），含重複 key 時拒絕改寫；`CLAUDE_CONFIG_DIR`
+目錄須已存在（不會建立）。只有確切的 `'<路徑>' hook claude-stop || true` 形式算是 rotter 的項目，
+其他項目不動；uninstall 只移除 rotter 自己清空的 group；寫入前重讀檔案，期間被改過就放棄。
 
 Grok Build：Grok 的 home 為絕對路徑的 `$GROK_HOME`，否則為 `$HOME/.grok`（相對的 `GROK_HOME`
 被忽略；兩者皆無時退出碼 2）。home 必須已存在，經與設定檔相同的逐層信任解析後，home 與其中的
@@ -275,9 +283,12 @@ session 來自 `sessionId`，工作目錄來自 `cwd`，沒有時用 `workspaceR
 字元，否則不做任何事；`reason`、`lastAssistantMessage` 不會被輸出。Claude hook 以
 `systemMessage` 顯示非阻擋的訊息；Grok 沒有 `systemMessage`，Grok hook 的 stdout 只會是決定 JSON
 或空白，提示寫到 stderr（Grok 只在失敗時顯示），因此不標記為已提示，每次都會再寫。
+`hook claude`／`hook grok` 與 `hook claude-stop`／`hook grok-stop` 是同一個 hook。每個宿主在每個
+session 最多連續要求兩次審查，下一次改為靜默並把計數歸零（沒有要求的 Stop 也會歸零）；計數無法
+讀寫，或缺少可用的 session id 時，一律不要求（fail closed）。
 
 去重：狀態存放在 `${XDG_STATE_HOME:-~/.local/state}/rotter/`（可用絕對路徑的 `ROTTER_STATE_DIR`
-改；沒有可用的絕對路徑時不去重）。每個宿主在每個 session 有一個「上次阻擋」欄位
+改；沒有可用的絕對路徑時不去重，迴圈上限也無法計數，因此不會要求審查）。每個宿主在每個 session 有一個「上次阻擋」欄位
 （`claude-stop/`、`grok-stop/`），內容是 repo 頂層路徑（`git rev-parse --show-toplevel`，不是原始
 cwd）加報告內容的 fingerprint。報告與任一宿主的欄位相同時不再要求；阻擋的 JSON 寫出並 flush 到
 stdout 之後，才更新發出阻擋的那個宿主的欄位。因此原生 Grok hook 與 Claude 相容項目對同一份報告
