@@ -2,7 +2,7 @@
 
 針對 Git diff 檢查程式註解的 Rust 專案。目前是 POC：`rotter extract` 擷取變更單元與相關註解，
 輸出 JSON；語意判斷交給 coding agent 依 [共用 skill](skills/rotter-comment-review/SKILL.md) 執行。
-skill 以 `rotter --skill` 隨 binary 發佈；`rotter integration install claude` 註冊 Claude Code Stop hook。
+skill 以 `rotter --skill` 隨 binary 發佈；`rotter integration install claude|grok` 註冊 Claude Code／Grok Build Stop hook。
 
 ## 開發環境
 
@@ -76,7 +76,7 @@ CLI 只讀：Git 以 `GIT_OPTIONAL_LOCKS=0`、`core.fsmonitor=false` 執行，�
 Git 最低版本為 2.39.1（`safe.bareRepository` 自 2.38 起才有，CVE-2022-23521 的 `.gitattributes`
 溢位在 2.39.1 修正；2.38.3 以上的 2.38 修補版也一律拒絕）。在第一次尋找 repo 之前（包括 CLI 與
 hook 一開始的 `rev-parse --show-toplevel`）先在 repo 外執行 `git version`；版本較舊或無法辨識時
-CLI 退出碼 2，hook 不阻擋，每個 session 以一則 `systemMessage` 提示。
+CLI 退出碼 2，hook 不阻擋：Claude hook 每個 session 以一則 `systemMessage` 提示，Grok hook 在 stderr 提示。
 
 信任說明（repo 內容不受信任）：hook 會在宿主尚未信任的資料夾中執行，repo 的設定可能要求 git
 執行指令。擷取期間的每個 git 呼叫（CLI 與 hook、所有模式）都停用以下由 repo 控制的指令路徑：
@@ -94,7 +94,8 @@ CLI 退出碼 2，hook 不阻擋，每個 session 以一則 `systemMessage` 提�
   HEAD 指向缺少的 commit 則是擷取錯誤（HEAD 無法解析才算「尚無 commit」）。git 2.39.1–2.45.0
   不依賴這個變數：repo 有 `extensions.partialClone`、`remote.*.promisor` 或
   `remote.*.partialclonefilter`（不論值，含沒有名稱的 `remote.promisor`）時，在讀取任何物件前
-  拒絕（CLI 退出碼 2 並指出 partial clone／promisor；hook 以 `systemMessage` 提示）。macOS
+  拒絕（CLI 退出碼 2 並指出 partial clone／promisor；Claude hook 以 `systemMessage` 提示，Grok hook
+  退出碼 0、stdout 為空、在 stderr 提示）。macOS
   內建的舊版 Apple Git（例如 2.39.x）因此無法處理 partial clone，請把較新的 git 放在 PATH 前面。
 - 子模組：`git diff --ignore-submodules=dirty`，不在子模組中以其自身設定執行 `git status`
   （gitlink commit 的變更仍會列出並略過）。
@@ -225,34 +226,74 @@ skill 已編進 binary，不需另外安裝或維護：`rotter --skill` 印出�
 ```sh
 cargo install --path . --locked
 rotter integration install claude     # 在 Claude Code settings.json 加入 Stop hook
-rotter integration status
+rotter integration install grok       # 寫入 Grok Build 的 hooks/rotter.json
+rotter integration status             # 兩個宿主的狀態、相容性檢查與 binary 信任檢查
 rotter integration uninstall claude
+rotter integration uninstall grok
 ```
 
-`install` 會在 `$CLAUDE_CONFIG_DIR/settings.json`（預設 `~/.claude/settings.json`）的 `hooks.Stop`
-加入 `'<rotter 絕對路徑>' hook claude-stop`，`timeout` 為 `max(60, parse_timeout_seconds + 30)`；
-**修改 `parse_timeout_seconds` 後須重新執行 `rotter integration install claude`**，`status` 會顯示
-`installed (timeout N, expected M)`。修改前把原內容備份成 `settings.json.rotter-bak`（權限 0600），
-重複執行不會重複加入，binary 路徑或 timeout 改變時會更新；其他設定與 hooks 不動。
-`uninstall` 只移除這一筆，並刪除 `settings.json.rotter-bak`（即使沒有安裝過；只刪一般檔案，
-symlink 等會保留並提示）。settings.json 以暫存檔（0600，不跟隨 symlink）原子替換並保留原權限；
-settings.json 本身須是一般檔案（symlink、FIFO 會報錯）。
+兩個宿主的 hook 指令都是 `'<rotter 絕對路徑>' hook claude-stop || true`／`… hook grok-stop || true`：
+binary 被移除或換成不認得該子指令的舊版時，也不會以退出碼 2 迫使宿主續跑。每個
+`rotter hook <任何名稱>` 都以退出碼 0 結束（未知名稱只在 stderr 提示）。`timeout` 為
+`max(60, parse_timeout_seconds + 30)`；**修改 `parse_timeout_seconds` 後須重新執行 install**，
+`status` 會顯示 `installed (timeout N, expected M)`。install 前先檢查 binary 本身：它與上層每一層
+目錄須屬於使用者或 root 且不可被群組／他人寫入，路徑不可含 `$`、`` ` ``、NUL 或換行（Grok 會
+展開指令中的 `$VAR`）；不符時退出碼 2、不寫入任何檔案，`status` 的 `executable:` 行也會顯示。
 
-`rotter hook claude-stop` 每次 Claude 要結束回合時，在 session 的 `cwd` 執行
+Claude Code：`install` 在 `$CLAUDE_CONFIG_DIR/settings.json`（預設 `~/.claude/settings.json`）的
+`hooks.Stop` 加入上述指令。修改前把原內容備份成 `settings.json.rotter-bak`（權限 0600），
+重複執行不會重複加入，binary 路徑、timeout 或舊的指令形式（沒有 `|| true`）改變時會更新成一筆；
+其他設定與 hooks 不動。`uninstall` 只移除這一筆（兩種形式皆可），並刪除 `settings.json.rotter-bak`
+（即使沒有安裝過；只刪一般檔案，symlink 等會保留並提示）。settings.json 以暫存檔（0600，不跟隨
+symlink）原子替換並保留原權限；settings.json 本身須是一般檔案（symlink、FIFO 會報錯）。
+
+Grok Build：Grok 的 home 為絕對路徑的 `$GROK_HOME`，否則為 `$HOME/.grok`（相對的 `GROK_HOME`
+被忽略；兩者皆無時退出碼 2）。home 必須已存在，經與設定檔相同的逐層信任解析後，home 與其中的
+`hooks/` 都須是屬於使用者本人（不接受 root）、群組／他人不可寫的目錄；`hooks/` 不存在時以 0700
+建立（不建立上層目錄）。`install` 寫入 `hooks/rotter.json`，這個檔案完全屬於 rotter（仿 herdr 的
+`herdr.json`，不做備份），內容恰為
+`{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"…","timeout":N}]}]}}`：先以
+create_new＋O_NOFOLLOW 建立權限恰為 0600 的 `rotter.json.rotter-tmp`（不以 `.json` 結尾，Grok 不會
+載入；殘留的一般檔案會先刪除），再 rename。既有的 `rotter.json` 若是 symlink 或非一般檔案、不屬於
+使用者、群組／他人可寫，或不是上述格式（多了 `env`、`matcher`、其他事件等），install 與 uninstall
+都以退出碼 2 結束並保留原檔。`uninstall` 只刪除通過上述檢查的檔案；不存在時顯示 `not installed`。
+
+相容性：Grok 預設（`[compat.claude] hooks = true`）也會執行 `~/.claude/settings.json`（固定路徑）
+中的 hooks。`status` 以唯讀方式檢查 `$HOME/.claude/settings.json`：含 rotter 項目時顯示
+`found a Claude entry that Grok's Claude compatibility can pick up (whether compat is enabled was not checked)`；
+無法讀取或不尋常的檔案（權限 0000、FIFO 等）只顯示 `unknown`，不會讓 `status` 失敗。
+它不判斷 `GROK_CLAUDE_HOOKS_ENABLED` 或 `[compat.claude]` 的實際設定。已安裝 Claude 整合且 Grok
+的相容性開啟時，Grok 整合是選用的；若不想兩者重疊，請停用其中一個（uninstall 其一，或關閉 Grok
+的 Claude 相容性）。兩者同時啟用時，同一份報告只會被要求一次（見下方去重）。
+
+`rotter hook claude-stop`／`grok-stop` 每次宿主要結束回合時，在 session 的工作目錄執行
 `rotter extract --worktree --include-untracked`；若有關聯到註解的變更單元，就回傳
-`decision: "block"`，請 agent 依 `rotter --skill` 審查。同一 session 中報告內容未變則不再要求；
-由 hook 造成的續跑（`stop_hook_active`）一律放行，所以每回合最多多一次審查。
-擷取失敗只以 `systemMessage` 提示，不阻擋；設定檔提示（HOME 未設、設定被拒、設定錯誤）
-同一 session 中，與上一次相同的提示不再重複（只比對最近一次）。狀態存放在
-`${XDG_STATE_HOME:-~/.local/state}/rotter/`（可用絕對路徑的 `ROTTER_STATE_DIR` 改；
-沒有可用的絕對路徑時不去重）。
+`decision: "block"`，請 agent 依 `rotter --skill` 審查。由 hook 造成的續跑（`stop_hook_active`／
+`stopHookActive`）一律放行，所以每回合最多多一次審查；`reason` 存在且不是 `end_turn` 時（Grok
+session 結束時的 `channel_closed`／`shutdown`，其決定會被忽略）直接放行、不執行 git。Grok hook 的
+session 來自 `sessionId`，工作目錄來自 `cwd`，沒有時用 `workspaceRoot`，且須是絕對路徑、不含控制
+字元，否則不做任何事；`reason`、`lastAssistantMessage` 不會被輸出。Claude hook 以
+`systemMessage` 顯示非阻擋的訊息；Grok 沒有 `systemMessage`，Grok hook 的 stdout 只會是決定 JSON
+或空白，提示寫到 stderr（Grok 只在失敗時顯示），因此不標記為已提示，每次都會再寫。
 
-hook 的整體軟性期限為 `min(依目前設定計算的 timeout, 已安裝項目的 timeout) − 15 秒`
-（只讀使用者層級的 settings.json；project／local／managed 設定不會讀到，估計值可能偏長）。
+去重：狀態存放在 `${XDG_STATE_HOME:-~/.local/state}/rotter/`（可用絕對路徑的 `ROTTER_STATE_DIR`
+改；沒有可用的絕對路徑時不去重）。每個宿主在每個 session 有一個「上次阻擋」欄位
+（`claude-stop/`、`grok-stop/`），內容是 repo 頂層路徑（`git rev-parse --show-toplevel`，不是原始
+cwd）加報告內容的 fingerprint。報告與任一宿主的欄位相同時不再要求；阻擋的 JSON 寫出並 flush 到
+stdout 之後，才更新發出阻擋的那個宿主的欄位。因此原生 Grok hook 與 Claude 相容項目對同一份報告
+只要求一次；兩者因 timeout 不同而得到不同報告時各要求一次，之後都不再要求；報告改變後又變回先前
+內容時，可能再要求一次（除非另一宿主上次阻擋的正是它）。非阻擋的提示（設定提示、「無法分析」、
+擷取失敗）另存於 `claude-stop-notes/`、`claude-stop-errors/`，只比對最近一次，與上述欄位無關。
+兩個 hook 若同時執行，偶爾可能重複要求（可接受）。
+
+hook 的整體軟性期限為 `min(依目前設定計算的 timeout, 已安裝項目的 timeout) − 15 秒`：Claude 只讀
+使用者層級的 settings.json（project／local／managed 設定不會讀到，估計值可能偏長）；Grok 讀
+`hooks/rotter.json`（不跟隨 symlink、FIFO 不會卡住），讀不到時以 Grok 的預設 600 秒計。
 期限過後尚未開始的檔案直接標 `parse_timeout`。這只涵蓋逐檔的讀取、diff、解析與關聯：
-git 子程序或單一慢檔案仍可能超時，宿主 timeout 才是硬上限。
+git 子程序或單一慢檔案仍可能超時，宿主 timeout 才是硬上限。`|| true` 讓 sh 成為 rotter 的父程序；
+宿主逾時只殺 sh 時，rotter 會跑到軟性期限為止。
 
-Grok Build 會讀取 Claude Code hooks；hook 也接受 Grok 的 `stopHookActive` 欄位，
-但尚未在 Grok 實測。其他限制見 [階段計畫](PLAN.md)。相關範圍與進度見 [階段計畫](PLAN.md)；套件來源見
+Grok 整合尚未在真實的 Grok session 實測（包括 Grok 是否依序執行 Stop handler、逾時時如何結束
+子程序）。其他限制與進度見 [階段計畫](PLAN.md)；套件來源見
 [parser 依賴查核](docs/parser-dependencies.md)。原始研究保留在
 [2026-09-17 交接](HANDOFF-2026-09-17.md)。

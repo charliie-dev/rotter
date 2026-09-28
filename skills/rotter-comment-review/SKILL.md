@@ -41,7 +41,7 @@ Exit status: `0` complete, `1` JSON printed but some in-scope file was not analy
 refused `TMPDIR`).
 
 A line on stderr such as `rotter: config … refused: …; external languages disabled` (or the
-same text in a hook `systemMessage`) is a config note: the report is still valid for the
+same text in a hook `systemMessage`, or on the Grok hook's stderr) is a config note: the report is still valid for the
 builtin languages, but files of the user's external languages were not analysed. Mention the
 note to the user; do not edit their config or environment yourself.
 

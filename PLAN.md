@@ -31,7 +31,7 @@ Rust 同時是實作語言和受檢語言，兩者是不同的決定。Rust 1.98
 | 1. 確認第一版範圍 | 確認只讀範圍、CLI 與 agent 分工、diff 語意、Shell 方言及驗收要求。 | 使用者確認下列範圍，沒有會阻擋七語言驗證的範圍歧義。 | 範圍草案已完成，待確認。 |
 | 2. 建立最小測試骨架 | 先核對目錄現況；以 mise 管理工具，以 Cargo 鎖定候選解析器依賴，建立測試入口。 | 能執行最小測試，依賴版本與建置需求有紀錄。 | 已完成；格式、Clippy、17 項 parser 測試通過。 |
 | 3. 驗證七語言解析與註解關聯 | 逐語言建立變更前後的固定測試檔，核對註解種類、所屬區塊、原文與範圍。 | 測試能重現結果；支援範圍與解析限制清楚，未解決問題沒有被當成通過。 | POC 關聯規則已實作並有七語言測試；已知限制見「2026-09-28 POC」。 |
-| 4. 完成 CLI 與 agent 整合 | 依下列順序實作、驗證。 | 各子步驟分別達到驗收要求。 | 4.1、4.2 POC 完成；4.3 做過一輪合成校準；4.4 Claude Code Stop hook 已實作，尚未在宿主實際註冊測試。 |
+| 4. 完成 CLI 與 agent 整合 | 依下列順序實作、驗證。 | 各子步驟分別達到驗收要求。 | 4.1、4.2 POC 完成；4.3 做過一輪合成校準；4.4 Claude Code Stop hook 已實作，尚未在宿主實際註冊測試；4.5 Grok Build Stop hook 已實作，尚未在 Grok 實測。 |
 
 步驟四依序進行：
 
@@ -250,6 +250,28 @@ Claude Code、Codex、pi 的目前版本及實際載入仍未驗證。本輪尚�
   `rotter integration install claude`（沙箱內無法寫入 Claude 設定）。
 - 每回合比較的是 HEAD 對工作目錄的累積差異，長 session 中每次程式變動都會重審全部變更單元。
 - Codex、pi 依使用者決定不做。
+
+### 4.5 Grok Build Stop hook（計畫 revision 6，2026-09-29）
+
+計畫經 plan review（READY）、security review（無 P0–P2）與外部 review（READY）後分兩段實作。
+S0a：擷取期間停用 repo 定義的指令（filter、hook、promisor lazy fetch、子模組 status、隱含 bare repo），
+git 最低 2.39.1，見 README 信任說明。S0b：
+
+- `rotter integration install|uninstall grok` 管理 `$GROK_HOME/hooks/rotter.json`（`GROK_HOME` 須為絕對
+  路徑，否則 `$HOME/.grok`）：home 須已存在並經 `resolve_trusted`，home 與 `hooks/` 須屬於使用者本人且
+  群組／他人不可寫；檔案內容恰為單一 Stop handler，以 create_new＋O_NOFOLLOW 的 0600 暫存檔 rename 寫入；
+  不是 rotter 產生、不安全或 symlink 的檔案一律保留並以退出碼 2 報告。
+- 兩個宿主的指令改為 `'<exe>' hook <host>-stop || true`，`install claude` 會把舊形式換成新形式；
+  每個 `rotter hook …` 都以退出碼 0 結束。install 前檢查 binary 路徑（`trusted_file`，不含 `$`、`` ` ``、
+  NUL、換行）。
+- `status` 列出 claude 與 grok 的狀態（含路徑）、唯讀且容錯的 Claude 相容性檢查與 binary 信任結果。
+- `hook grok-stop` 與 `hook claude-stop` 共用核心：`reason` 不是 `end_turn` 時放行；Grok 的 cwd 須為
+  絕對路徑且無控制字元；Grok 的提示寫到 stderr、不標記為已提示；執行期限讀 `rotter.json`（預設 600）。
+- 去重改為每個宿主一個「上次阻擋」欄位（以 repo 頂層路徑＋報告為 key，flush 後才寫入），任一欄位相同
+  即不再要求；非阻擋的提示另存，不影響欄位。
+
+尚未完成：未在真實 Grok session 實測（Stop 輸入／輸出、handler 是否依序執行、逾時時是否只殺 sh）。
+非目標：專案層級 `.grok/hooks`、Grok TOML 設定中的 hooks、自動關閉 Grok 的 Claude 相容性。
 
 ### 外部 parser、設定檔與解析時限（2026-09-28 使用者要求，計畫 revision 16）
 
