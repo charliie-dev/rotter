@@ -294,4 +294,6 @@ library 檔名由 revision 與 location／symbol 的 FNV-1a hash 算出；各項
   身分執行程式碼。不做 fd-based dlopen；不檢查 macOS extended ACL。
 - git 設定檔中的 proxy／CA 不讀取；需 `LD_LIBRARY_PATH` 的工具鏈失敗；ccache 可能寫入 HOME。
 - 群組可寫的 TMPDIR（常見於共用 CI）現在會被拒絕；symlink 或 FIFO 形式的 settings.json 會被拒絕。
+  使用者於 2026-09-28 確認維持拒絕 symlink 形式的 settings.json（避免把 dotfile 管理的連結悄悄換成一般檔案）；
+  透過 symlink 目錄（如 `~/.claude -> ~/.config/claude`）存取仍可正常運作。
 - 只在 `aarch64-apple-darwin` 驗證；O_NOFOLLOW／O_NONBLOCK 常數只定義 macOS 與 Linux x86_64／aarch64。
