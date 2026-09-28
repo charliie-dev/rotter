@@ -1,5 +1,5 @@
 use rotter::config::{self, Config};
-use rotter::{Mode, Options, extract, integration, toplevel};
+use rotter::{Mode, Options, extract, install, integration, toplevel};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -11,6 +11,8 @@ const USAGE: &str = "usage: rotter --skill
        rotter integration (install | uninstall) claude
        rotter integration status
        rotter hook claude-stop
+       rotter parser install [<name>...]
+       rotter parser list
        rotter extract (--staged | --worktree | --base <rev> | --full)
                       [--include-untracked] [--lang <glob>=<language>]... [-C <dir>]
                       [-- <pathspec>...]
@@ -20,6 +22,10 @@ integration install claude registers `rotter hook claude-stop` as a Claude Code 
 $CLAUDE_CONFIG_DIR/settings.json (default ~/.claude), keeping a .rotter-bak copy. Its timeout is
 max(60, parse_timeout_seconds + 30); re-run it after changing parse_timeout_seconds.
 
+parser install fetches each enabled external grammar at its pinned commit (or copies its local
+path), compiles it with cc and caches it under $XDG_CACHE_HOME/rotter/parsers (default
+~/.cache). Nothing else downloads or compiles. parser list shows enabled and available grammars.
+
 Prints changed code units and their related comments as JSON. --full reports every commented
 unit of the tracked working-tree files instead of a diff. Pathspecs limit any mode.
 --lang parses files whose repository-relative path matches <glob> as <language> (go, lua, nix,
@@ -27,7 +33,8 @@ bash, sh, yaml, toml, rust, or an enabled external language), ahead of config ov
 extension and shebang detection; `*` stays within one directory, `**` crosses directories. The
 first matching --lang wins.
 Config: $XDG_CONFIG_HOME/rotter/config.toml (default ~/.config) sets parse_timeout_seconds
-(default 60), [language.<name>] external grammars and [overrides] <glob> = <language>.
+(default 60), languages = [..] registry grammars to enable, [language.<name>] external grammars
+and [overrides] <glob> = <language>.
 Exit status: 0 complete, 1 printed but incomplete (unreadable, unparsed or unsupported files), 2 error.";
 
 /// `--lang` values, resolved once the config says which external languages exist.
@@ -142,6 +149,15 @@ fn main() -> ExitCode {
             cli_config(None)
                 .and_then(|config| integration::install(name, config.parse_timeout_seconds)),
         ),
+        ["parser", "install", names @ ..] => Some(config::load(None).and_then(|loaded| {
+            // Installing needs the user's own config; a refused one is an error here.
+            if let Some(note) = loaded.note {
+                return Err(note);
+            }
+            let names: Vec<String> = names.iter().map(|name| (*name).to_owned()).collect();
+            install::install(&loaded.config, &names)
+        })),
+        ["parser", "list"] => Some(cli_config(None).map(|config| install::list(&config))),
         ["integration", "uninstall", name] => Some(integration::uninstall(name)),
         ["integration", "status"] => Some(
             cli_config(None).and_then(|config| integration::status(config.parse_timeout_seconds)),

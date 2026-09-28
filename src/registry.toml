@@ -1,0 +1,117 @@
+# Grammars `languages = [..]` in config.toml can enable. Each is pinned to the commit of its
+# latest release tag (from `git ls-remote`, annotated tags peeled); node kinds come from that
+# commit's src/node-types.json. Pins are trust-on-first-use of upstream: updating one is a
+# code-review event. `location` is the grammar directory (holding src/) inside the checkout.
+
+# tag v0.25.0 (annotated, peeled)
+[python]
+url = "https://github.com/tree-sitter/tree-sitter-python"
+revision = "293fdc02038ee2bf0e2e206711b69c90ac0d413f"
+symbol = "tree_sitter_python"
+extensions = ["py", "pyi"]
+units = [
+    "function_definition",
+    "class_definition",
+    "assignment",
+    "augmented_assignment",
+    "type_alias_statement",
+    "import_statement",
+    "import_from_statement",
+]
+functions = ["function_definition"]
+function_values = ["lambda"]
+attributes = ["decorator"]
+directives = { "#!" = "shebang", "# type:" = "type_comment", "# noqa" = "noqa", "# pylint:" = "pylint_directive" }
+
+# tag v0.25.0 (annotated, peeled)
+[javascript]
+url = "https://github.com/tree-sitter/tree-sitter-javascript"
+revision = "44c892e0be055ac465d5eeddae6d3e194424e7de"
+symbol = "tree_sitter_javascript"
+extensions = ["js", "mjs", "cjs", "jsx"]
+units = [
+    "function_declaration",
+    "generator_function_declaration",
+    "class_declaration",
+    "method_definition",
+    "field_definition",
+    "lexical_declaration",
+    "variable_declaration",
+    "pair",
+    "import_statement",
+]
+functions = ["function_declaration", "generator_function_declaration", "method_definition"]
+function_values = ["function_expression", "arrow_function", "generator_function"]
+comments = ["comment", "html_comment"]
+directives = { "// eslint-" = "eslint_directive", "/* eslint" = "eslint_directive" }
+
+# tag v0.23.2
+[typescript]
+url = "https://github.com/tree-sitter/tree-sitter-typescript"
+revision = "f975a621f4e7f532fe322e13c4f79495e0a7b2e7"
+location = "typescript"
+symbol = "tree_sitter_typescript"
+extensions = ["ts", "mts", "cts"]
+units = [
+    "function_declaration",
+    "generator_function_declaration",
+    "function_signature",
+    "class_declaration",
+    "abstract_class_declaration",
+    "method_definition",
+    "method_signature",
+    "abstract_method_signature",
+    "public_field_definition",
+    "property_signature",
+    "interface_declaration",
+    "type_alias_declaration",
+    "enum_declaration",
+    "internal_module",
+    "module",
+    "lexical_declaration",
+    "variable_declaration",
+    "pair",
+    "import_statement",
+]
+functions = ["function_declaration", "generator_function_declaration", "method_definition"]
+function_values = ["function_expression", "arrow_function", "generator_function"]
+comments = ["comment", "html_comment"]
+directives = { "// @ts-" = "ts_directive", "/// <reference" = "triple_slash_directive", "// eslint-" = "eslint_directive", "/* eslint" = "eslint_directive" }
+
+# tag v1.2.0
+[hcl]
+url = "https://github.com/tree-sitter-grammars/tree-sitter-hcl"
+revision = "fad991865fee927dd1de5e172fb3f08ac674d914"
+symbol = "tree_sitter_hcl"
+extensions = ["hcl", "tf", "tfvars"]
+units = ["block", "attribute", "object_elem"]
+
+# tag v0.2.0
+[dockerfile]
+url = "https://github.com/camdencheek/tree-sitter-dockerfile"
+revision = "868e44ce378deb68aac902a9db68ff82d2299dd0"
+symbol = "tree_sitter_dockerfile"
+filenames = ["Dockerfile", "Containerfile", "Dockerfile.*", "*.dockerfile"]
+units = [
+    "from_instruction",
+    "run_instruction",
+    "cmd_instruction",
+    "label_instruction",
+    "maintainer_instruction",
+    "expose_instruction",
+    "env_instruction",
+    "add_instruction",
+    "copy_instruction",
+    "entrypoint_instruction",
+    "volume_instruction",
+    "user_instruction",
+    "workdir_instruction",
+    "arg_instruction",
+    "onbuild_instruction",
+    "stopsignal_instruction",
+    "healthcheck_instruction",
+    "shell_instruction",
+    "cross_build_instruction",
+]
+references = false
+directives = { "# syntax=" = "dockerfile_parser_directive", "# escape=" = "dockerfile_parser_directive", "# check=" = "dockerfile_parser_directive" }

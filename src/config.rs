@@ -132,7 +132,9 @@ pub fn load(repo: Option<&Path>) -> Result<Loaded, String> {
     let text = fs::read_to_string(&resolved)
         .map_err(|error| format!("cannot read {}: {error}", resolved.display()))?;
     let base = resolved.parent().unwrap_or(Path::new("/"));
-    let config = parse(&text, base).map_err(|error| format!("{}: {error}", path.display()))?;
+    let repo = repo.map(|repo| fs::canonicalize(repo).unwrap_or_else(|_| repo.to_owned()));
+    let config = parse_in(&text, base, repo.as_deref())
+        .map_err(|error| format!("{}: {error}", path.display()))?;
     Ok(Loaded { config, note: None })
 }
 
@@ -286,8 +288,26 @@ fn check_filename(pattern: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Registry entries: git grammars pinned by commit; `languages = [..]` enables them.
+const REGISTRY: &str = include_str!("registry.toml");
+
+fn registry() -> BTreeMap<String, RawLanguage> {
+    toml::from_str(REGISTRY).expect("the bundled registry is valid")
+}
+
+/// Registry language names, for `rotter parser list`.
+pub fn registry_names() -> Vec<String> {
+    registry().into_keys().collect()
+}
+
 /// Parses and validates config text; relative `path` values resolve against `base`.
+#[cfg(test)]
 pub(crate) fn parse(text: &str, base: &Path) -> Result<Config, String> {
+    parse_in(text, base, None)
+}
+
+/// [`parse`] for a run in the canonical repository `repo` (a cache inside it is refused).
+fn parse_in(text: &str, base: &Path, repo: Option<&Path>) -> Result<Config, String> {
     let raw: RawConfig = toml::from_str(text).map_err(|error| error.to_string())?;
     let parse_timeout_seconds = raw.parse_timeout_seconds.unwrap_or(DEFAULT_PARSE_TIMEOUT);
     if !(1..=MAX_PARSE_TIMEOUT).contains(&parse_timeout_seconds) {
@@ -295,16 +315,33 @@ pub(crate) fn parse(text: &str, base: &Path) -> Result<Config, String> {
             "parse_timeout_seconds must be between 1 and {MAX_PARSE_TIMEOUT}, not {parse_timeout_seconds}"
         ));
     }
-    // ponytail: no registry is bundled yet, so every `languages` entry is unknown.
-    if let Some(name) = raw.languages.first() {
-        return Err(format!("languages: {name:?} is not in the registry"));
-    }
     let mut tables: Vec<_> = raw.language.into_iter().collect();
     tables.sort_by_key(|(_, table)| table.span().start);
+    // Config tables in file order, then enabled registry entries in `languages` order.
+    let mut definitions: Vec<(String, String, RawLanguage)> = tables
+        .into_iter()
+        .map(|(name, table)| (format!("[language.{name}]"), name, table.into_inner()))
+        .collect();
+    let mut registry = registry();
+    for name in raw.languages {
+        if definitions.iter().any(|(_, known, _)| *known == name) {
+            return Err(format!(
+                "languages: {name:?} is enabled twice or also defined as [language.{name}]"
+            ));
+        }
+        let entry = registry.remove(&name).ok_or_else(|| {
+            format!(
+                "languages: {name:?} is not in the registry (available: {})",
+                registry_names().join(", ")
+            )
+        })?;
+        definitions.push((format!("languages: {name}"), name, entry));
+    }
     let mut externals: Vec<Arc<Grammar>> = Vec::new();
-    for (name, table) in tables {
-        let grammar = definition(&name, table.into_inner(), base)
-            .map_err(|error| format!("[language.{name}]: {error}"))?;
+    for (context, name, table) in definitions {
+        let mut grammar =
+            definition(&name, table, base).map_err(|error| format!("{context}: {error}"))?;
+        grammar.repo = repo.map(Path::to_owned);
         for other in &externals {
             if let Some(extension) = grammar
                 .extensions
@@ -426,6 +463,7 @@ fn definition(name: &str, raw: RawLanguage, base: &Path) -> Result<Definition, S
         references: raw.references,
         extensions: raw.extensions,
         filenames: raw.filenames,
+        repo: None,
     })
 }
 
@@ -663,7 +701,12 @@ units = ["function_declaration"]
             "parse_timeout_seconds = 1.5".to_owned(),
             "unknown = 1".to_owned(),
             language("path = \"p\"\nunknown = 1"),
-            "languages = [\"python\"]".to_owned(),
+            "languages = [\"nope\"]".to_owned(),
+            "languages = [\"python\", \"python\"]".to_owned(),
+            format!(
+                "languages = [\"python\"]\n{}",
+                LUA2.replace("lua2]", "python]")
+            ),
             LUA2.replace("lua2]", "\"../x\"]"),
             LUA2.replace("lua2]", "-x]"),
             LUA2.replace("lua2]", "go]"),
@@ -710,6 +753,54 @@ units = ["function_declaration"]
         for case in cases {
             assert!(parse(&case, Path::new("/")).is_err(), "accepted: {case}");
         }
+    }
+
+    #[test]
+    fn registry_entries_are_valid_pinned_git_grammars() {
+        let names = super::registry_names();
+        assert_eq!(
+            names,
+            ["dockerfile", "hcl", "javascript", "python", "typescript"]
+        );
+        let config = parse(&format!("languages = {names:?}\n{LUA2}"), Path::new("/")).unwrap();
+        let order: Vec<&str> = config.externals.iter().map(|g| g.name()).collect();
+        assert_eq!(
+            order,
+            [
+                "lua2",
+                "dockerfile",
+                "hcl",
+                "javascript",
+                "python",
+                "typescript"
+            ],
+            "config tables first, then `languages` order"
+        );
+        for grammar in &config.externals[1..] {
+            match grammar.external_source() {
+                Some((crate::ExternalSource::Git { url, revision, .. }, symbol)) => {
+                    assert!(url.starts_with("https://github.com/"), "{url}");
+                    assert_eq!(revision.len(), 40);
+                    assert_eq!(symbol, format!("tree_sitter_{}", grammar.name()));
+                }
+                other => panic!("{}: {other:?}", grammar.name()),
+            }
+        }
+        match config.externals[5].external_source() {
+            Some((crate::ExternalSource::Git { location, .. }, _)) => {
+                assert_eq!(location.as_deref(), Some("typescript"));
+            }
+            other => panic!("{other:?}"),
+        }
+        // A registry grammar may not claim a builtin extension or collide with a config one.
+        let clash = LUA2.replace("\"lua2\"", "\"py\"");
+        assert!(
+            parse(
+                &format!("languages = [\"python\"]\n{clash}"),
+                Path::new("/")
+            )
+            .is_err()
+        );
     }
 
     #[test]

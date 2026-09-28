@@ -2,6 +2,7 @@ mod comments;
 pub mod config;
 mod git;
 mod grammar;
+pub mod install;
 pub mod integration;
 pub mod json;
 

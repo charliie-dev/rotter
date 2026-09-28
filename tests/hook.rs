@@ -38,6 +38,7 @@ fn hook_with(input: &str, state: &Path, env: &[(&str, &str)]) -> String {
         .current_dir(state)
         .env("ROTTER_STATE_DIR", state)
         .env("XDG_CONFIG_HOME", state.join("xdg-config"))
+        .env("XDG_CACHE_HOME", state.join("xdg-cache"))
         .env("CLAUDE_CONFIG_DIR", state.join("claude"));
     for (key, value) in env {
         command.env(key, value);
@@ -116,6 +117,7 @@ fn integration(config: &Path, args: &[&str]) -> (i32, String) {
         .args(args)
         .env("CLAUDE_CONFIG_DIR", config)
         .env("XDG_CONFIG_HOME", config.join("xdg-config"))
+        .env("XDG_CACHE_HOME", config.join("xdg-cache"))
         .output()
         .unwrap();
     let text =

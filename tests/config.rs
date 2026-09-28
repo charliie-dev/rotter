@@ -108,8 +108,12 @@ fn extract_cli(repo: &Path, args: &[&str], env: &[(&str, Option<&Path>)], cwd: &
     }
 }
 
-fn xdg_env(xdg: &Path) -> [(&'static str, Option<&Path>); 1] {
-    [("XDG_CONFIG_HOME", Some(xdg))]
+/// Config and cache pinned to `xdg`.
+fn xdg_env(xdg: &Path) -> [(&'static str, Option<&Path>); 2] {
+    [
+        ("XDG_CONFIG_HOME", Some(xdg)),
+        ("XDG_CACHE_HOME", Some(xdg)),
+    ]
 }
 
 #[test]
