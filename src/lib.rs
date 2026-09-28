@@ -1,4 +1,12 @@
+mod comments;
+mod git;
+pub mod json;
+
+pub use comments::{Change, units};
+pub use git::{Mode, Options, Report, extract};
+
 use std::fmt;
+use std::path::Path;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Language {
@@ -9,6 +17,154 @@ pub enum Language {
     Yaml,
     Toml,
     Rust,
+}
+
+impl Language {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Go => "go",
+            Self::Lua => "lua",
+            Self::Nix => "nix",
+            Self::Bash => "bash",
+            Self::Yaml => "yaml",
+            Self::Toml => "toml",
+            Self::Rust => "rust",
+        }
+    }
+
+    /// Node kinds treated as a unit that comments can belong to.
+    fn unit_kinds(self) -> &'static [&'static str] {
+        match self {
+            Self::Go => &[
+                "function_declaration",
+                "method_declaration",
+                "type_declaration",
+                "type_spec",
+                "type_alias",
+                "field_declaration",
+                "method_elem",
+                "const_declaration",
+                "const_spec",
+                "var_declaration",
+                "var_spec",
+                "import_declaration",
+            ],
+            Self::Lua => &[
+                "function_declaration",
+                "variable_declaration",
+                "assignment_statement",
+                "field",
+            ],
+            Self::Nix => &["binding", "inherit", "inherit_from"],
+            Self::Bash => &["function_definition"],
+            Self::Yaml => &["block_mapping_pair", "block_sequence_item", "flow_pair"],
+            Self::Toml => &["pair", "table", "table_array_element"],
+            Self::Rust => &[
+                "function_item",
+                "function_signature_item",
+                "struct_item",
+                "enum_item",
+                "union_item",
+                "enum_variant",
+                "field_declaration",
+                "impl_item",
+                "trait_item",
+                "mod_item",
+                "const_item",
+                "static_item",
+                "type_item",
+                "macro_definition",
+                "use_declaration",
+            ],
+        }
+    }
+
+    /// Unit kinds whose bodies are one unit: smaller units nested inside them are ignored.
+    fn function_kinds(self) -> &'static [&'static str] {
+        match self {
+            Self::Go => &["function_declaration", "method_declaration"],
+            Self::Lua => &["function_declaration"],
+            Self::Bash => &["function_definition"],
+            Self::Rust => &["function_item"],
+            Self::Nix | Self::Yaml | Self::Toml => &[],
+        }
+    }
+
+    /// Function values (closures, lambdas); inside a unit they make that unit the function.
+    fn function_value_kinds(self) -> &'static [&'static str] {
+        match self {
+            Self::Go => &["func_literal"],
+            Self::Lua => &["function_definition"],
+            Self::Nix => &["function_expression"],
+            Self::Rust => &["closure_expression"],
+            Self::Bash | Self::Yaml | Self::Toml => &[],
+        }
+    }
+
+    /// Lines of these kinds may sit between a leading comment and its unit.
+    fn attribute_kinds(self) -> &'static [&'static str] {
+        match self {
+            Self::Rust => &["attribute_item"],
+            _ => &[],
+        }
+    }
+}
+
+/// Result of mapping a path (and optionally its first line) to a checked language.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Detected {
+    Supported(Language, &'static str),
+    UnsupportedDialect(String),
+    NotInScope,
+    /// The extension alone is not enough; call [`detect_content`] with the first line.
+    NeedsContent,
+}
+
+pub fn detect_path(path: &Path) -> Detected {
+    let Some(extension) = path.extension() else {
+        return Detected::NeedsContent;
+    };
+    match extension.to_str().unwrap_or_default() {
+        "go" => Detected::Supported(Language::Go, "go"),
+        "lua" => Detected::Supported(Language::Lua, "lua"),
+        "nix" => Detected::Supported(Language::Nix, "nix"),
+        "rs" => Detected::Supported(Language::Rust, "rust"),
+        "yaml" | "yml" => Detected::Supported(Language::Yaml, "yaml"),
+        "toml" => Detected::Supported(Language::Toml, "toml"),
+        "bash" => Detected::Supported(Language::Bash, "bash"),
+        "sh" => Detected::NeedsContent,
+        "dash" => Detected::Supported(Language::Bash, "dash-parsed-as-bash"),
+        dialect @ ("zsh" | "ksh" | "fish" | "csh" | "tcsh") => {
+            Detected::UnsupportedDialect(dialect.to_owned())
+        }
+        _ => Detected::NotInScope,
+    }
+}
+
+/// Decides shell scripts by shebang. POSIX sh family scripts are parsed with the Bash grammar and
+/// labelled so; Bash-only syntax in them is not reported.
+pub fn detect_content(path: &Path, first_line: &str) -> Detected {
+    let is_sh = path.extension().is_some_and(|extension| extension == "sh");
+    let Some(command) = first_line.strip_prefix("#!") else {
+        return if is_sh {
+            Detected::Supported(Language::Bash, "bash-assumed")
+        } else {
+            Detected::NotInScope
+        };
+    };
+    let mut words = command.split_whitespace();
+    let mut interpreter = words.next().unwrap_or_default().rsplit('/').next();
+    if interpreter == Some("env") {
+        interpreter = words.find(|word| !word.starts_with('-') && !word.contains('='));
+    }
+    match interpreter.unwrap_or_default() {
+        "bash" => Detected::Supported(Language::Bash, "bash"),
+        "sh" => Detected::Supported(Language::Bash, "sh-parsed-as-bash"),
+        "dash" => Detected::Supported(Language::Bash, "dash-parsed-as-bash"),
+        "ash" | "busybox" => Detected::Supported(Language::Bash, "ash-parsed-as-bash"),
+        dialect @ ("zsh" | "ksh" | "mksh") => Detected::UnsupportedDialect(dialect.to_owned()),
+        _ => Detected::NotInScope,
+    }
 }
 
 #[derive(Debug)]
