@@ -2,7 +2,7 @@
 
 針對 Git diff 檢查程式註解的 Rust 專案。目前是 POC：`rotter extract` 擷取變更單元與相關註解，
 輸出 JSON；語意判斷交給 coding agent 依 [共用 skill](skills/rotter-comment-review/SKILL.md) 執行。
-skill 以 `rotter --skill` 隨 binary 發佈；`rotter integration install claude|grok` 註冊 Claude Code／Grok Build Stop hook。
+skill 以 `rotter --skill` 隨 binary 發佈；`rotter integration install claude|grok|codex|copilot|droid` 註冊各宿主的回合結束 hook。
 
 ## 開發環境
 
@@ -229,7 +229,10 @@ skill 已編進 binary，不需另外安裝或維護：`rotter --skill` 印出�
 cargo install --path . --locked
 rotter integration install claude     # 在 Claude Code settings.json 加入 Stop hook
 rotter integration install grok       # 寫入 Grok Build 的 hooks/rotter.json
-rotter integration status             # 兩個宿主的狀態、相容性檢查與 binary 信任檢查
+rotter integration install copilot    # 寫入 GitHub Copilot CLI 的 hooks/rotter.json
+rotter integration install codex      # 實驗性：在 Codex 的 hooks.json 加入 Stop hook
+rotter integration install droid      # 實驗性：在 Factory Droid 的 hooks.json 加入 Stop hook
+rotter integration status             # 各宿主的狀態、相容性檢查與 binary 信任檢查
 rotter integration uninstall claude
 rotter integration uninstall grok
 ```
@@ -265,6 +268,16 @@ create_new＋O_NOFOLLOW 建立權限恰為 0600 的 `rotter.json.rotter-tmp`（�
 載入；殘留的一般檔案會先刪除），再 rename。既有的 `rotter.json` 若是 symlink 或非一般檔案、不屬於
 使用者、群組／他人可寫，或不是上述格式（多了 `env`、`matcher`、其他事件等），install 與 uninstall
 都以退出碼 2 結束並保留原檔。`uninstall` 只刪除通過上述檢查的檔案；不存在時顯示 `not installed`。
+
+Codex（實驗性）：`$CODEX_HOME/hooks.json`（預設 `~/.codex`），合併方式與 Claude 相同（備份為
+`hooks.json.rotter-bak`），但在原位置更新 rotter 的項目，不讓其他 hook 移位；Codex 只執行在 `/hooks`
+信任過的 hook，install 或更新後須到 `/hooks` 信任一次，`status` 也會提醒並顯示 `[features] hooks`。
+Copilot CLI：`$COPILOT_HOME/hooks/rotter.json`（預設 `~/.copilot`），rotter 自有的檔案，規則同 Grok，
+內容為 `{"version":1,"hooks":{"agentStop":[{"type":"command","bash":"…","timeoutSec":N}]}}`。
+Factory Droid（實驗性）：`~/.factory/hooks.json`（沒有目錄變數），合併方式同 Codex；`hooks.json`
+不存在而 `settings.json`／`settings.local.json` 仍宣告 `hooks` 時拒絕建立（Droid 只在沒有
+`hooks.json` 時才讀那些 hook）。mastracode、devin、cursor、antigravity-cli 目前不支援，`status`
+列出原因。各宿主的欄位、出處與不支援的理由見[宿主契約](docs/hosts.md)。
 
 相容性：Grok 預設（`[compat.claude] hooks = true`）也會執行 `~/.claude/settings.json`（固定路徑）
 中的 hooks。`status` 以唯讀方式檢查 `$HOME/.claude/settings.json`：含 rotter 項目時顯示

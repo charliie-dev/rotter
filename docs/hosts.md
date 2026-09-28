@@ -3,7 +3,10 @@
 每個宿主（agent）的整合事實都集中在 `src/hosts.rs` 的表格；本頁記錄這些事實的來源、
 安裝後的確切格式與擁有權判斷，以及 hook 程序的環境可否被 project 設定注入。新增宿主前，
 本頁該宿主的每一格都要有出處；查不到時，提示管道預設為 stderr、續跑判斷預設為「只靠
-rotter 的上限」，其他格查不到就標為不支援。目前（S1）只有 claude 與 grok。
+rotter 的上限」，其他格查不到就標為不支援。已支援：claude、grok、copilot，以及實驗性的 codex、
+droid（rotter 作者未在真實宿主上執行過，`status` 行尾標 `[experimental]`）；mastracode、devin、
+cursor、antigravity-cli 查核後標為不支援（見文末，`status` 列出原因，`install` 退出碼 2）。
+所有出處皆於 2026-09-29 查閱。
 
 ## 宿主表
 
@@ -17,7 +20,7 @@ rotter 的上限」，其他格查不到就標為不支援。目前（S1）只�
 | 續跑判斷 | `stop_hook_active` 或 `stopHookActive` 為 `true` | 同左 |
 | 要求續跑的輸出 | `{"decision":"block","reason":…}` | 同左 |
 | 提示管道 | `systemMessage`（每個 session 只提示一次） | stderr（Grok 不顯示，每次都寫） |
-| 預設 timeout | 60 秒（`timeout` 欄位，單位秒） | 600 秒（同左） |
+| 預設 timeout | 文件為 600 秒（`timeout` 欄位，單位秒）；rotter 保守地以 60 秒估算 | 600 秒（同左） |
 | 指令執行方式 | 經 shell；`'<exe>' hook claude-stop \|\| true` | 經 shell，Grok 會展開 `$VAR`；`'<exe>' hook grok-stop \|\| true` |
 | 載入 glob | 固定檔名 `settings.json` | `hooks/*.json`（暫存檔 `rotter.json.rotter-tmp` 不符合） |
 | 環境可被 project 注入 | 是，屬宿主層級（見下） | 是，屬宿主層級（見下） |
@@ -59,16 +62,26 @@ OwnedJson（grok 的 `hooks/rotter.json`）：內容恰為
 claude：專案的 `.claude/settings.json` 可以用 `env` 設定 session 的環境變數，這些變數也會傳給
 hook 程序；但只有在使用者信任該 workspace 之後才會載入，而此時專案的 hooks 本來就能執行任意指令。
 因此這屬於宿主層級的暴露，不另做 env-injectable 處理：PATH 由下方的 git 解析規則處理，HOME、
-XDG_*、TMPDIR 等目錄仍經 `resolve_trusted` 的逐層信任檢查。來源：Claude Code 文件的 settings
-（`env`）與 hooks 章節（<https://docs.claude.com/en/docs/claude-code/settings>、
-<https://docs.claude.com/en/docs/claude-code/hooks>；本輪未重新連線查核）。
+XDG_*、TMPDIR 等目錄仍經 `resolve_trusted` 的逐層信任檢查。來源（2026-09-29 重新查閱）：
+<https://code.claude.com/docs/en/hooks.md>（Stop 輸入 `session_id`、`cwd`、`stop_hook_active`；
+`{"decision":"block","reason"}`；`systemMessage` 為通用欄位；shell form 以 `sh -c` 執行並展開變數；
+`timeout` 單位秒，command hook 預設 600）、<https://code.claude.com/docs/en/settings.md>
+（`CLAUDE_CONFIG_DIR` 取代 `~/.claude`）、<https://code.claude.com/docs/en/env-vars.md>（settings
+的 `env` 區塊；project／local 設定不能設 `CLAUDE_CONFIG_DIR`）。
+
+其他宿主也會執行 `~/.claude/settings.json` 裡的 hook：Grok（見下）、Devin CLI（預設讀取
+`~/.claude/settings.json`）與 Cursor（third-party hooks）。在這些宿主下 rotter 的 claude 項目一樣
+受迴圈上限與共用去重約束；Cursor 會把輸入以 here-document 接在指令後（見下方 cursor），此時
+`|| true` 之前的 rotter 收不到輸入，只會靜默結束。
 
 grok：hook 程序的環境是 Grok 程序本身的環境加上 handler 的 `env`（rotter 的文件沒有 `env`，嚴格
 格式也不接受）。專案的 `.grok/hooks/*.json` 與 Claude 相容的 `.claude/settings.json` 都需要 folder
 trust 才會執行。`session.load_envrc` 的說明是把 `.envrc` 注入 bash 工具；是否也進入 hook 程序文件
 未寫明，因此比照 claude 視為宿主層級的暴露。來源：`$GROK_HOME/docs/user-guide/10-hooks.md`
 （Hook Locations、Environment Variables）、`05-configuration.md`、`26-config-reference.md`
-（`session.load_envrc`）。
+（`session.load_envrc`）。2026-09-29 以本機 grok 1.0.41 附帶的同一批文件重新核對：`stopHookActive`、
+`reason` 為 `end_turn`／`channel_closed`／`shutdown`、`Stop` 預設 600 秒、專案 hook 需要 folder
+trust，皆與上表相符。
 
 ## git 的選擇（所有宿主與模式）
 
@@ -137,3 +150,122 @@ env-injectable 的宿主改用 `Sources::injectable`：HOME 取自密碼資料�
 `/tmp`（仍經 `resolve_trusted` 與私有 scratch 檢查；不用 Darwin 的
 `confstr(_CS_DARWIN_USER_TEMP_DIR)`，它失敗時會回頭讀 TMPDIR），行程環境中的 HOME、XDG_*、
 ROTTER_* 與 TMPDIR 一律忽略。沒有任何環境變數、參數或檔案能切換這個行為。
+
+## S2 宿主契約補遺
+
+每格的出處列在各節末尾；「經 shell」指宿主把 `command` 字串交給 shell，因此 rotter 寫入
+`'<exe>' hook <host> || true`（binary 路徑不可含 `$`、`` ` ``、NUL、換行）。三個已出貨的宿主
+都讀得到 project 層級的 hook 設定並執行其中的指令，所以 project 能影響 hook 環境時也已經能直接
+執行指令，屬於宿主層級的暴露，不做 env-injectable 處理（PATH 仍由 git 的選擇規則處理）。
+
+### codex（實驗性）
+
+| 項目 | 內容 |
+|---|---|
+| 目錄 | `$CODEX_HOME`（rotter 只用絕對路徑；Codex 本身也接受相對路徑並 canonicalize）→ `~/.codex` |
+| 安裝方式 | MergeJson：`hooks.json`，`{"hooks":{"Stop":[{"hooks":[H]}]}}`，H 為 `{"type":"command","command":C,"timeout":N}` |
+| 事件 | `Stop`（不支援 matcher） |
+| 輸入 | `session_id`、`cwd`（一定存在，也是 hook 程序的工作目錄）、`stop_hook_active`、`turn_id`、`transcript_path`（不讀）、`last_assistant_message`（不讀）；沒有結束原因欄位 |
+| 續跑判斷 | `stop_hook_active` 為 `true` |
+| 要求續跑 | `{"decision":"block","reason":…}`；退出碼 2 也會續跑，其他非 0 只記為失敗 |
+| 提示管道 | `systemMessage`（Stop 支援，顯示為警告） |
+| timeout | `timeout`，單位秒，預設 600 |
+| 指令執行 | 經 shell：`$SHELL -lc <command>`（`$SHELL` 取自 Codex 的環境，沒有時 `/bin/sh`；設定可指定 shell）|
+| 環境 | Codex 程序自己的環境快照（`std::env::vars_os`），不是 project 設定；project 的 `.codex/config.toml` 只能換 shell，而 project hook 本來就能執行指令：宿主層級 |
+| 載入 | 固定檔名 `hooks.json`（及 `config.toml` 的 `[hooks]`）；`hooks.json.rotter-tmp`／`.rotter-bak` 不會載入 |
+| 啟用 | `[features] hooks` 預設開啟（舊名 `codex_hooks`）；非 managed 的 hook 須在 `/hooks` 信任後才執行，信任依 hook 內容的 hash 與「來源＋事件＋group 索引＋handler 索引」記錄 |
+
+擁有權同 claude：`command` 恰為 `'<絕對路徑>' hook codex || true`；`'/x/rotter-proxy' hook codex`
+等其他形式是外來項目。因為信任記在索引上，install 在原位置改寫第一筆 rotter 項目、移除其他 rotter
+項目，沒有時才在最後附加一個 group；uninstall 只移除 rotter 自己清空的 group（rotter 的 group 通常
+在最後，不會使其他 hook 位移）。改寫後的項目 hash 不同，Codex 會要求重新信任。`status` 另外一行
+顯示 `[features]` 的狀態，並提醒 `/hooks` 信任（rotter 不檢查信任狀態，也不修改 Codex 設定）。
+
+來源：<https://learn.chatgpt.com/docs/hooks>（原 developers.openai.com/codex/hooks）；openai/codex
+commit `5a5a4aa79696a4c8a46dea1c9c04066b22559332`：`codex-rs/utils/home-dir/src/lib.rs`
+（`CODEX_HOME`）、`codex-rs/hooks/src/engine/discovery.rs`（`hooks.json`、預設 600、trust key 與
+hash）、`codex-rs/hooks/src/engine/command_runner.rs`（`-lc`、環境快照）、
+`codex-rs/hooks/src/registry.rs`、`codex-rs/hooks/src/events/stop.rs`（輸入欄位、退出碼 2）、
+`codex-rs/config/src/hook_config.rs`（`timeout` 欄位名、`HooksFile` 拒絕未知的頂層 key）、
+`codex-rs/features/src/lib.rs`（`hooks` 預設開啟）。
+
+### copilot
+
+| 項目 | 內容 |
+|---|---|
+| 目錄 | `$COPILOT_HOME`（取代整個 `~/.copilot`）→ `~/.copilot` |
+| 安裝方式 | OwnedJson：`hooks/rotter.json`，內容恰為 `{"version":1,"hooks":{"agentStop":[{"type":"command","bash":C,"timeoutSec":N}]}}` |
+| 事件 | `agentStop`（camelCase 事件，輸入為 camelCase） |
+| 輸入 | `sessionId`、`cwd`、`stopReason`（`end_turn`）、`stop_hook_active`、`timestamp`、`transcriptPath`（不讀） |
+| 續跑判斷 | `stop_hook_active` 為 `true`；`stopReason` 存在且不是 `end_turn` 時不做事 |
+| 要求續跑 | `{"decision":"block","reason":…}`（「block 以 reason 為提示再跑一輪」）；退出碼 2 只是警告，其他非 0 fail-open |
+| 提示管道 | stderr（預設；文件沒有 Stop 的使用者訊息欄位） |
+| timeout | `timeoutSec`，單位秒，預設 30（別名 `timeout`，`timeoutSec` 優先）；rotter 明寫公式值 |
+| 指令執行 | `bash` 欄位以 bash 執行（「Bash commands execute as shell scripts」），會展開 `$VAR`；不用 `exec`/`args` 形式 |
+| 環境 | 文件沒有 project 設定可改 hook 環境的機制（handler 的 `env` 只影響該 handler）；repository 的 `.github/hooks/*.json` 本身就能執行指令：宿主層級 |
+| 載入 | `hooks/*.json`（使用者層級）；`rotter.json.rotter-tmp` 不以 `.json` 結尾，不會載入 |
+
+擁有權同 grok 的嚴格格式（多了 `version: 1`、handler 平鋪而非 group、指令鍵為 `bash`、timeout 鍵為
+`timeoutSec`）；其他內容一律不是 rotter 的檔案，install／uninstall 都不碰。
+
+來源：<https://docs.github.com/en/copilot/reference/hooks-reference>、
+<https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/use-hooks>、
+<https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-config-dir-reference>
+（`COPILOT_HOME`）。Copilot CLI 為封閉原始碼（npm `@github/copilot` 1.0.89 只含原生 binary），
+執行方式以文件為準。
+
+### droid（實驗性）
+
+| 項目 | 內容 |
+|---|---|
+| 目錄 | 沒有文件記載的環境變數 → `~/.factory` |
+| 安裝方式 | MergeJson：`hooks.json`，事件直接在頂層：`{"Stop":[{"hooks":[H]}]}`，H 為 `{"type":"command","command":C,"timeout":N}` |
+| 事件 | `Stop` |
+| 輸入 | `session_id`、`cwd`、`stop_hook_active`、`transcript_path`（不讀）、`permission_mode`、`hook_event_name`；沒有結束原因欄位 |
+| 續跑判斷 | `stop_hook_active` 為 `true` |
+| 要求續跑 | `{"decision":"block","reason":…}`；退出碼 2 也會把 stderr 交給 Droid，其他非 0 不阻擋 |
+| 提示管道 | stderr（預設；文件沒有 `systemMessage`） |
+| timeout | `timeout`，單位秒，預設 60 |
+| 指令執行 | 經 shell（「Hooks run as shell commands」，範例使用 `"$FACTORY_PROJECT_DIR"`） |
+| 環境 | 文件沒有 settings 設定環境變數的機制；project 的 `.factory/hooks.json` 本身就能執行指令：宿主層級 |
+| 載入 | 固定檔名 `hooks.json`；`hooks.json.rotter-tmp`／`.rotter-bak` 不會載入 |
+
+`hooks.json` 不存在時 Droid 改讀同層 `settings.json` 的 `hooks`（舊格式，`settings.local.json` 疊加
+其上）。因此 `hooks.json` 不存在時，install 先讀 `~/.factory/settings.json` 與
+`settings.local.json`：任一含非空的 `hooks`，或無法以 JSON 解析（例如含註解），就拒絕建立
+`hooks.json`，以免悄悄停用那些 hook（Droid 的 `/hooks` 下次存檔時會自行搬移）。Droid 啟動時快照
+hooks，之後的外部修改只會警告，須在 `/hooks` 檢視。擁有權同 claude（`hook droid`）。
+
+來源：<https://docs.factory.ai/reference/hooks-reference>、
+<https://docs.factory.ai/cli/configuration/settings>（沒有 `env` 設定、沒有目錄變數）。Droid 為封閉
+原始碼。
+
+### 不支援
+
+- mastracode：`~/.mastracode/hooks.json`（目錄只由 `os.homedir()` 決定，沒有變數），以 `/bin/sh -c`
+  執行，`timeout` 單位毫秒、預設 10000，輸入有 `session_id`、`cwd`、`stop_reason`，沒有續跑旗標。
+  但 Stop 只有在退出碼為 2 時才阻擋，退出碼 0 時 stdout 的 `decision` 被忽略；rotter 的
+  `|| true` 形式永遠退出 0，而改成以退出碼 2 續跑會讓舊版或故障的 binary 也能強迫續跑（計畫
+  Design 5 排除）。來源：mastra-ai/mastra commit `65a93a2a3b1434d605a6a417cb83d2d58e16bfc0` 的
+  `mastracode/sdk/src/hooks/{config,executor,manager,types}.ts`、`docs/src/mastra-code/configuration.mdx`。
+- devin：hook 位於 `~/.config/devin/config.json` 的 `hooks`，Stop 輸入只記載 `stop_hook_active`
+  與 `session_id`，輸出 `{"decision":"block","reason"}`，退出碼 2 阻擋；但指令是否經 shell、是否
+  展開 `$VAR`、預設 timeout、hook 的工作目錄與輸入是否含 `cwd`、`XDG_CONFIG_HOME` 是否改變位置都
+  沒有記載（封閉原始碼）。來源：<https://docs.devin.ai/cli/extensibility/hooks/overview>、
+  <https://docs.devin.ai/cli/extensibility/hooks/lifecycle-hooks>、
+  <https://docs.devin.ai/cli/reference/configuration/read-config-from>。
+- cursor：使用者 hook 在 `~/.cursor/hooks.json`（`CURSOR_CONFIG_DIR` 只移動 CLI 的
+  `cli-config.json`，不是 hooks），`stop` 輸入有 `conversation_id`、`session_id`、`status`、
+  `loop_count`、`workspace_roots`（沒有 `cwd`），輸出 `{"followup_message":…}`（只在
+  `status` 為 `completed` 時採用，受 `loop_limit` 限制）。但 cursor-agent（lab 2026.09.26-dd393fe）
+  預設的 `argv_heredoc` 傳輸把輸入寫成 `<command> <<'CURSOR_HOOK_EOF'`：here-document 只接到
+  `|| true` 後面的 `true`，rotter 收不到輸入；IDE 的執行方式文件未記載。另外 project 的
+  `sessionStart` hook 可用 `env` 輸出替之後所有 hook 設環境變數。需要計畫改用例如
+  `{ '<exe>' hook cursor || true; }` 的指令形式與 env-injectable 處理後才能支援。來源：
+  <https://cursor.com/docs/agent/hooks>、<https://cursor.com/docs/cli/reference/configuration>、
+  `https://downloads.cursor.com/lab/2026.09.26-dd393fe/darwin/arm64/agent-cli-package.tar.gz` 的
+  `dist-package/190.index.js`（`executeCommandScript`、`buildHookEnvironment`）。
+- antigravity-cli：`~/.gemini/config/hooks.json`，頂層是具名的 hook，Stop 為平鋪的 handler 陣列，
+  `timeout` 單位秒、預設 30，輸入有 `conversationId`、`workspacePaths`、`terminationReason`、
+  `fullyIdle`，輸出 `{"decision":"continue","reason"}`；但指令的執行方式（shell 與否）、退出碼的
+  意義與目錄變數都沒有記載（封閉原始碼）。來源：<https://antigravity.google/docs/hooks/>。
