@@ -237,7 +237,7 @@ fn units(report: &Json) -> usize {
 
 /// What one Stop run found: messages that do not block, the review request, and the host's
 /// "last blocked" slot to record once the request is on stdout.
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct Outcome {
     messages: Vec<String>,
     reason: Option<String>,
@@ -2480,6 +2480,79 @@ mod tests {
         // Longer than the installed timeout: ignored, never extended.
         assert_eq!(budget(90, Some(600)), Duration::from_secs(75));
         assert_eq!(budget(60, Some(90)), Duration::from_secs(45));
+    }
+
+    /// End-to-end: the timeout a shim passes (`--timeout <n>`) really does shorten the run
+    /// budget `evaluate` gives `extract_with`, not just the two pure helpers above. With no
+    /// override the change is found and blocked; with a 1-second override (under the 15-second
+    /// reserve, so the budget is `Duration::ZERO`) the file is skipped as `parse_timeout` before
+    /// rotter opens it, so nothing is found and the report is only reported as incomplete. A
+    /// mutation of the `evaluate` call site that stops passing `timeout` through to
+    /// `run_budget`/`shortened` (verified in a scratch copy of this crate) turns the second
+    /// assertion into the first outcome, and the test fails.
+    #[test]
+    fn a_shim_passed_timeout_actually_shortens_the_run() {
+        let root = temp();
+        let repo = root.join("repo");
+        fs::create_dir(&repo).unwrap();
+        let go = |value: usize| format!("package p\n\n// F.\nfunc F() int {{ return {value} }}\n");
+        fs::write(repo.join("a.go"), go(1)).unwrap();
+        let git = |args: &[&str]| {
+            let status = Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@example.invalid")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@example.invalid")
+                .status()
+                .unwrap();
+            assert!(status.success(), "{args:?}");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "c"]);
+        fs::write(repo.join("a.go"), go(2)).unwrap();
+        let home = root.join("passwd-home");
+        let temp_root = root.join("tmp");
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir(&temp_root).unwrap();
+        fs::set_permissions(&temp_root, fs::Permissions::from_mode(0o700)).unwrap();
+        let sources = Sources {
+            config: Some(home.join(".config")),
+            cache: Some(home.join(".cache")),
+            state: Some(home.join(".local/state/rotter")),
+            temp: temp_root,
+            path: std::env::var_os("PATH"),
+            vars: Vec::new(),
+            home: Some(home),
+        };
+        let input = json!({ "session_id": "s", "cwd": repo });
+        // Positive control: with the host's own (installed) timeout, there is room to parse the
+        // one changed file and the comment-linked change is found and blocked.
+        let outcome = evaluate(&CLAUDE, &input, "s", &sources, None).unwrap();
+        assert!(
+            outcome
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("rotter found 2 changed code unit")),
+            "{outcome:?}"
+        );
+        // A shim's `--timeout 1` leaves a zero-second budget: the file is skipped before it is
+        // read, so the report is incomplete and only the "could not be analysed" note goes out.
+        let outcome = evaluate(&CLAUDE, &input, "s2", &sources, Some(1)).unwrap();
+        assert_eq!(outcome.reason, None, "{outcome:?}");
+        assert!(
+            outcome
+                .messages
+                .iter()
+                .any(|message| message.contains("could not be analysed")),
+            "{outcome:?}"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
