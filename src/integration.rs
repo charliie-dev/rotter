@@ -162,7 +162,14 @@ pub fn claude_stop(input: &str) -> Option<String> {
     options.deadline = start.checked_add(budget);
     let report = match extract(&cwd, &options) {
         Ok(report) => report,
-        Err(error) => return message(notes, Some(format!("extract failed: {error}"))),
+        Err(error) => {
+            // Persistent failures (e.g. a refused TMPDIR) would otherwise repeat on every Stop.
+            let text = format!("extract failed: {error}");
+            let repeated = state
+                .as_ref()
+                .is_some_and(|dir| !first_time(&dir.join("claude-stop-errors"), &session, &text));
+            return message(notes, (!repeated).then_some(text));
+        }
     };
     let found = units(&report.json);
     if found == 0 && report.complete {

@@ -1151,37 +1151,49 @@ fn unsafe_temp_root_is_refused_before_any_write() {
     assert_eq!(fs::read_to_string(&canary).unwrap(), "canary");
     assert_eq!(fs::read(repo.0.join(".git/index")).unwrap(), index);
 
-    // The hook reports it as one systemMessage and does not block.
-    let mut hook = Command::new(env!("CARGO_BIN_EXE_rotter"))
-        .args(["hook", "claude-stop"])
-        .current_dir(&home)
-        .env("HOME", &home)
-        .env("XDG_CONFIG_HOME", home.join("config"))
-        .env("XDG_CACHE_HOME", home.join("cache"))
-        .env("CLAUDE_CONFIG_DIR", home.join("claude"))
-        .env("ROTTER_STATE_DIR", home.join("rotter-state"))
-        .env("TMPDIR", &shared)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-    {
-        use std::io::Write;
-        let input = format!(r#"{{"session_id": "s", "cwd": "{}"}}"#, repo.0.display());
-        hook.stdin
-            .take()
-            .unwrap()
-            .write_all(input.as_bytes())
+    // The hook reports it as one systemMessage per session and does not block.
+    let run_hook = |session: &str| {
+        let mut hook = Command::new(env!("CARGO_BIN_EXE_rotter"))
+            .args(["hook", "claude-stop"])
+            .current_dir(&home)
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", home.join("config"))
+            .env("XDG_CACHE_HOME", home.join("cache"))
+            .env("CLAUDE_CONFIG_DIR", home.join("claude"))
+            .env("ROTTER_STATE_DIR", home.join("rotter-state"))
+            .env("TMPDIR", &shared)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
             .unwrap();
-    }
-    let hook = hook.wait_with_output().unwrap();
-    assert!(hook.status.success());
-    let value: serde_json::Value = serde_json::from_slice(&hook.stdout).unwrap();
+        {
+            use std::io::Write;
+            let input = format!(
+                r#"{{"session_id": "{session}", "cwd": "{}"}}"#,
+                repo.0.display()
+            );
+            hook.stdin
+                .take()
+                .unwrap()
+                .write_all(input.as_bytes())
+                .unwrap();
+        }
+        let hook = hook.wait_with_output().unwrap();
+        assert!(hook.status.success());
+        hook.stdout
+    };
+    let first = run_hook("s");
+    let value: serde_json::Value = serde_json::from_slice(&first).unwrap();
     assert!(value.get("decision").is_none(), "{value}");
     assert!(
         value["systemMessage"].as_str().unwrap().contains("TMPDIR"),
         "{value}"
     );
+    assert!(
+        run_hook("s").is_empty(),
+        "same failure is not repeated in a session"
+    );
+    assert!(!run_hook("t").is_empty(), "a new session is told again");
     assert_eq!(fs::read_dir(&shared).unwrap().count(), 0);
     assert_eq!(fs::read_to_string(&canary).unwrap(), "canary");
 
