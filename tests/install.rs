@@ -154,6 +154,7 @@ impl World {
             "XDG_CACHE_HOME".to_owned(),
             root.join("cache").into_os_string(),
         );
+        env.insert("GROK_HOME".to_owned(), root.join("grok").into_os_string());
         Self {
             cache: root.join("cache"),
             root,

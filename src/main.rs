@@ -8,9 +8,9 @@ use std::process::ExitCode;
 const SKILL: &str = include_str!("../skills/rotter-comment-review/SKILL.md");
 
 const USAGE: &str = "usage: rotter --skill
-       rotter integration (install | uninstall) claude
+       rotter integration (install | uninstall) (claude | grok)
        rotter integration status
-       rotter hook claude-stop
+       rotter hook (claude-stop | grok-stop)
        rotter parser install [<name>...]
        rotter parser list
        rotter extract (--staged | --worktree | --base <rev> | --full)
@@ -18,10 +18,12 @@ const USAGE: &str = "usage: rotter --skill
                       [-- <pathspec>...]
 
 --skill prints the comment review skill for coding agents (it matches this binary's version).
-integration install claude registers `rotter hook claude-stop` as a Claude Code Stop hook in
-$CLAUDE_CONFIG_DIR/settings.json (default ~/.claude), keeping a .rotter-bak copy that uninstall
-removes. Its timeout is max(60, parse_timeout_seconds + 30); re-run it after changing
-parse_timeout_seconds.
+integration install claude registers `'<rotter>' hook claude-stop || true` as a Claude Code Stop
+hook in $CLAUDE_CONFIG_DIR/settings.json (default ~/.claude), keeping a .rotter-bak copy that
+uninstall removes. integration install grok writes `'<rotter>' hook grok-stop || true` to
+$GROK_HOME/hooks/rotter.json (default ~/.grok; the home must exist), a file rotter owns. Their
+timeout is max(60, parse_timeout_seconds + 30); re-run install after changing
+parse_timeout_seconds. status shows both hosts.
 
 parser install fetches each enabled external grammar at its pinned commit (or copies its local
 path), compiles it with cc and caches it under $XDG_CACHE_HOME/rotter/parsers (default
@@ -137,12 +139,19 @@ fn main() -> ExitCode {
             print!("{SKILL}");
             return ExitCode::SUCCESS;
         }
-        ["hook", "claude-stop"] => {
-            // A hook must never fail the host's turn; problems surface as systemMessage.
-            let mut input = String::new();
-            let _ = std::io::stdin().read_to_string(&mut input);
-            if let Some(output) = integration::claude_stop(&input) {
-                println!("{output}");
+        ["hook", rest @ ..] => {
+            // A hook must never fail the host's turn: every `rotter hook …` exits 0, and problems
+            // surface as a systemMessage (Claude) or on stderr (Grok, unknown hooks).
+            match integration::Host::from_hook(rest) {
+                Some(host) => {
+                    let mut input = String::new();
+                    let _ = std::io::stdin().read_to_string(&mut input);
+                    integration::stop(host, &input);
+                }
+                None => eprintln!(
+                    "rotter: unknown hook {:?}; available: claude-stop, grok-stop",
+                    rest.join(" ")
+                ),
             }
             return ExitCode::SUCCESS;
         }
