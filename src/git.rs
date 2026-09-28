@@ -32,6 +32,8 @@ pub struct Options {
     pub include_untracked: bool,
     /// Git pathspecs relative to the directory the command runs in; empty means the whole repo.
     pub paths: Vec<String>,
+    /// `--lang` overrides: repository-relative glob and the language to parse matches with.
+    pub languages: Vec<(String, Language, &'static str)>,
 }
 
 pub struct Report {
@@ -286,6 +288,7 @@ enum Source<'a> {
 struct Run<'a> {
     top: &'a Path,
     scratch: Scratch,
+    languages: &'a [(String, Language, &'static str)],
 }
 
 impl Run<'_> {
@@ -293,7 +296,7 @@ impl Run<'_> {
         let display = String::from_utf8_lossy(path).into_owned();
         let relative = Path::new(OsStr::from_bytes(path));
         let mut side = Side {
-            json: vec![("path", display.into())],
+            json: vec![("path", display.clone().into())],
             text: None,
             language: None,
             in_scope: false,
@@ -303,7 +306,14 @@ impl Run<'_> {
             "160000" => return side.status("skipped_submodule", None, false),
             _ => {}
         }
-        let mut detected = detect_path(relative);
+        let override_language = self
+            .languages
+            .iter()
+            .find(|(pattern, _, _)| crate::glob_match(pattern, &display));
+        let mut detected = match override_language {
+            Some((_, language, dialect)) => Detected::Supported(*language, dialect),
+            None => detect_path(relative),
+        };
         if detected == Detected::NotInScope {
             return side.status("not_in_scope", None, false);
         }
@@ -691,7 +701,11 @@ pub fn extract(dir: &Path, options: &Options) -> Result<Report, String> {
         }));
     }
 
-    let run = Run { top: &top, scratch };
+    let run = Run {
+        top: &top,
+        scratch,
+        languages: &options.languages,
+    };
     let after_on_disk = !matches!(options.mode, Mode::Staged);
     let mut complete = true;
     let mut files = Vec::new();

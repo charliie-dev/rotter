@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 
-struct Repo(PathBuf);
+struct Repo(PathBuf, Vec<(String, rotter::Language, &'static str)>);
 
 impl Repo {
     fn new() -> Self {
@@ -18,7 +18,7 @@ impl Repo {
         ));
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).unwrap();
-        let repo = Self(path);
+        let repo = Self(path, Vec::new());
         repo.git(&["init", "-q", "-b", "main"]);
         repo
     }
@@ -69,6 +69,7 @@ impl Repo {
                 mode,
                 include_untracked,
                 paths: paths.iter().map(|path| path.to_string()).collect(),
+                languages: self.1.clone(),
             },
         )
         .unwrap();
@@ -529,6 +530,7 @@ fn base_mode_requires_a_resolvable_revision() {
         mode: Mode::Base(rev.to_owned()),
         include_untracked: false,
         paths: Vec::new(),
+        languages: Vec::new(),
     };
     assert!(extract(&repo.0, &options("missing")).is_err());
     assert!(extract(&repo.0, &options("--output=x")).is_err());
@@ -997,5 +999,45 @@ fn pathspecs_limit_every_mode_relative_to_the_working_directory() {
     assert_eq!(
         paths(&repo.extract_in(&from_b, Mode::Full, false, &["."])),
         ["b/two.go"]
+    );
+}
+
+#[test]
+fn language_overrides_cover_helpers_without_a_shebang() {
+    let mut repo = Repo::new();
+    repo.write("tasks/lib/helper", "# Prints one.\nhelper() { echo 1; }\n");
+    repo.write("conf/x.txt", "# Port.\nport: 1\n");
+    repo.commit();
+    repo.write("tasks/lib/helper", "# Prints one.\nhelper() { echo 2; }\n");
+    repo.write("conf/x.txt", "# Port.\nport: 2\n");
+    let report = repo.extract(Mode::Worktree, false);
+    let status = |report: &Report, path| {
+        file(&report.json, path)
+            .get("after")
+            .get("status")
+            .as_str()
+            .map(str::to_owned)
+    };
+    assert_eq!(
+        status(&report, "tasks/lib/helper").as_deref(),
+        Some("not_in_scope")
+    );
+
+    for (pattern, name) in [("**/lib/*", "bash"), ("conf/*.txt", "yaml")] {
+        let (language, dialect) = rotter::Language::from_name(name).unwrap();
+        repo.1.push((pattern.to_owned(), language, dialect));
+    }
+    let report = repo.extract(Mode::Worktree, false);
+    assert!(report.complete, "{}", report.json);
+    let helper = file(&report.json, "tasks/lib/helper").get("after");
+    assert_eq!(helper.get("dialect").as_str(), Some("bash-by-override"));
+    assert_eq!(
+        comment(unit(helper, "helper"), "# Prints one."),
+        ("leading", false, None)
+    );
+    let yaml = file(&report.json, "conf/x.txt").get("after");
+    assert_eq!(
+        comment(unit(yaml, "port"), "# Port."),
+        ("leading", false, None)
     );
 }

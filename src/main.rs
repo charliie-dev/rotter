@@ -1,12 +1,16 @@
-use rotter::{Mode, Options, extract};
+use rotter::{Language, Mode, Options, extract};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 const USAGE: &str = "usage: rotter extract (--staged | --worktree | --base <rev> | --full)
-                      [--include-untracked] [-C <dir>] [-- <pathspec>...]
+                      [--include-untracked] [--lang <glob>=<language>]... [-C <dir>]
+                      [-- <pathspec>...]
 
 Prints changed code units and their related comments as JSON. --full reports every commented
 unit of the tracked working-tree files instead of a diff. Pathspecs limit any mode.
+--lang parses files whose repository-relative path matches <glob> as <language> (go, lua, nix,
+bash, sh, yaml, toml, rust), ahead of extension and shebang detection; `*` stays within one
+directory, `**` crosses directories. The first matching --lang wins.
 Exit status: 0 complete, 1 printed but incomplete (unreadable, unparsed or unsupported files), 2 error.";
 
 fn parse_args(args: &[String]) -> Result<(PathBuf, Options), String> {
@@ -18,6 +22,7 @@ fn parse_args(args: &[String]) -> Result<(PathBuf, Options), String> {
     let mut include_untracked = false;
     let mut dir = PathBuf::from(".");
     let mut paths = Vec::new();
+    let mut languages = Vec::new();
     let mut set = |value: Mode| match mode.replace(value) {
         Some(_) => Err("choose exactly one of --staged, --worktree, --base, --full".to_owned()),
         None => Ok(()),
@@ -34,6 +39,15 @@ fn parse_args(args: &[String]) -> Result<(PathBuf, Options), String> {
                 args.next().ok_or("--base needs a revision")?.clone(),
             ))?,
             "--include-untracked" => include_untracked = true,
+            "--lang" => {
+                let value = args.next().ok_or("--lang needs <glob>=<language>")?;
+                let (pattern, name) = value
+                    .rsplit_once('=')
+                    .ok_or_else(|| format!("--lang needs <glob>=<language>: {value}"))?;
+                let (language, dialect) = Language::from_name(name)
+                    .ok_or_else(|| format!("unknown --lang language: {name}"))?;
+                languages.push((pattern.to_owned(), language, dialect));
+            }
             "-C" => dir = args.next().ok_or("-C needs a directory")?.into(),
             other => match other.strip_prefix("--base=") {
                 Some(rev) => set(Mode::Base(rev.to_owned()))?,
@@ -51,6 +65,7 @@ fn parse_args(args: &[String]) -> Result<(PathBuf, Options), String> {
             mode,
             include_untracked,
             paths,
+            languages,
         },
     ))
 }

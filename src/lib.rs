@@ -20,6 +20,21 @@ pub enum Language {
 }
 
 impl Language {
+    /// Parses a `--lang` value; `sh` means a POSIX script parsed with the Bash grammar.
+    pub fn from_name(name: &str) -> Option<(Self, &'static str)> {
+        Some(match name {
+            "go" => (Self::Go, "go-by-override"),
+            "lua" => (Self::Lua, "lua-by-override"),
+            "nix" => (Self::Nix, "nix-by-override"),
+            "bash" => (Self::Bash, "bash-by-override"),
+            "sh" => (Self::Bash, "sh-parsed-as-bash-by-override"),
+            "yaml" => (Self::Yaml, "yaml-by-override"),
+            "toml" => (Self::Toml, "toml-by-override"),
+            "rust" => (Self::Rust, "rust-by-override"),
+            _ => return None,
+        })
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Self::Go => "go",
@@ -141,6 +156,28 @@ pub fn detect_path(path: &Path) -> Detected {
     }
 }
 
+/// Matches a repository-relative path: `*` and `?` stay within one path component, `**`
+/// crosses components (`**/` also matches no directory).
+pub fn glob_match(pattern: &str, path: &str) -> bool {
+    fn matches(pattern: &[u8], path: &[u8]) -> bool {
+        match pattern {
+            [] => path.is_empty(),
+            [b'*', b'*', b'/', rest @ ..] => (0..=path.len())
+                .filter(|&index| index == 0 || path[index - 1] == b'/')
+                .any(|index| matches(rest, &path[index..])),
+            [b'*', b'*', rest @ ..] => (0..=path.len()).any(|index| matches(rest, &path[index..])),
+            [b'*', rest @ ..] => (0..=path.len())
+                .take_while(|&index| index == 0 || path[index - 1] != b'/')
+                .any(|index| matches(rest, &path[index..])),
+            [b'?', rest @ ..] => {
+                matches!(path, [first, ..] if *first != b'/') && matches(rest, &path[1..])
+            }
+            [first, rest @ ..] => path.first() == Some(first) && matches(rest, &path[1..]),
+        }
+    }
+    matches(pattern.as_bytes(), path.as_bytes())
+}
+
 /// Decides shell scripts by shebang. POSIX sh family scripts are parsed with the Bash grammar and
 /// labelled so; Bash-only syntax in them is not reported.
 pub fn detect_content(path: &Path, first_line: &str) -> Detected {
@@ -217,4 +254,24 @@ pub fn parse_partial(language: Language, source: &str) -> Result<tree_sitter::Tr
         .set_language(&grammar.into())
         .map_err(ParseError::GrammarLoad)?;
     parser.parse(source, None).ok_or(ParseError::NoTree)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::glob_match;
+
+    #[test]
+    fn globs_respect_path_components() {
+        assert!(glob_match(".mise/tasks/lib/*", ".mise/tasks/lib/render"));
+        assert!(!glob_match(
+            ".mise/tasks/lib/*",
+            ".mise/tasks/lib/sub/render"
+        ));
+        assert!(glob_match("**/lib/*", ".mise/tasks/lib/render"));
+        assert!(glob_match("**/lib/*", "lib/render"));
+        assert!(!glob_match("**/lib/*", "xlib/render"));
+        assert!(glob_match("scripts/**", "scripts/a/b.sh"));
+        assert!(glob_match("a?c", "abc") && !glob_match("a?c", "a/c"));
+        assert!(!glob_match("*.sh", "dir/a.sh"));
+    }
 }
