@@ -73,6 +73,43 @@ CLI 只讀：Git 以 `GIT_OPTIONAL_LOCKS=0`、`core.fsmonitor=false` 執行，�
 （`GIT_INDEX_FILE`）讀取，避免 `git diff` refresh 時重寫 `.git/index`。`git` 只從 PATH 中的
 絕對路徑項目尋找（相對項目如 `.` 會被略過）。只讀取內建與已啟用語言的檔案內容；其他檔案只列路徑。
 
+Git 最低版本為 2.39.1（`safe.bareRepository` 自 2.38 起才有，CVE-2022-23521 的 `.gitattributes`
+溢位在 2.39.1 修正；2.38.3 以上的 2.38 修補版也一律拒絕）。在第一次尋找 repo 之前（包括 CLI 與
+hook 一開始的 `rev-parse --show-toplevel`）先在 repo 外執行 `git version`；版本較舊或無法辨識時
+CLI 退出碼 2，hook 不阻擋，每個 session 以一則 `systemMessage` 提示。
+
+信任說明（repo 內容不受信任）：hook 會在宿主尚未信任的資料夾中執行，repo 的設定可能要求 git
+執行指令。擷取期間的每個 git 呼叫（CLI 與 hook、所有模式）都停用以下由 repo 控制的指令路徑：
+
+- filter driver：先以 `git config --null --name-only --get-regexp '^(filter|hook)\.'` 列出名稱
+  （取 `filter.` 與最後一個 `.` 之間的文字，名稱含 `=`、`.` 或大小寫都保留），再對每個名稱以
+  `--config-env=filter.<name>.<clean|smudge|process|required>=ROTTER_EMPTY_VALUE`（空值）清空；
+  列舉失敗（退出碼不是 0／1）或輸出非 UTF-8 時拒絕擷取。
+- hook：`core.hooksPath=/dev/null`；`diff.autoRefreshIndex=false`，git diff 不寫 index，
+  `post-index-change` 等 index hook（檔案或 git ≥ 2.54 的設定式 hook）不會觸發；設定式 hook
+  另以 `--config-env=hook.<name>.event=ROTTER_EMPTY_VALUE` 清空事件。沒有名稱的 `hook.event`
+  鍵會讓擷取被拒絕。
+- promisor lazy fetch（會執行 repo 的 `uploadpack`、`sshCommand`、`credential.helper`、
+  `alternateRefsCommand` 等）：設定 `GIT_NO_LAZY_FETCH=1`，缺少的物件在該側顯示 `read_error`，
+  HEAD 指向缺少的 commit 則是擷取錯誤（HEAD 無法解析才算「尚無 commit」）。git 2.39.1–2.45.0
+  不依賴這個變數：repo 有 `extensions.partialClone`、`remote.*.promisor` 或
+  `remote.*.partialclonefilter`（不論值，含沒有名稱的 `remote.promisor`）時，在讀取任何物件前
+  拒絕（CLI 退出碼 2 並指出 partial clone／promisor；hook 以 `systemMessage` 提示）。macOS
+  內建的舊版 Apple Git（例如 2.39.x）因此無法處理 partial clone，請把較新的 git 放在 PATH 前面。
+- 子模組：`git diff --ignore-submodules=dirty`，不在子模組中以其自身設定執行 `git status`
+  （gitlink commit 的變更仍會列出並略過）。
+- 隱含的 bare repo：`safe.bareRepository=explicit`，工作目錄內嵌的 bare repo 不會被採用。
+
+因為 git 不再更新 stat 資訊，rotter 自行略過只有 stat 改變的檔案（worktree／base 模式，狀態 `M`、
+after oid 全為 0、前後都是一般檔案且 mode 相同）：以不跟隨 symlink、不阻塞的描述子讀取工作目錄
+檔案，把這些 bytes 餵給 `git hash-object --no-filters --stdin` 與 before blob 比對；改名與其他狀態
+不略過。比對的是原始 bytes，所以 `core.autocrlf`、`ident`、`working-tree-encoding`、`text eol=…`
+或 clean filter 會轉換內容的檔案，被碰過就可能顯示為已修改（雜訊）。
+
+其他限制：repo 設定把 `diff.orderFile`、`core.excludesFile` 或 `include.path` 指向 FIFO 或巨大
+檔案時，git 可能卡住或變慢（fail-open 的 DoS，以宿主的 hook timeout 為上限）。repo 的
+`core.worktree` 決定 rotter 讀取哪個目錄，該目錄可能在 checkout 之外，列出的檔案會被解析進報告。
+
 暫存檔：`TMPDIR`（未設時為平台預設：macOS 為使用者專屬的 `/var/folders/…/T`，Linux 為 `/tmp`）先經與設定檔相同的信任檢查（逐層解析 symlink，每一層目錄須屬於
 使用者或 root，且不可被他人寫入，除非是 root 擁有的 sticky 目錄）。不安全的 TMPDIR、或解析後路徑
 含 `:` 者，會在建立任何檔案前被拒絕（CLI 退出碼 2 並指出 TMPDIR；hook 以一則 `systemMessage`
@@ -178,6 +215,8 @@ timeout 才是最終上限。hook 另有整體軟性期限（見下節）。
 改名、未追蹤檔、衝突路徑、NUL 內容、Unicode／CRLF／特殊檔名、七語言的註解關聯、
 函式值、同檔案引用上限、
 不完整狀態與退出碼，並確認執行前後 index、狀態與檔案內容不變。
+[repo 指令測試](tests/repo_commands.rs) 以會建立標記檔的 filter、hook、promisor 與子模組 fixture，
+經 hook 與 CLI 確認標記從未出現，並各以一般 git 在重建的 fixture 上作為正向對照。
 
 ## Agent 整合
 
