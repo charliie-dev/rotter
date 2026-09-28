@@ -2,7 +2,7 @@ mod comments;
 mod git;
 pub mod json;
 
-pub use comments::{Change, units};
+pub use comments::{Change, error_lines, full_units, units};
 pub use git::{Mode, Options, Report, extract};
 
 use std::fmt;
@@ -194,6 +194,15 @@ impl std::error::Error for ParseError {
 }
 
 pub fn parse(language: Language, source: &str) -> Result<tree_sitter::Tree, ParseError> {
+    let tree = parse_partial(language, source)?;
+    if tree.root_node().has_error() {
+        return Err(ParseError::Syntax);
+    }
+    Ok(tree)
+}
+
+/// Like [`parse`], but keeps a tree that contains syntax errors so the rest can still be used.
+pub fn parse_partial(language: Language, source: &str) -> Result<tree_sitter::Tree, ParseError> {
     let grammar = match language {
         Language::Go => tree_sitter_go::LANGUAGE,
         Language::Lua => tree_sitter_lua::LANGUAGE,
@@ -207,9 +216,5 @@ pub fn parse(language: Language, source: &str) -> Result<tree_sitter::Tree, Pars
     parser
         .set_language(&grammar.into())
         .map_err(ParseError::GrammarLoad)?;
-    let tree = parser.parse(source, None).ok_or(ParseError::NoTree)?;
-    if tree.root_node().has_error() {
-        return Err(ParseError::Syntax);
-    }
-    Ok(tree)
+    parser.parse(source, None).ok_or(ParseError::NoTree)
 }

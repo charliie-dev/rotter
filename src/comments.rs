@@ -36,6 +36,8 @@ struct Selected<'t> {
     /// Set when the unit was selected because it uses the name of a changed unit.
     reference: Option<String>,
     omitted_references: usize,
+    /// Full mode: only these comments (by start byte) are reported with the unit.
+    only: Option<BTreeSet<usize>>,
 }
 
 impl<'t> Selected<'t> {
@@ -46,6 +48,7 @@ impl<'t> Selected<'t> {
             gaps: BTreeSet::new(),
             reference,
             omitted_references: 0,
+            only: None,
         }
     }
 }
@@ -63,38 +66,60 @@ struct File<'t> {
     comment_rows: BTreeSet<usize>,
     changed_rows: BTreeSet<usize>,
     identifiers: Vec<Node<'t>>,
+    /// Byte ranges of ERROR and MISSING nodes in a partially parsed tree.
+    errors: Vec<Range<usize>>,
+    /// Full mode: unit text longer than this many lines is cut.
+    text_limit: Option<usize>,
+}
+
+/// Unit text in full mode is cut after this many lines; the range still covers the whole unit.
+const FULL_TEXT_LINES: usize = 80;
+
+/// 1-based lines of syntax errors, for reporting a partial parse.
+pub fn error_lines(tree: &Tree) -> Vec<usize> {
+    fn walk(node: Node<'_>, rows: &mut BTreeSet<usize>) {
+        if node.is_error() || node.is_missing() {
+            rows.insert(node.start_position().row + 1);
+            return;
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if child.has_error() || child.is_missing() {
+                walk(child, rows);
+            }
+        }
+    }
+    let mut rows = BTreeSet::new();
+    walk(tree.root_node(), &mut rows);
+    rows.into_iter().collect()
+}
+
+/// Full mode: every unit that has a comment, each with only the comments that belong to it.
+pub fn full_units(language: Language, source: &str, tree: &Tree) -> Json {
+    let mut file = File::new(language, source, tree);
+    file.text_limit = Some(FULL_TEXT_LINES);
+    let mut selected: BTreeMap<(usize, usize), Selected<'_>> = BTreeMap::new();
+    for comment in &file.comments {
+        let unit = if file.standalone(*comment) {
+            file.unit_for(*comment)
+        } else {
+            // A trailing comment belongs to the code at the start of its line.
+            file.node_at_row(comment.start_position().row)
+                .map_or(*comment, |node| file.unit_for(node))
+        };
+        selected
+            .entry((file.start_byte(unit), unit.end_byte()))
+            .or_insert_with(|| Selected::new(unit, None))
+            .only
+            .get_or_insert_with(BTreeSet::new)
+            .insert(comment.start_byte());
+    }
+    Json::Arr(selected.values().map(|item| file.unit_json(item)).collect())
 }
 
 /// Maps the changes on one side of a file to units and their related comments.
 pub fn units(language: Language, source: &str, tree: &Tree, changes: &[Change]) -> Json {
-    let root = tree.root_node();
-    let mut file = File {
-        language,
-        source,
-        root,
-        line_starts: std::iter::once(0)
-            .chain(source.match_indices('\n').map(|(index, _)| index + 1))
-            .collect(),
-        comments: Vec::new(),
-        by_start_row: HashMap::new(),
-        by_last_row: HashMap::new(),
-        attribute_rows: BTreeSet::new(),
-        comment_rows: BTreeSet::new(),
-        changed_rows: BTreeSet::new(),
-        identifiers: Vec::new(),
-    };
-    file.scan(root);
-    for comment in file.comments.clone() {
-        if file.standalone(comment) {
-            file.by_start_row
-                .entry(comment.start_position().row)
-                .or_insert(comment);
-            file.by_last_row.insert(last_row(comment), comment);
-            file.comment_rows
-                .extend(comment.start_position().row..=last_row(comment));
-        }
-    }
-
+    let mut file = File::new(language, source, tree);
     for change in changes {
         if let Change::Rows(rows) = change {
             file.changed_rows.extend(rows.clone());
@@ -182,7 +207,43 @@ pub fn units(language: Language, source: &str, tree: &Tree, changes: &[Change]) 
 }
 
 impl<'t> File<'t> {
+    fn new(language: Language, source: &'t str, tree: &'t Tree) -> Self {
+        let root = tree.root_node();
+        let mut file = File {
+            language,
+            source,
+            root,
+            line_starts: std::iter::once(0)
+                .chain(source.match_indices('\n').map(|(index, _)| index + 1))
+                .collect(),
+            comments: Vec::new(),
+            by_start_row: HashMap::new(),
+            by_last_row: HashMap::new(),
+            attribute_rows: BTreeSet::new(),
+            comment_rows: BTreeSet::new(),
+            changed_rows: BTreeSet::new(),
+            identifiers: Vec::new(),
+            errors: Vec::new(),
+            text_limit: None,
+        };
+        file.scan(root);
+        for comment in file.comments.clone() {
+            if file.standalone(comment) {
+                file.by_start_row
+                    .entry(comment.start_position().row)
+                    .or_insert(comment);
+                file.by_last_row.insert(last_row(comment), comment);
+                file.comment_rows
+                    .extend(comment.start_position().row..=last_row(comment));
+            }
+        }
+        file
+    }
+
     fn scan(&mut self, node: Node<'t>) {
+        if node.is_error() || node.is_missing() {
+            self.errors.push(node.byte_range());
+        }
         if is_comment(node.kind()) {
             self.comments.push(node);
             return;
@@ -498,6 +559,13 @@ impl<'t> File<'t> {
             && next.start_position().row == last_row(previous) + 1
     }
 
+    fn overlaps_error(&self, node: Node<'_>) -> bool {
+        let (start, end) = (self.start_byte(node), node.end_byte());
+        self.errors
+            .iter()
+            .any(|error| error.start <= end && start <= error.end)
+    }
+
     fn unit_json(&self, item: &Selected<'t>) -> Json {
         let node = item.node;
         let enclosing = self.enclosing(node);
@@ -523,6 +591,14 @@ impl<'t> File<'t> {
                 add(comment, "enclosing_leading");
             }
         }
+        if let Some(only) = &item.only {
+            for comment in self.comments.iter().copied() {
+                if only.contains(&comment.start_byte()) {
+                    add(comment, "nearby");
+                }
+            }
+            related.retain(|start, _| only.contains(start));
+        }
         let mut groups: Vec<(Vec<Node<'t>>, &str)> = Vec::new();
         for (comment, relation) in related.into_values() {
             match groups.last_mut() {
@@ -538,13 +614,24 @@ impl<'t> File<'t> {
             .iter()
             .map(|(group, relation)| self.comment_json(group, relation))
             .collect();
+        let mut text = &self.source[self.start_byte(node)..node.end_byte()];
+        let cut = self
+            .text_limit
+            .and_then(|limit| text.match_indices('\n').nth(limit - 1))
+            .map(|(index, _)| index);
+        let truncated = cut.is_some();
+        if let Some(index) = cut {
+            text = &text[..index];
+        }
         Json::Obj(vec![
             ("kind", node.kind().into()),
             ("name", self.name(node)),
             ("range", self.node_range(node)),
             (
                 "selected_by",
-                (if item.reference.is_some() {
+                (if item.only.is_some() {
+                    "full"
+                } else if item.reference.is_some() {
                     "reference"
                 } else {
                     "change"
@@ -586,10 +673,9 @@ impl<'t> File<'t> {
                         .collect(),
                 ),
             ),
-            (
-                "text",
-                self.source[self.start_byte(node)..node.end_byte()].into(),
-            ),
+            ("overlaps_syntax_error", self.overlaps_error(node).into()),
+            ("text", text.into()),
+            ("text_truncated", truncated.into()),
             ("comments", Json::Arr(comments)),
         ])
     }

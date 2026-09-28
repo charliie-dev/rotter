@@ -53,11 +53,22 @@ impl Repo {
     }
 
     fn extract(&self, mode: Mode, include_untracked: bool) -> Report {
+        self.extract_in(&self.0, mode, include_untracked, &[])
+    }
+
+    fn extract_in(
+        &self,
+        dir: &Path,
+        mode: Mode,
+        include_untracked: bool,
+        paths: &[&str],
+    ) -> Report {
         let report = extract(
-            &self.0,
+            dir,
             &Options {
                 mode,
                 include_untracked,
+                paths: paths.iter().map(|path| path.to_string()).collect(),
             },
         )
         .unwrap();
@@ -70,7 +81,7 @@ impl Repo {
         for file in report.get("files").as_arr() {
             for key in ["before", "after"] {
                 let side = file.get(key);
-                if side.get("status").as_str() != Some("ok") {
+                if !matches!(side.get("status").as_str(), Some("ok" | "partial")) {
                     continue;
                 }
                 let blob = side.get("blob").as_str().unwrap();
@@ -117,7 +128,12 @@ fn check_text(content: &str, item: &Json) {
         bytes[0].as_u64().unwrap() as usize,
         bytes[1].as_u64().unwrap() as usize,
     );
-    assert_eq!(&content[start..end], item.get("text").as_str().unwrap());
+    let text = item.get("text").as_str().unwrap();
+    if item.get("text_truncated").as_bool() == Some(true) {
+        assert!(content[start..end].starts_with(text) && text.len() < end - start);
+    } else {
+        assert_eq!(&content[start..end], text);
+    }
     let line_of = |offset: usize| content[..offset].matches('\n').count() + 1;
     assert_eq!(lines[0].as_u64().unwrap() as usize, line_of(start));
     let last = content[start..end].trim_end_matches('\n');
@@ -512,6 +528,7 @@ fn base_mode_requires_a_resolvable_revision() {
     let options = |rev: &str| Options {
         mode: Mode::Base(rev.to_owned()),
         include_untracked: false,
+        paths: Vec::new(),
     };
     assert!(extract(&repo.0, &options("missing")).is_err());
     assert!(extract(&repo.0, &options("--output=x")).is_err());
@@ -615,7 +632,7 @@ fn unreadable_inputs_make_the_report_incomplete() {
             .as_str()
             .map(str::to_owned)
     };
-    assert_eq!(status("ok.go", "after").as_deref(), Some("syntax_error"));
+    assert_eq!(status("ok.go", "after").as_deref(), Some("partial"));
     assert_eq!(
         status("z.sh", "after").as_deref(),
         Some("unsupported_dialect")
@@ -720,7 +737,7 @@ fn cli_requires_an_explicit_mode_and_reports_incomplete_status() {
     assert!(
         String::from_utf8(broken.stdout)
             .unwrap()
-            .contains("\"syntax_error\"")
+            .contains("\"partial\"")
     );
 }
 
@@ -842,4 +859,143 @@ fn unmerged_paths_are_reported_even_without_a_diff_record() {
             );
         }
     }
+}
+
+#[test]
+fn syntax_errors_keep_the_units_that_parsed() {
+    let repo = Repo::new();
+    let script = |value: &str| {
+        format!(
+            "#!/usr/bin/env bash\n# Deploys to REMOTE.\ndeploy() {{\n  echo {value}\n}}\nREMOTE=\"${{REMOTE:?ERROR: $HOST not found for $ENV (run: tf --env=$ENV)}}\"\n"
+        )
+    };
+    repo.write("deploy", &script("1"));
+    repo.commit();
+    repo.write("deploy", &script("2"));
+    let report = repo.extract(Mode::Worktree, false);
+    assert!(!report.complete);
+    let after = file(&report.json, "deploy").get("after");
+    assert_eq!(after.get("status").as_str(), Some("partial"));
+    assert!(
+        after.get("detail").as_str().unwrap().contains("line"),
+        "{after}"
+    );
+    let deploy = unit(after, "deploy");
+    assert_eq!(deploy.get("overlaps_syntax_error").as_bool(), Some(false));
+    assert_eq!(
+        comment(deploy, "# Deploys to REMOTE."),
+        ("leading", false, None)
+    );
+}
+
+#[test]
+fn full_mode_reports_each_comment_once_with_its_own_unit() {
+    let repo = Repo::new();
+    let long_body = "    x += 1;\n".repeat(100);
+    repo.write(
+        "src/a.rs",
+        &format!("/// Holder.\nstruct S;\n\n/// Impl docs.\nimpl S {{\n    /// One.\n    fn one(&self) -> u8 {{ 1 }} // trailing\n\n    /// Long.\n    fn long(&self) {{\n        let mut x = 0;\n{long_body}    }}\n}}\n"),
+    );
+    repo.write("conf/b.yaml", "# Top.\na:\n  b: 1 # trailing b\n");
+    repo.write("gone.go", "package p\n// Gone.\n");
+    repo.write("notes.md", "# not code\n");
+    repo.commit();
+    fs::remove_file(repo.0.join("gone.go")).unwrap();
+    repo.write("new.lua", "-- New.\nlocal x = 1\n");
+
+    let report = repo.extract(Mode::Full, false);
+    assert!(report.complete, "{}", report.json);
+    assert_eq!(report.json.get("mode").as_str(), Some("full"));
+    assert_eq!(report.json.get("before"), &Json::Null);
+    let paths: Vec<_> = report
+        .json
+        .get("files")
+        .as_arr()
+        .iter()
+        .map(|file| file.get("new_path").as_str().unwrap())
+        .collect();
+    assert_eq!(paths, ["conf/b.yaml", "notes.md", "src/a.rs"]);
+
+    let rust = file(&report.json, "src/a.rs").get("after");
+    let implementation = rust
+        .get("units")
+        .as_arr()
+        .iter()
+        .find(|unit| unit.get("kind").as_str() == Some("impl_item"))
+        .unwrap();
+    assert_eq!(
+        implementation.get("comments").as_arr().len(),
+        1,
+        "{implementation}"
+    );
+    assert_eq!(
+        comment(implementation, "/// Impl docs."),
+        ("leading", false, None)
+    );
+    let one = unit(rust, "one");
+    assert_eq!(one.get("selected_by").as_str(), Some("full"));
+    assert_eq!(comment(one, "/// One."), ("leading", false, None));
+    assert_eq!(comment(one, "// trailing"), ("trailing", false, None));
+    assert!(!has_comment(one, "/// Impl docs."));
+    let long = unit(rust, "long");
+    assert_eq!(long.get("text_truncated").as_bool(), Some(true));
+    assert_eq!(long.get("range").get("lines").as_arr()[1], Json::Num(112));
+
+    let yaml = file(&report.json, "conf/b.yaml").get("after");
+    assert_eq!(comment(unit(yaml, "a"), "# Top."), ("leading", false, None));
+    assert_eq!(
+        comment(unit(yaml, "b"), "# trailing b"),
+        ("trailing", false, None)
+    );
+
+    let with_untracked = repo.extract(Mode::Full, true);
+    file(&with_untracked.json, "new.lua");
+}
+
+#[test]
+fn pathspecs_limit_every_mode_relative_to_the_working_directory() {
+    let repo = Repo::new();
+    repo.write(
+        "a/one.go",
+        "package a\n\n// One.\nfunc One() int { return 1 }\n",
+    );
+    repo.write(
+        "b/two.go",
+        "package b\n\n// Two.\nfunc Two() int { return 2 }\n",
+    );
+    repo.commit();
+    repo.write(
+        "a/one.go",
+        "package a\n\n// One.\nfunc One() int { return 3 }\n",
+    );
+    repo.write(
+        "b/two.go",
+        "package b\n\n// Two.\nfunc Two() int { return 4 }\n",
+    );
+    let paths = |report: &Report| -> Vec<String> {
+        report
+            .json
+            .get("files")
+            .as_arr()
+            .iter()
+            .map(|file| file.get("new_path").as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(
+        paths(&repo.extract_in(&repo.0, Mode::Worktree, false, &["a"])),
+        ["a/one.go"]
+    );
+    let from_b = repo.0.join("b");
+    assert_eq!(
+        paths(&repo.extract_in(&from_b, Mode::Worktree, false, &["two.go"])),
+        ["b/two.go"]
+    );
+    assert_eq!(
+        paths(&repo.extract_in(&from_b, Mode::Worktree, false, &[])).len(),
+        2
+    );
+    assert_eq!(
+        paths(&repo.extract_in(&from_b, Mode::Full, false, &["."])),
+        ["b/two.go"]
+    );
 }

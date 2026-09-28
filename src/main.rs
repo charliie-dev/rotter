@@ -2,9 +2,11 @@ use rotter::{Mode, Options, extract};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: rotter extract (--staged | --worktree | --base <rev>) [--include-untracked] [-C <dir>]
+const USAGE: &str = "usage: rotter extract (--staged | --worktree | --base <rev> | --full)
+                      [--include-untracked] [-C <dir>] [-- <pathspec>...]
 
-Prints changed code units and their related comments as JSON.
+Prints changed code units and their related comments as JSON. --full reports every commented
+unit of the tracked working-tree files instead of a diff. Pathspecs limit any mode.
 Exit status: 0 complete, 1 printed but incomplete (unreadable, unparsed or unsupported files), 2 error.";
 
 fn parse_args(args: &[String]) -> Result<(PathBuf, Options), String> {
@@ -15,14 +17,19 @@ fn parse_args(args: &[String]) -> Result<(PathBuf, Options), String> {
     let mut mode = None;
     let mut include_untracked = false;
     let mut dir = PathBuf::from(".");
+    let mut paths = Vec::new();
     let mut set = |value: Mode| match mode.replace(value) {
-        Some(_) => Err("choose exactly one of --staged, --worktree, --base".to_owned()),
+        Some(_) => Err("choose exactly one of --staged, --worktree, --base, --full".to_owned()),
         None => Ok(()),
     };
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--staged" => set(Mode::Staged)?,
             "--worktree" => set(Mode::Worktree)?,
+            "--full" => set(Mode::Full)?,
+            "--" => {
+                paths.extend(args.by_ref().cloned());
+            }
             "--base" => set(Mode::Base(
                 args.next().ok_or("--base needs a revision")?.clone(),
             ))?,
@@ -34,7 +41,7 @@ fn parse_args(args: &[String]) -> Result<(PathBuf, Options), String> {
             },
         }
     }
-    let mode = mode.ok_or("choose one of --staged, --worktree, --base")?;
+    let mode = mode.ok_or("choose one of --staged, --worktree, --base, --full")?;
     if include_untracked && matches!(mode, Mode::Staged) {
         return Err("--include-untracked does not apply to --staged".into());
     }
@@ -43,6 +50,7 @@ fn parse_args(args: &[String]) -> Result<(PathBuf, Options), String> {
         Options {
             mode,
             include_untracked,
+            paths,
         },
     ))
 }
@@ -69,7 +77,14 @@ fn main() -> ExitCode {
     };
     match extract(&dir, &options) {
         Ok(report) => {
-            println!("{}", report.json);
+            let text = report.json.to_string();
+            if text.len() > 5 << 20 {
+                eprintln!(
+                    "rotter: report is {} MiB; consider limiting it with -- <pathspec>",
+                    text.len() >> 20
+                );
+            }
+            println!("{text}");
             ExitCode::from(if report.complete { 0 } else { 1 })
         }
         Err(error) => {

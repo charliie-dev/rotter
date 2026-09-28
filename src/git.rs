@@ -1,5 +1,8 @@
 use crate::json::Json;
-use crate::{Change, Detected, Language, ParseError, detect_content, detect_path, parse, units};
+use crate::{
+    Change, Detected, Language, detect_content, detect_path, error_lines, full_units,
+    parse_partial, units,
+};
 use std::ffi::OsStr;
 use std::fs;
 use std::io::{Read, Write};
@@ -19,12 +22,16 @@ pub enum Mode {
     Worktree,
     /// An explicit revision against the working tree.
     Base(String),
+    /// Every tracked file in the working tree, without a diff.
+    Full,
 }
 
 #[derive(Clone, Debug)]
 pub struct Options {
     pub mode: Mode,
     pub include_untracked: bool,
+    /// Git pathspecs relative to the directory the command runs in; empty means the whole repo.
+    pub paths: Vec<String>,
 }
 
 pub struct Report {
@@ -401,7 +408,7 @@ impl Run<'_> {
         }
     }
 
-    fn file(&self, entry: &Entry, after_on_disk: bool) -> Result<(Json, bool), String> {
+    fn file(&self, entry: &Entry, after_on_disk: bool, full: bool) -> Result<(Json, bool), String> {
         let before = entry
             .old
             .as_ref()
@@ -427,7 +434,7 @@ impl Run<'_> {
             .iter()
             .flatten()
             .all(|side| !side.in_scope || side.ok());
-        let hunks = if in_scope && readable {
+        let hunks = if in_scope && readable && !full {
             let text = |side: &Option<Side>| {
                 side.as_ref()
                     .and_then(|side| side.text.clone())
@@ -442,23 +449,33 @@ impl Run<'_> {
         let side_json = |side: Option<Side>, is_after: bool, complete: &mut bool| {
             let mut side = side?;
             if let (Some(text), Some(language)) = (&side.text, side.language) {
-                match parse(language, text) {
+                match parse_partial(language, text) {
                     Ok(tree) => {
-                        side.json.push(("status", "ok".into()));
-                        side.json.push(("detail", Json::Null));
-                        side.json.push((
-                            "units",
-                            units(language, text, &tree, &changes(&hunks, is_after)),
-                        ));
+                        // Keep what parsed; units touching an error are flagged, not dropped.
+                        let errors = error_lines(&tree);
+                        if errors.is_empty() {
+                            side.json.push(("status", "ok".into()));
+                            side.json.push(("detail", Json::Null));
+                        } else {
+                            *complete = false;
+                            let lines: Vec<String> =
+                                errors.iter().take(20).map(ToString::to_string).collect();
+                            side.json.push(("status", "partial".into()));
+                            side.json.push((
+                                "detail",
+                                format!("syntax errors near lines {}", lines.join(", ")).into(),
+                            ));
+                        }
+                        let found = if full {
+                            full_units(language, text, &tree)
+                        } else {
+                            units(language, text, &tree, &changes(&hunks, is_after))
+                        };
+                        side.json.push(("units", found));
                     }
                     Err(error) => {
                         *complete = false;
-                        let status = if matches!(error, ParseError::Syntax) {
-                            "syntax_error"
-                        } else {
-                            "parse_error"
-                        };
-                        side.json.push(("status", status.into()));
+                        side.json.push(("status", "parse_error".into()));
                         side.json.push(("detail", error.to_string().into()));
                     }
                 }
@@ -476,6 +493,7 @@ impl Run<'_> {
             ("T", _) => ("type_changed", None),
             ("U", _) => ("unmerged", None),
             ("?", _) => ("untracked_added", None),
+            ("F", _) => ("full", None),
             _ => ("unknown", None),
         };
         if change == "unmerged" || change == "unknown" {
@@ -532,11 +550,27 @@ pub fn extract(dir: &Path, options: &Options) -> Result<Report, String> {
             .map_err(|_| format!("cannot resolve base revision {rev:?}"))?;
             (rev.clone(), Some(commit))
         }
-        Mode::Staged | Mode::Worktree => (
+        Mode::Staged | Mode::Worktree | Mode::Full => (
             "HEAD".to_owned(),
             git_text(&top, &["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]).ok(),
         ),
     };
+    let full = matches!(options.mode, Mode::Full);
+    // Pathspecs are relative to `dir`, so commands that take them run there with top-level
+    // output paths; `:/` means the whole repository.
+    let specs: Vec<&OsStr> = if options.paths.is_empty() {
+        vec![OsStr::new(":/")]
+    } else {
+        options.paths.iter().map(OsStr::new).collect()
+    };
+    fn args_with<'a>(args: &[&'a str], specs: &[&'a OsStr]) -> Vec<&'a OsStr> {
+        args.iter()
+            .map(|arg| OsStr::new(*arg))
+            .chain([OsStr::new("--")])
+            .chain(specs.iter().copied())
+            .collect()
+    }
+    let with_specs = |args: &[&'static str]| args_with(args, &specs);
     let tree = match &commit {
         Some(commit) => commit.clone(),
         None => {
@@ -569,14 +603,48 @@ pub fn extract(dir: &Path, options: &Options) -> Result<Report, String> {
         "--no-textconv",
         "--no-relative",
         tree.as_str(),
-        "--",
     ]);
-    let args: Vec<&OsStr> = args.into_iter().map(OsStr::new).collect();
-    let mut entries = parse_raw(&git_in(&top, &args, None, &[0], index)?)?;
+    let mut entries = if full {
+        let listed = git_in(
+            dir,
+            &with_specs(&["ls-files", "-s", "-z", "--full-name"]),
+            None,
+            &[0],
+            index,
+        )?;
+        let mut entries: Vec<Entry> = Vec::new();
+        for record in listed
+            .split(|byte| *byte == 0)
+            .filter(|record| !record.is_empty())
+        {
+            let tab = record
+                .iter()
+                .position(|byte| *byte == b'\t')
+                .ok_or("unexpected ls-files record")?;
+            let mode = String::from_utf8_lossy(&record[..6]).into_owned();
+            let path = record[tab + 1..].to_vec();
+            // Tracked files deleted from the working tree are not part of this snapshot.
+            let on_disk = fs::symlink_metadata(top.join(OsStr::from_bytes(&path))).is_ok();
+            if on_disk
+                && entries
+                    .last()
+                    .is_none_or(|last| last.new.as_ref().is_none_or(|new| new.0 != path))
+            {
+                entries.push(Entry {
+                    status: "F".to_owned(),
+                    old: None,
+                    new: Some((path, mode, String::new())),
+                });
+            }
+        }
+        entries
+    } else {
+        parse_raw(&git_in(dir, &args_with(&args, &specs), None, &[0], index)?)?
+    };
 
     // HEAD→disk diffs report conflicted paths as plain modifications; keep them visible.
-    let unmerged_args = ["ls-files", "--unmerged", "-z"].map(OsStr::new);
-    let mut unmerged: Vec<Vec<u8>> = git_in(&top, &unmerged_args, None, &[0], index)?
+    let unmerged_args = with_specs(&["ls-files", "--unmerged", "-z", "--full-name"]);
+    let mut unmerged: Vec<Vec<u8>> = git_in(dir, &unmerged_args, None, &[0], index)?
         .split(|byte| *byte == 0)
         .filter_map(|record| {
             let tab = record.iter().position(|byte| *byte == b'\t')?;
@@ -602,8 +670,14 @@ pub fn extract(dir: &Path, options: &Options) -> Result<Report, String> {
         }
     }
 
-    let untracked_args = ["ls-files", "--others", "--exclude-standard", "-z"].map(OsStr::new);
-    let untracked: Vec<Vec<u8>> = git_in(&top, &untracked_args, None, &[0], index)?
+    let untracked_args = with_specs(&[
+        "ls-files",
+        "--others",
+        "--exclude-standard",
+        "-z",
+        "--full-name",
+    ]);
+    let untracked: Vec<Vec<u8>> = git_in(dir, &untracked_args, None, &[0], index)?
         .split(|byte| *byte == 0)
         .filter(|path| !path.is_empty())
         .map(<[u8]>::to_vec)
@@ -622,7 +696,7 @@ pub fn extract(dir: &Path, options: &Options) -> Result<Report, String> {
     let mut complete = true;
     let mut files = Vec::new();
     for entry in &entries {
-        let (json, file_complete) = run.file(entry, after_on_disk)?;
+        let (json, file_complete) = run.file(entry, after_on_disk, full)?;
         complete &= file_complete;
         files.push(json);
     }
@@ -630,6 +704,7 @@ pub fn extract(dir: &Path, options: &Options) -> Result<Report, String> {
         Mode::Staged => "staged",
         Mode::Worktree => "worktree",
         Mode::Base(_) => "base",
+        Mode::Full => "full",
     };
     let not_covered: Vec<String> = if include {
         Vec::new()
@@ -648,12 +723,17 @@ pub fn extract(dir: &Path, options: &Options) -> Result<Report, String> {
         ("repository", top.to_string_lossy().into_owned().into()),
         (
             "before",
-            Json::Obj(vec![
-                ("rev", rev.into()),
-                ("commit", commit.clone().into()),
-                ("empty_initial", commit.is_none().into()),
-            ]),
+            if full {
+                Json::Null
+            } else {
+                Json::Obj(vec![
+                    ("rev", rev.into()),
+                    ("commit", commit.clone().into()),
+                    ("empty_initial", commit.is_none().into()),
+                ])
+            },
         ),
+        ("pathspec", options.paths.clone().into()),
         (
             "after",
             (if after_on_disk { "worktree" } else { "index" }).into(),
