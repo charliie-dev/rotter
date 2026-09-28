@@ -141,6 +141,7 @@ impl Fixture {
             .env("XDG_CACHE_HOME", home.join("cache"))
             .env("XDG_STATE_HOME", home.join("state"))
             .env("CLAUDE_CONFIG_DIR", home.join("claude"))
+            .env("GROK_HOME", home.join("grok"))
             .env("ROTTER_STATE_DIR", home.join("rotter-state"))
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -177,6 +178,27 @@ impl Fixture {
         let session = format!("s{}", NEXT.fetch_add(1, Ordering::Relaxed));
         let input = serde_json::json!({ "session_id": session, "cwd": self.repo }).to_string();
         let output = self.rotter(&["hook", "claude-stop"], Some(&input));
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+        output
+    }
+
+    /// `hook grok-stop` with Grok-shaped input for this repository in a fresh session.
+    fn grok_stop(&self) -> Output {
+        let session = format!("g{}", NEXT.fetch_add(1, Ordering::Relaxed));
+        self.grok_stop_in(&session)
+    }
+
+    fn grok_stop_in(&self, session: &str) -> Output {
+        let input = serde_json::json!({
+            "hookEventName": "stop",
+            "sessionId": session,
+            "cwd": self.repo,
+            "workspaceRoot": self.repo,
+            "stopHookActive": false,
+            "reason": "end_turn",
+        })
+        .to_string();
+        let output = self.rotter(&["hook", "grok-stop"], Some(&input));
         assert_eq!(output.status.code(), Some(0), "{output:?}");
         output
     }
@@ -296,8 +318,18 @@ fn stdout(output: &Output) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
-/// Rotter through `hook claude-stop`, `extract --worktree` and `extract --base HEAD`: `a.rs` is
-/// still reported and the marker never appears.
+fn stderr(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+/// A `hook grok-stop` refusal: exit 0 (checked by the helper), nothing on stdout, a stderr note.
+fn assert_grok_note(output: &Output, note: &str, name: &str) {
+    assert_eq!(stdout(output), "", "{name}: {output:?}");
+    assert!(stderr(output).contains(note), "{name}: {output:?}");
+}
+
+/// Rotter through `hook claude-stop`, `hook grok-stop`, `extract --worktree` and
+/// `extract --base HEAD`: `a.rs` is still reported and the marker never appears.
 fn assert_rotter_safe(fixture: &Fixture, name: &str) {
     assert!(!fixture.marked(), "{name}: fixture setup ran the command");
     let hook = fixture.claude_stop();
@@ -306,6 +338,12 @@ fn assert_rotter_safe(fixture: &Fixture, name: &str) {
         "{name}: {hook:?}"
     );
     assert!(!fixture.marked(), "{name}: hook claude-stop ran it");
+    let hook = fixture.grok_stop();
+    assert!(
+        stdout(&hook).contains(r#""decision":"block""#),
+        "{name}: {hook:?}"
+    );
+    assert!(!fixture.marked(), "{name}: hook grok-stop ran it");
     for args in [
         &["extract", "--worktree"][..],
         &["extract", "--base", "HEAD"],
@@ -519,6 +557,7 @@ fn promisor_objects_are_never_fetched_with_lazy_fetch_git() {
     }
     let hook = stdout(&fixture.claude_stop());
     assert!(hook.contains("could not be analysed"), "{hook}");
+    assert_grok_note(&fixture.grok_stop(), "could not be analysed", "lazy blob");
     assert!(!fixture.marked(), "a lazy fetch ran");
     drop(fixture);
     let fixture = Fixture::changed("lazy-blob");
@@ -549,6 +588,7 @@ fn promisor_objects_are_never_fetched_with_lazy_fetch_git() {
     );
     let hook = stdout(&fixture.claude_stop());
     assert!(hook.contains("extract failed"), "{hook}");
+    assert_grok_note(&fixture.grok_stop(), "extract failed", "lazy head");
     assert!(!fixture.marked(), "a lazy fetch ran");
     drop(fixture);
     let fixture = Fixture::changed("lazy-head");
@@ -644,6 +684,7 @@ fn gated_git_refuses_partial_clones_before_reading_objects() {
                     .contains("partial clone"),
                 "{name}: {hook}"
             );
+            assert_grok_note(&fixture.grok_stop(), "partial clone", &name);
             let log = fixture.wrapper_log();
             for call in ["cat-file", " diff ", "--verify", "hash-object", "ls-files"] {
                 assert!(
@@ -695,6 +736,7 @@ fn git_below_the_minimum_is_refused_before_repository_discovery() {
             hook["systemMessage"].as_str().unwrap().contains("2.39.1"),
             "{version}: {hook}"
         );
+        assert_grok_note(&fixture.grok_stop(), "2.39.1", version);
         let log = fixture.wrapper_log();
         assert!(
             log.lines().all(|line| line == "version"),
@@ -710,30 +752,33 @@ fn the_hook_is_silent_without_git() {
     fs::create_dir_all(&empty).unwrap();
     let home = fixture.root.join("home");
     let input = serde_json::json!({ "session_id": "s-no-git", "cwd": fixture.repo }).to_string();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_rotter"))
-        .args(["hook", "claude-stop"])
-        .current_dir(&fixture.repo)
-        .env("PATH", &empty)
-        .env("HOME", &home)
-        .env("XDG_CONFIG_HOME", home.join("config"))
-        .env("XDG_CACHE_HOME", home.join("cache"))
-        .env("XDG_STATE_HOME", home.join("state"))
-        .env("CLAUDE_CONFIG_DIR", home.join("claude"))
-        .env("ROTTER_STATE_DIR", home.join("rotter-state"))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(input.as_bytes())
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert_eq!(output.status.code(), Some(0), "{output:?}");
-    assert!(output.stdout.is_empty(), "{output:?}");
+    for hook in ["claude-stop", "grok-stop"] {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_rotter"))
+            .args(["hook", hook])
+            .current_dir(&fixture.repo)
+            .env("PATH", &empty)
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", home.join("config"))
+            .env("XDG_CACHE_HOME", home.join("cache"))
+            .env("XDG_STATE_HOME", home.join("state"))
+            .env("CLAUDE_CONFIG_DIR", home.join("claude"))
+            .env("GROK_HOME", home.join("grok"))
+            .env("ROTTER_STATE_DIR", home.join("rotter-state"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(output.status.code(), Some(0), "{hook}: {output:?}");
+        assert!(output.stdout.is_empty(), "{hook}: {output:?}");
+    }
 }
 
 #[test]
@@ -749,6 +794,7 @@ fn failing_filter_listing_refuses_extraction() {
     let hook = stdout(&fixture.claude_stop());
     assert!(hook.contains("refusing to read"), "{hook}");
     assert!(!hook.contains("decision"), "{hook}");
+    assert_grok_note(&fixture.grok_stop(), "refusing to read", "listing");
 }
 
 #[test]
@@ -766,6 +812,7 @@ fn a_hook_event_key_refuses_extraction() {
         hook.contains("hook.event") && !hook.contains("decision"),
         "{hook}"
     );
+    assert_grok_note(&fixture.grok_stop(), "hook.event", "hook.event");
 }
 
 #[test]
@@ -820,5 +867,18 @@ fn stat_only_changes_are_dropped_and_renames_kept() {
         .set_modified(SystemTime::now())
         .unwrap();
     let second = fixture.rotter(&["hook", "claude-stop"], Some(&input));
+    assert_eq!(stdout(&second), "", "{second:?}");
+    let first = fixture.grok_stop_in("grok-touch");
+    assert!(
+        stdout(&first).contains(r#""decision":"block""#),
+        "{first:?}"
+    );
+    fs::File::options()
+        .write(true)
+        .open(fixture.repo.join("README.md"))
+        .unwrap()
+        .set_modified(SystemTime::now() + Duration::from_secs(5))
+        .unwrap();
+    let second = fixture.grok_stop_in("grok-touch");
     assert_eq!(stdout(&second), "", "{second:?}");
 }
