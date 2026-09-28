@@ -38,6 +38,16 @@ cargo run --locked -- extract --full -- src/ config/  # 全部追蹤檔案（工
 
 `--` 後的 pathspec 適用所有模式，相對於目前目錄；不給就是整個 repo。
 
+沒有副檔名也沒有 shebang 的檔案（例如被 source 的 shell helper）預設不在範圍內，可用
+`--lang <glob>=<language>` 指定（可重複，第一個符合者生效，優先於副檔名與 shebang）：
+
+```sh
+rotter extract --full --lang '.mise/tasks/lib/*=bash' --lang '**/lib=bash' -- .mise/tasks
+```
+
+glob 以 repo 根目錄為基準，`*`、`?` 不跨目錄，`**` 可跨目錄。語言：go、lua、nix、bash、
+sh（以 Bash grammar 解析）、yaml、toml、rust。被覆寫的檔案 dialect 標為 `<lang>-by-override`。
+
 必須明確選一種模式，不會自動猜基準。退出碼：`0` 完整、`1` 已輸出 JSON 但有檔案未能完整分析
 （語法錯誤、非 UTF-8、含 NUL、zsh／ksh 腳本、衝突中的路徑等）、`2` 參數或 Git 錯誤。
 有語法錯誤時狀態為 `partial`：仍輸出能解析的單元，與錯誤重疊者標 `overlaps_syntax_error`。

@@ -24,6 +24,11 @@ Untracked files are not read unless `--include-untracked` is given (not with `--
 Run from inside the repository or pass `-C <dir>`. Any mode takes pathspecs after `--`
 (relative to the current directory), e.g. `rotter extract --full -- .mise/tasks config/`.
 
+Files without an extension or shebang (sourced shell helpers, for example) are
+`not_in_scope` by default. If the user wants them checked, rerun with
+`--lang '<glob>=<language>'` (glob relative to the repository root, e.g.
+`--lang '.mise/tasks/lib/*=bash'`); their dialect then ends in `-by-override`.
+
 Full mode has no diff to narrow the search, so reports get large. Review it in batches: one
 file or directory per batch (use pathspecs, or `jq` over `files[]`), finish and record the
 findings of a batch before starting the next, and say which batches were covered.

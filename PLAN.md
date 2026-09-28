@@ -189,7 +189,7 @@ Claude Code、Codex、pi 的目前版本及實際載入仍未驗證。本輪尚�
 
 ### 驗證
 
-- `mise run check`：fmt、Clippy（`-D warnings`）、43 項測試全數通過（parser 17、擷取 22、hook 1、單元 3）。
+- `mise run check`：fmt、Clippy（`-D warnings`）、45 項測試全數通過（parser 17、擷取 23、hook 1、單元 4）。
 - 擷取測試涵蓋步驟一驗收清單：只改程式／只改註解、長函式遠端變更、刪除／新增／改名、
   staged 與 working tree 差異、無 HEAD、base 解析失敗與選項注入、未追蹤檔排除／納入與 gitignore、
   Unicode／CRLF／含空白與非 ASCII 的檔名、語法錯誤／不支援方言、退出碼，以及執行前後
@@ -228,6 +228,12 @@ Claude Code、Codex、pi 的目前版本及實際載入仍未驗證。本輪尚�
 - pathspec 適用四種模式，相對於執行目錄；不給時等同 `:/`（整個 repo）。
 - local-env 實測：240 個檔案、1072 個單元、1212 則註解、約 1.5MB、1.3 秒；執行前後 index 與狀態不變。
   full 模式的語意審查尚未實際跑過，skill 只寫了分批方式。
+
+### 語言覆寫（2026-09-28 使用者要求）
+
+`--lang <glob>=<language>` 讓沒有副檔名、也沒有 shebang 的檔案（如被 source 的 helper）納入分析；
+可重複，第一個符合者生效，優先於副檔名與 shebang。local-env `.mise/tasks` 的 12 個 helper 以此解析，
+全部 `ok`，共 154 個單元、175 則註解。
 
 ### 4.4 Claude Code Stop hook
 
