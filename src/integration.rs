@@ -30,12 +30,18 @@ fn command(host: &Host, exe: &str) -> String {
     format!("{} hook {} || true", shell_quote(exe), host.hook)
 }
 
-/// The host's directory: its variable when absolute, else `<home>/<fallback>`.
+/// The host's directory: its variable when absolute, else `<home>/<fallback>` (or
+/// `<XDG config base>/<fallback>`).
 fn host_dir(host: &Host, sources: &Sources) -> Result<PathBuf, String> {
+    let base = if host.fallback_in_config {
+        &sources.config
+    } else {
+        &sources.home
+    };
     host.dir_var
         .and_then(|name| sources.var(name))
         .map(Path::to_owned)
-        .or_else(|| sources.home.as_ref().map(|home| home.join(host.fallback)))
+        .or_else(|| base.as_ref().map(|base| base.join(host.fallback)))
         .ok_or_else(|| match host.dir_var {
             Some(name) => format!(
                 "cannot locate {}'s directory: set HOME or an absolute {name}",
@@ -51,6 +57,8 @@ fn shape(host: &Host) -> (bool, bool) {
     match host.install {
         Install::MergeJson { nested, .. } => (nested, true),
         Install::OwnedJson { grouped, .. } => (true, grouped),
+        // A shim is code, never read as a hook document.
+        Install::OwnedShim { .. } => (true, false),
     }
 }
 
@@ -67,7 +75,90 @@ fn event_list<'a>(host: &Host, document: &'a Value) -> &'a Value {
 fn hook_file(host: &Host, dir: &Path) -> PathBuf {
     match host.install {
         Install::MergeJson { file, .. } => dir.join(file),
-        Install::OwnedJson { dir: sub, file, .. } => dir.join(sub).join(file),
+        Install::OwnedJson { dir: sub, file, .. } | Install::OwnedShim { dir: sub, file, .. } => {
+            dir.join(sub).join(file)
+        }
+    }
+}
+
+/// The two placeholders of a shim template, each exactly once and in this order: the exe path
+/// as one JSON string literal, and the timeout in seconds as digits.
+const SHIM_EXE: &str = "__ROTTER_EXE__";
+const SHIM_TIMEOUT: &str = "__ROTTER_TIMEOUT__";
+
+/// Whether `exe` may be embedded in a shim: absolute, and free of control characters, U+2028,
+/// U+2029 (line terminators in older JavaScript), `$` and backtick.
+fn shim_exe_ok(exe: &str) -> bool {
+    exe.starts_with('/')
+        && !exe
+            .contains(|c: char| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}' | '$' | '`'))
+}
+
+/// `template` with the exe path placed as a JSON string literal and the timeout as digits,
+/// split at the placeholders so neither value can be read as a placeholder.
+fn render_template(template: &str, exe: &str, timeout: u64) -> Result<String, String> {
+    if !shim_exe_ok(exe) {
+        return Err(format!(
+            "refusing to embed {exe:?}: it must be absolute and free of control characters, \
+             U+2028, U+2029, $ and `"
+        ));
+    }
+    if timeout == 0 {
+        return Err("the shim timeout must be a positive number of seconds".to_owned());
+    }
+    let (before, rest) = template
+        .split_once(SHIM_EXE)
+        .ok_or("a shim template without its exe placeholder")?;
+    let (middle, after) = rest
+        .split_once(SHIM_TIMEOUT)
+        .ok_or("a shim template without its timeout placeholder")?;
+    let literal = serde_json::to_string(exe).map_err(|error| error.to_string())?;
+    Ok(format!("{before}{literal}{middle}{timeout}{after}"))
+}
+
+/// The host's current shim for `exe` and `timeout` (validated as for every render).
+pub fn render_shim(name: &str, exe: &str, timeout: u64) -> Result<String, String> {
+    let host = hosts::by_id(name).ok_or_else(|| format!("unknown integration {name:?}"))?;
+    let Install::OwnedShim { templates, .. } = host.install else {
+        return Err(format!("{name} does not use a shim"));
+    };
+    render_template(templates[0], exe, timeout)
+}
+
+/// The exe path and timeout `text` was rendered with from `template`: the embedded literals are
+/// decoded, re-validated and rendered again, and only a byte-equal result counts.
+fn shim_values(template: &str, text: &str) -> Option<(String, u64)> {
+    let (before, rest) = template.split_once(SHIM_EXE)?;
+    let (middle, _) = rest.split_once(SHIM_TIMEOUT)?;
+    let rest = text.strip_prefix(before)?;
+    // The literal ends at the first `"` not escaped by a backslash.
+    let bytes = rest.as_bytes();
+    if bytes.first() != Some(&b'"') {
+        return None;
+    }
+    let mut end = 1;
+    while *bytes.get(end)? != b'"' {
+        end += if bytes[end] == b'\\' { 2 } else { 1 };
+    }
+    let exe: String = serde_json::from_str(rest.get(..=end)?).ok()?;
+    let rest = rest.get(end + 1..)?.strip_prefix(middle)?;
+    let digits = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    let timeout: u64 = rest[..digits].parse().ok()?;
+    (render_template(template, &exe, timeout).ok()? == text).then_some((exe, timeout))
+}
+
+/// The timeout a shim host's shim is rendered with: the hook timeout, capped for hosts that
+/// await the handler.
+fn shim_timeout(host: &Host, parse_timeout_seconds: u64) -> u64 {
+    let computed = hook_timeout(parse_timeout_seconds);
+    match host.install {
+        Install::OwnedShim {
+            max_timeout: Some(max),
+            ..
+        } => computed.min(max),
+        _ => computed,
     }
 }
 
@@ -92,6 +183,11 @@ fn entry_timeout(host: &Host, settings: &Value, command: &str) -> Option<u64> {
 /// Soft budget for the per-file phases of one hook run.
 fn run_budget(computed: u64, installed: u64) -> Duration {
     Duration::from_secs(computed.min(installed).saturating_sub(HOOK_RESERVE))
+}
+
+/// The installed timeout, shortened (never extended) by the one a shim passed.
+fn shortened(installed: u64, passed: Option<u64>) -> u64 {
+    passed.map_or(installed, |passed| passed.min(installed))
 }
 
 /// The installed timeout from the host's hook file, read without following a final link or
@@ -184,15 +280,43 @@ fn cwd(host: &Host, input: &Value) -> Option<PathBuf> {
     }
 }
 
-/// A Stop hook run for `host` with every directory and PATH from `sources`. A block goes out as
-/// `{"decision":"block","reason"}`; messages as a `systemMessage` or on stderr, per host.
-/// Never fails.
-pub fn stop(host: &Host, input: &str, sources: &Sources) {
+/// What one hook run answers: stdout, stderr, and the "last blocked" slot to record once stdout
+/// is written.
+#[derive(Debug, Default)]
+struct Response {
+    output: Option<Value>,
+    stderr: Option<String>,
+    record: Option<(PathBuf, String)>,
+}
+
+/// A Stop hook run for `host` with every directory and PATH from `sources`; `timeout` is the
+/// one a shim passed (`--timeout <n>`), which can only shorten the run. A block goes out as
+/// `{"decision":"block","reason"}` (a shim's as `{"continue":reason}`); messages as a
+/// `systemMessage` or on stderr, per host. Never fails.
+pub fn stop(host: &Host, input: &str, sources: &Sources, timeout: Option<u64>) {
+    let response = respond(host, input, sources, timeout);
+    if let Some(messages) = &response.stderr {
+        eprintln!("{messages}");
+    }
+    if let Some(output) = response.output {
+        let mut stdout = io::stdout().lock();
+        // The slot is written only once the request has reached the host.
+        if writeln!(stdout, "{output}")
+            .and_then(|()| stdout.flush())
+            .is_ok()
+            && let Some((slot, fingerprint)) = response.record
+        {
+            record(&slot, &fingerprint);
+        }
+    }
+}
+
+fn respond(host: &Host, input: &str, sources: &Sources, timeout: Option<u64>) -> Response {
     let input: Value = serde_json::from_str(input).unwrap_or(Value::Null);
     let Some(session) = session(host, &input) else {
-        return;
+        return Response::default();
     };
-    let mut outcome = evaluate(host, &input, &session, sources).unwrap_or_default();
+    let mut outcome = evaluate(host, &input, &session, sources, timeout).unwrap_or_default();
     // The loop cap fails closed: a request goes out only once it has been counted.
     let state = sources.state.as_deref();
     if outcome.reason.is_some() {
@@ -205,7 +329,9 @@ pub fn stop(host: &Host, input: &str, sources: &Sources) {
     }
     let messages =
         (!outcome.messages.is_empty()).then(|| format!("rotter: {}", outcome.messages.join("; ")));
+    let shim = matches!(host.install, Install::OwnedShim { .. });
     let output = match (outcome.reason, host.notes) {
+        (Some(reason), _) if shim => Some(json!({ "continue": reason })),
         (Some(reason), notes) => {
             let mut output = json!({ "decision": "block", "reason": reason });
             if notes == Notes::SystemMessage
@@ -220,27 +346,22 @@ pub fn stop(host: &Host, input: &str, sources: &Sources) {
             .map(|messages| json!({ "systemMessage": messages })),
         (None, Notes::Stderr) => None,
     };
-    if host.notes == Notes::Stderr
-        && let Some(messages) = &messages
-    {
-        eprintln!("{messages}");
-    }
-    if let Some(output) = output {
-        let mut stdout = io::stdout().lock();
-        // The slot is written only once the request has reached the host.
-        if writeln!(stdout, "{output}")
-            .and_then(|()| stdout.flush())
-            .is_ok()
-            && let Some((slot, fingerprint)) = outcome.record
-        {
-            record(&slot, &fingerprint);
-        }
+    Response {
+        output,
+        stderr: messages.filter(|_| host.notes == Notes::Stderr),
+        record: outcome.record,
     }
 }
 
 /// Blocks once when the working tree has changes that relate to comments, never blocks a
 /// continuation it caused, and asks again only after the report changes.
-fn evaluate(host: &Host, input: &Value, session: &str, sources: &Sources) -> Option<Outcome> {
+fn evaluate(
+    host: &Host,
+    input: &Value,
+    session: &str,
+    sources: &Sources,
+    timeout: Option<u64>,
+) -> Option<Outcome> {
     let start = Instant::now();
     if host
         .continuation_keys
@@ -312,8 +433,14 @@ fn evaluate(host: &Host, input: &Value, session: &str, sources: &Sources) -> Opt
         "{rotter} extract --worktree --include-untracked -C {}",
         shell_quote(&cwd.display().to_string())
     );
-    let installed = installed_timeout(host, sources, &command(host, &exe()));
-    let budget = run_budget(hook_timeout(config.parse_timeout_seconds), installed);
+    let computed = hook_timeout(config.parse_timeout_seconds);
+    // A shim's timeout is in its code: only the one it passes counts, and never extends the run.
+    let installed = if matches!(host.install, Install::OwnedShim { .. }) {
+        computed
+    } else {
+        installed_timeout(host, sources, &command(host, &exe()))
+    };
+    let budget = run_budget(computed, shortened(installed, timeout));
     let mut options = Options::new(Mode::Worktree);
     options.include_untracked = true;
     options.grammars = config.languages();
@@ -728,6 +855,13 @@ fn remove_stale(path: &Path) -> Result<(), String> {
     }
 }
 
+/// `<file>.rotter-tmp` next to `path`; no host loads a name ending in `.rotter-tmp`.
+fn temporary_path(path: &Path) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_owned();
+    name.push(".rotter-tmp");
+    path.with_file_name(name)
+}
+
 fn backup_path(path: &Path) -> PathBuf {
     path.with_extension("json.rotter-bak")
 }
@@ -741,7 +875,7 @@ fn write_backup(path: &Path, text: &str) -> Result<(), String> {
         .map_err(|error| format!("cannot write {}: {error}", backup.display()))
 }
 
-/// Replaces `path` with `text` through `<name>.json.rotter-tmp`, so a failure never leaves a
+/// Replaces `path` with `text` through `<name>.rotter-tmp`, so a failure never leaves a
 /// truncated file (a stale regular temporary is removed first). The temporary is created 0600
 /// without following symlinks and gets `mode` through its descriptor before the rename. With
 /// `before` (the bytes read earlier, None for a missing file), `path` is re-read just before the
@@ -753,7 +887,7 @@ fn replace_file(
     mode: Option<u32>,
     before: Option<Option<&[u8]>>,
 ) -> Result<(), String> {
-    let temporary = path.with_extension("json.rotter-tmp");
+    let temporary = temporary_path(path);
     let fail = |error: io::Error| format!("cannot write {}: {error}", temporary.display());
     remove_stale(&temporary)?;
     let mut file = create_private(&temporary).map_err(fail)?;
@@ -975,7 +1109,9 @@ fn outside_work_tree(host: &Host, dir: &Path, sources: &Sources) -> Result<(), S
 /// symlink); None when `<dir>` does not exist. With `create`, a missing `<dir>` is created at
 /// 0700 (never its parents).
 fn owned_file(host: &Host, home: &Path, create: bool) -> Result<Option<PathBuf>, String> {
-    let Install::OwnedJson { dir, file, .. } = host.install else {
+    let (Install::OwnedJson { dir, file, .. } | Install::OwnedShim { dir, file, .. }) =
+        host.install
+    else {
         unreachable!("an owned-file host");
     };
     let hooks = home.join(dir);
@@ -1116,7 +1252,151 @@ pub fn install(name: &str, parse_timeout_seconds: u64) -> Result<String, String>
     match host.install {
         Install::MergeJson { .. } => install_merged(host, &sources, &exe, timeout),
         Install::OwnedJson { .. } => install_owned(host, &sources, &exe, timeout),
+        Install::OwnedShim { .. } => install_shim(
+            host,
+            &sources,
+            &exe,
+            shim_timeout(host, parse_timeout_seconds),
+        ),
     }
+}
+
+/// An installed shim rotter rendered: from which template version (0 is current), for which
+/// exe and timeout.
+struct Shim {
+    version: usize,
+    exe: String,
+    timeout: u64,
+}
+
+/// The shim at `path`; None when there is none. It must be a regular file (never followed, no
+/// FIFO block) owned by the user that group and others cannot write, byte-equal to a render of
+/// one of the templates rotter has shipped; anything else is foreign code the host loads, an
+/// error, and left alone.
+fn shim_installed(host: &Host, path: &Path) -> Result<Option<Shim>, String> {
+    let Install::OwnedShim { templates, .. } = host.install else {
+        unreachable!("a shim host");
+    };
+    let Some(mut file) = open_regular(path)? else {
+        return Ok(None);
+    };
+    let fail = |error: io::Error| format!("cannot read {}: {error}", path.display());
+    let meta = file.metadata().map_err(fail)?;
+    if meta.uid() != user() || meta.mode() & 0o022 != 0 {
+        return Err(format!(
+            "{} has unsafe permissions (it must be yours and not writable by group or others); \
+             left alone",
+            path.display()
+        ));
+    }
+    let mut text = String::new();
+    match file.read_to_string(&mut text) {
+        // Not UTF-8 is not rotter's either.
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::InvalidData => {}
+        Err(error) => return Err(fail(error)),
+    }
+    templates
+        .iter()
+        .enumerate()
+        .find_map(|(version, template)| {
+            let (exe, timeout) = shim_values(template, &text)?;
+            Some(Shim {
+                version,
+                exe,
+                timeout,
+            })
+        })
+        .map(Some)
+        .ok_or_else(|| {
+            format!(
+                "foreign code at rotter's path, auto-loaded by {}: {}; left alone",
+                host.label,
+                path.display()
+            )
+        })
+}
+
+/// Writes the host's shim, which rotter owns entirely (no backup).
+fn install_shim(host: &Host, sources: &Sources, exe: &str, timeout: u64) -> Result<String, String> {
+    let Install::OwnedShim { templates, .. } = host.install else {
+        unreachable!("a shim host");
+    };
+    let text = render_template(templates[0], exe, timeout)?;
+    let home = existing_home(host, &host_dir(host, sources)?)?;
+    outside_work_tree(host, &home, sources)?;
+    let path = owned_file(host, &home, true)?.ok_or("the shim directory vanished")?;
+    let installed = shim_installed(host, &path)?;
+    if installed
+        .as_ref()
+        .is_some_and(|shim| shim.version == 0 && shim.exe == exe && shim.timeout == timeout)
+    {
+        return Ok(format!(
+            "{}: already installed ({})",
+            host.id,
+            path.display()
+        ));
+    }
+    replace_file(&path, &text, Some(0o600), None)?;
+    let verb = if installed.is_some() {
+        "updated"
+    } else {
+        "installed"
+    };
+    Ok(format!(
+        "{}: {verb} {} shim in {}; {} loads it at its next start",
+        host.id,
+        host.event,
+        path.display(),
+        host.label
+    ))
+}
+
+/// The shim's path when its directory exists under a trusted host dir.
+fn shim_path(host: &Host, sources: &Sources) -> Result<(Option<PathBuf>, PathBuf), String> {
+    let configured = host_dir(host, sources)?;
+    let path = match trusted_home(host, &configured, user(), &lstat)? {
+        Some(home) => owned_file(host, &home, false)?,
+        None => None,
+    };
+    Ok((path, hook_file(host, &configured)))
+}
+
+/// Unlinks the shim only when [`shim_installed`] accepts it.
+fn uninstall_shim(host: &Host, sources: &Sources) -> Result<String, String> {
+    let (path, shown) = shim_path(host, sources)?;
+    let Some(path) = path else {
+        return Ok(format!("{}: not installed ({})", host.id, shown.display()));
+    };
+    if shim_installed(host, &path)?.is_none() {
+        return Ok(format!("{}: not installed ({})", host.id, path.display()));
+    }
+    fs::remove_file(&path).map_err(|error| format!("cannot remove {}: {error}", path.display()))?;
+    Ok(format!(
+        "{}: removed {} shim {}",
+        host.id,
+        host.event,
+        path.display()
+    ))
+}
+
+fn shim_status(host: &Host, sources: &Sources, exe: &str, expected: u64) -> Result<String, String> {
+    let (path, shown) = shim_path(host, sources)?;
+    let Some(path) = path else {
+        return Ok(format!("not installed ({})", shown.display()));
+    };
+    let install = format!("run `rotter integration install {}`", host.id);
+    let state = match shim_installed(host, &path)? {
+        None => "not installed".to_owned(),
+        Some(shim) if shim.exe != exe => format!("installed for another binary: {}", shim.exe),
+        Some(shim) if shim.version > 0 => format!("installed (older shim); {install}"),
+        Some(shim) if shim.timeout != expected => format!(
+            "installed (timeout {}, expected {expected}); {install}",
+            shim.timeout
+        ),
+        Some(_) => "installed (current)".to_owned(),
+    };
+    Ok(format!("{state} ({})", path.display()))
 }
 
 /// Merges one entry into the host's shared file, keeping a `.rotter-bak` of the bytes read.
@@ -1272,6 +1552,7 @@ pub fn uninstall(name: &str) -> Result<String, String> {
     match host.install {
         Install::MergeJson { .. } => uninstall_merged(host, &sources),
         Install::OwnedJson { .. } => uninstall_owned(host, &sources),
+        Install::OwnedShim { .. } => uninstall_shim(host, &sources),
     }
 }
 
@@ -1502,6 +1783,17 @@ pub fn status(parse_timeout_seconds: u64) -> Result<String, String> {
                 host.id,
                 owned_status(host, &sources, &exe, expected).unwrap_or_else(|why| why)
             ),
+            Install::OwnedShim { .. } => format!(
+                "{}: {}",
+                host.id,
+                shim_status(
+                    host,
+                    &sources,
+                    &exe,
+                    shim_timeout(host, parse_timeout_seconds)
+                )
+                .unwrap_or_else(|why| why)
+            ),
         };
         lines.push(if host.experimental {
             format!("{line} [experimental]")
@@ -1536,12 +1828,13 @@ pub fn status(parse_timeout_seconds: u64) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Ours, Verdict, allow_request, entry_timeout, evaluate, faithful, hook_timeout, ours,
-        owned_document, owned_handler, record, remove_ours, replace_file, reset_requests,
-        rewritable, run_budget, session, trusted_home, verdict,
+        Ours, SHIM_EXE, SHIM_TIMEOUT, Verdict, allow_request, entry_timeout, evaluate, faithful,
+        hook_timeout, ours, owned_document, owned_handler, record, remove_ours, render_template,
+        replace_file, reset_requests, respond, rewritable, run_budget, session, shim_timeout,
+        shim_values, shortened, temporary_path, trusted_home, verdict,
     };
     use crate::config::{Meta, Sources, lstat, user};
-    use crate::hosts::{CLAUDE, COPILOT, DROID, GROK, Host};
+    use crate::hosts::{CLAUDE, COPILOT, DROID, GROK, Host, Install, LETTA, OPENCODE, PI};
     use serde_json::{Value, json};
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
@@ -2040,6 +2333,265 @@ mod tests {
         assert_eq!(verdict(None, grok, "s", "R", 1), Verdict::Block(None));
     }
 
+    /// Every template rotter has shipped for a shim host.
+    fn templates(host: &Host) -> &'static [&'static str] {
+        match host.install {
+            Install::OwnedShim { templates, .. } => templates,
+            _ => unreachable!("a shim host"),
+        }
+    }
+
+    #[test]
+    fn shims_are_owned_only_when_byte_equal_to_a_render() {
+        let accepted = [
+            "/opt/rotter",
+            "/opt/it's \"q\"\\back slash/\u{fc}n\u{ef}/rotter",
+            "/x/__ROTTER_TIMEOUT__/__ROTTER_EXE__/rotter",
+            "/x/\u{1f600}/ro tter",
+        ];
+        for host in [&PI, &LETTA, &OPENCODE] {
+            for template in templates(host) {
+                for exe in accepted {
+                    for timeout in [1, 90, 120] {
+                        let text = render_template(template, exe, timeout).unwrap();
+                        assert_eq!(
+                            shim_values(template, &text),
+                            Some((exe.to_owned(), timeout)),
+                            "{exe}"
+                        );
+                        // The path appears once, inside its JSON literal.
+                        let literal = serde_json::to_string(exe).unwrap();
+                        assert_eq!(text.matches(&literal).count(), 1, "{exe}");
+                        assert!(text.contains(&format!("const EXE = {literal};\n")), "{exe}");
+                        assert!(text.contains(&format!("const TIMEOUT = {timeout};\n")));
+                    }
+                }
+                let text = render_template(template, "/opt/rotter", 90).unwrap();
+                let tampered = [
+                    format!("{text} "),
+                    text.replace("const TIMEOUT = 90;", "const TIMEOUT = 090;"),
+                    text.replace("const TIMEOUT = 90;", "const TIMEOUT = 0;"),
+                    text.replace("\"/opt/rotter\"", "\"/opt/\\u0072otter\""),
+                    text.replace("\"/opt/rotter\"", "\"rotter\""),
+                    text.replace("\"/opt/rotter\"", "\"/opt/$x\""),
+                    text.replace("MAX_REQUESTS = 2", "MAX_REQUESTS = 3"),
+                    text.replacen("//", "// x", 1),
+                    String::new(),
+                ];
+                for text in tampered {
+                    assert_eq!(shim_values(template, &text), None, "{text}");
+                }
+                for rejected in [
+                    "/x/\r/rotter",
+                    "/x/\n",
+                    "/x/\0",
+                    "/x/\u{2028}",
+                    "/x/\u{2029}",
+                    "/x/\u{85}",
+                    "/x/$HOME",
+                    "/x/`id`",
+                    "x/rotter",
+                    "",
+                ] {
+                    assert!(
+                        render_template(template, rejected, 90).is_err(),
+                        "{rejected:?}"
+                    );
+                }
+                assert!(render_template(template, "/opt/rotter", 0).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn shim_templates_use_only_the_allowed_process_apis() {
+        for host in [&PI, &LETTA, &OPENCODE] {
+            for template in templates(host) {
+                for forbidden in [
+                    "exec(",
+                    "execSync",
+                    "execFile",
+                    "spawnSync",
+                    "Bun.",
+                    "shell: true",
+                    "eval(",
+                    "Function(",
+                    "require(",
+                    "...process.env",
+                    "env: process.env",
+                ] {
+                    assert!(!template.contains(forbidden), "{}: {forbidden}", host.id);
+                }
+                // process.env is read for PATH and LANG only.
+                for (at, _) in template.match_indices("process.env") {
+                    let rest = &template[at + "process.env".len()..];
+                    assert!(
+                        rest.starts_with(".PATH") || rest.starts_with(".LANG"),
+                        "{}: {}",
+                        host.id,
+                        &rest[..20]
+                    );
+                }
+                assert_eq!(template.matches(SHIM_EXE).count(), 1);
+                assert_eq!(template.matches(SHIM_TIMEOUT).count(), 1);
+                assert!(template.contains("const EXE = __ROTTER_EXE__;\n"));
+                assert!(template.contains("const TIMEOUT = __ROTTER_TIMEOUT__;\n"));
+                assert!(template.contains(&format!("const HOST = \"{}\";\n", host.hook)));
+                let spawn = "spawn(EXE, [\"hook\", HOST, \"--timeout\", String(TIMEOUT)], {\n        \
+                             shell: false,\n        detached: true,\n        env,\n        \
+                             stdio: [\"pipe\", \"pipe\", \"ignore\"],\n      });";
+                assert_eq!(template.matches("spawn(").count(), 1, "{}", host.id);
+                assert!(template.contains(spawn), "{}", host.id);
+                assert!(template.contains("const MAX_STDOUT = 65536;\n"));
+            }
+        }
+    }
+
+    #[test]
+    fn temporary_names_match_no_host_load_glob() {
+        for (path, extensions) in [
+            ("/h/extensions/rotter-review.ts", &[".ts", ".js"][..]),
+            ("/h/mods/rotter-review.js", &[".js", ".mjs", ".ts", ".tsx"]),
+            ("/h/plugins/rotter-review.js", &[".ts", ".js"]),
+            ("/h/hooks/rotter.json", &[".json"]),
+            ("/h/settings.json", &[".json"]),
+        ] {
+            let temporary = temporary_path(Path::new(path));
+            let name = temporary.file_name().unwrap().to_str().unwrap().to_owned();
+            assert_eq!(temporary.parent(), Path::new(path).parent());
+            assert!(name.ends_with(".rotter-tmp"), "{name}");
+            for extension in extensions {
+                assert!(!name.ends_with(extension), "{name}");
+            }
+        }
+        assert_eq!(
+            temporary_path(Path::new("/h/settings.json")),
+            Path::new("/h/settings.json.rotter-tmp")
+        );
+    }
+
+    #[test]
+    fn a_passed_timeout_only_shortens_the_run() {
+        let computed = hook_timeout(60);
+        let budget = |installed, passed| run_budget(computed, shortened(installed, passed));
+        assert_eq!(budget(90, None), Duration::from_secs(75));
+        assert_eq!(budget(90, Some(30)), Duration::from_secs(15));
+        assert_eq!(budget(90, Some(1)), Duration::ZERO);
+        // Longer than the installed timeout: ignored, never extended.
+        assert_eq!(budget(90, Some(600)), Duration::from_secs(75));
+        assert_eq!(budget(60, Some(90)), Duration::from_secs(45));
+    }
+
+    #[test]
+    fn shim_timeouts_are_capped_where_the_host_waits() {
+        assert_eq!(shim_timeout(&PI, 1), 60);
+        assert_eq!(shim_timeout(&PI, 60), 90);
+        assert_eq!(shim_timeout(&LETTA, 300), 120);
+        // OpenCode does not await its plugins' event handlers.
+        assert_eq!(shim_timeout(&OPENCODE, 300), 330);
+        assert_eq!(shim_timeout(&CLAUDE, 300), 330);
+    }
+
+    /// The hook core for the shim hosts, in-process with injected sources (no case spawns an
+    /// injectable-host hook): the shim reply shape, the loop cap across changing reports, and
+    /// silence without a state directory or a session.
+    #[test]
+    fn shim_hosts_answer_in_the_shim_protocol_and_are_capped() {
+        let root = temp();
+        let repo = root.join("repo");
+        fs::create_dir(&repo).unwrap();
+        let go = |value: usize| format!("package p\n\n// F.\nfunc F() int {{ return {value} }}\n");
+        fs::write(repo.join("a.go"), go(1)).unwrap();
+        let git = |args: &[&str]| {
+            let status = Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@example.invalid")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@example.invalid")
+                .status()
+                .unwrap();
+            assert!(status.success(), "{args:?}");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "c"]);
+        let home = root.join("passwd-home");
+        let temp_root = root.join("tmp");
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir(&temp_root).unwrap();
+        fs::set_permissions(&temp_root, fs::Permissions::from_mode(0o700)).unwrap();
+        let sources = Sources {
+            config: Some(home.join(".config")),
+            cache: Some(home.join(".cache")),
+            state: Some(home.join(".local/state/rotter")),
+            temp: temp_root,
+            path: std::env::var_os("PATH"),
+            vars: Vec::new(),
+            home: Some(home),
+        };
+        let input = |session: &str| json!({ "session_id": session, "cwd": repo }).to_string();
+        for (index, host) in [&PI, &LETTA, &OPENCODE].into_iter().enumerate() {
+            let mut answers = Vec::new();
+            for turn in 0..4 {
+                // A report no host has been asked about yet.
+                fs::write(repo.join("a.go"), go(10 * turn + 2 + index)).unwrap();
+                let response = respond(host, &input(host.id), &sources, Some(90));
+                assert!(response.stderr.is_none(), "{response:?}");
+                if let Some(output) = &response.output {
+                    let object = output.as_object().unwrap();
+                    assert_eq!(object.len(), 1, "{output}");
+                    let reason = object["continue"].as_str().unwrap();
+                    assert!(
+                        reason.contains("rotter found 2 changed code unit"),
+                        "{reason}"
+                    );
+                    let (slot, fingerprint) = response.record.as_ref().unwrap();
+                    record(slot, fingerprint);
+                }
+                answers.push(response.output.is_some());
+            }
+            // The third changing report is suppressed; that silent stop resets the cap.
+            assert_eq!(answers, [true, true, false, true], "{}", host.id);
+            // A new report, so only the session id keeps these silent (255 bytes still asks).
+            fs::write(repo.join("a.go"), go(77 + index)).unwrap();
+            let long = "s".repeat(300);
+            for silent in [
+                respond(host, "{}", &sources, None),
+                respond(host, &input(".."), &sources, None),
+                respond(host, &input(""), &sources, None),
+                respond(host, &input(&long), &sources, None),
+                respond(host, "not json", &sources, None),
+            ] {
+                assert!(
+                    silent.output.is_none() && silent.stderr.is_none(),
+                    "{silent:?}"
+                );
+            }
+            let longest = "s".repeat(255);
+            assert!(
+                respond(host, &input(&longest), &sources, None)
+                    .output
+                    .is_some()
+            );
+            fs::write(repo.join("a.go"), go(99)).unwrap();
+            let stateless = Sources {
+                state: None,
+                ..sources.clone()
+            };
+            assert!(
+                respond(host, &input("fresh"), &stateless, None)
+                    .output
+                    .is_none()
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
     /// The native git helper (tests/common/git_helper.rs), compiled once into the temp dir.
     fn helper() -> PathBuf {
         static HELPER: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
@@ -2113,6 +2665,8 @@ mod tests {
                 .env("CLAUDE_CONFIG_DIR", evil.join("claude"))
                 .env("CODEX_HOME", evil.join("codex"))
                 .env("COPILOT_HOME", evil.join("copilot"))
+                .env("PI_CODING_AGENT_DIR", evil.join("pi"))
+                .env("OPENCODE_CONFIG_DIR", evil.join("opencode"))
                 .output()
                 .unwrap();
             assert!(output.status.success(), "{output:?}");
@@ -2181,7 +2735,7 @@ mod tests {
             vars: Vec::new(),
         };
         let input = json!({ "session_id": "i", "cwd": repo });
-        let outcome = evaluate(&CLAUDE, &input, "i", &sources).unwrap();
+        let outcome = evaluate(&CLAUDE, &input, "i", &sources, None).unwrap();
         let reason = outcome.reason.expect("a review request");
         // The env-named config would enable python and leave b.py unanalysed.
         assert!(reason.contains("report complete: true"), "{reason}");

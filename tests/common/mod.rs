@@ -138,8 +138,10 @@ pub fn changed_repo(repo: &Path) {
 }
 
 /// `rotter <args>` in `cwd` with HOME, XDG_*, CLAUDE_CONFIG_DIR, GROK_HOME, CODEX_HOME,
-/// COPILOT_HOME and ROTTER_STATE_DIR pinned under `root` (Droid has no variable: `~/.factory`), then `env` (None removes a variable); `input` on stdin. A run that does
-/// not finish promptly fails the test instead of hanging it.
+/// COPILOT_HOME, PI_CODING_AGENT_DIR, OPENCODE_CONFIG_DIR and ROTTER_STATE_DIR pinned under
+/// `root` (Droid and Letta have no variable: `~/.factory`, `~/.letta`), then `env` (None removes
+/// a variable); `input` on stdin. A run that does not finish promptly fails the test instead of
+/// hanging it.
 pub fn rotter(
     root: &Path,
     args: &[&str],
@@ -161,6 +163,8 @@ pub fn rotter(
         .env("GROK_HOME", root.join("grok"))
         .env("CODEX_HOME", root.join("codex"))
         .env("COPILOT_HOME", root.join("copilot"))
+        .env("PI_CODING_AGENT_DIR", root.join("pi"))
+        .env("OPENCODE_CONFIG_DIR", root.join("opencode"))
         .env("ROTTER_STATE_DIR", root.join("state"));
     for (key, value) in env {
         match value {

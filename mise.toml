@@ -1,5 +1,10 @@
 [tools]
 rust = { version = "1.98.1", profile = "minimal", components = ["rustfmt", "clippy"] }
+# The engines the pi, letta and opencode shims run under in tests/shims.rs; the tests read these
+# lines. Node: pi's and letta's npm packages (Node >= 22.19). Bun: the version pi's release binary
+# and opencode's macOS/Linux binaries are compiled with.
+node = "24.21.0"
+bun = "1.3.14"
 
 [settings.task]
 run_auto_install = false

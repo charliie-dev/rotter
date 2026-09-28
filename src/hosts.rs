@@ -19,6 +19,18 @@ pub(crate) enum Install {
         version: Option<u64>,
         grouped: bool,
     },
+    /// `<host dir>/<dir>/<file>`, a code file the host loads into its own process at start,
+    /// rendered from an embedded template with exactly the exe path and the timeout. `<dir>` is
+    /// created (0700) inside an existing host dir when missing. `templates` holds every version
+    /// rotter has shipped, the current one first: a file equal to the render of any of them
+    /// (for some accepted exe and timeout) is rotter's, anything else is foreign. With
+    /// `max_timeout`, the host awaits the handler, so the timeout is capped.
+    OwnedShim {
+        dir: &'static str,
+        file: &'static str,
+        templates: &'static [&'static str],
+        max_timeout: Option<u64>,
+    },
 }
 
 /// Where messages that do not block go.
@@ -41,9 +53,12 @@ pub struct Host {
     /// Not run against the real host by rotter's authors; `status` says so.
     pub(crate) experimental: bool,
     /// The environment variable naming the host's directory (used only when absolute), else
-    /// `<home>/<fallback>`; None when the host documents no such variable.
+    /// `<home>/<fallback>` (or under the XDG config base); None when the host documents none.
     pub(crate) dir_var: Option<&'static str>,
     pub(crate) fallback: &'static str,
+    /// Whether `fallback` is under the XDG config base (`$XDG_CONFIG_HOME` when absolute, else
+    /// `~/.config`) rather than the home.
+    pub(crate) fallback_in_config: bool,
     pub(crate) install: Install,
     /// The hook event the entry is registered under.
     pub(crate) event: &'static str,
@@ -80,6 +95,7 @@ pub(crate) const CLAUDE: Host = Host {
     experimental: false,
     dir_var: Some("CLAUDE_CONFIG_DIR"),
     fallback: ".claude",
+    fallback_in_config: false,
     install: Install::MergeJson {
         file: "settings.json",
         nested: true,
@@ -108,6 +124,7 @@ pub(crate) const GROK: Host = Host {
     experimental: false,
     dir_var: Some("GROK_HOME"),
     fallback: ".grok",
+    fallback_in_config: false,
     install: Install::OwnedJson {
         dir: "hooks",
         file: "rotter.json",
@@ -138,6 +155,7 @@ pub(crate) const CODEX: Host = Host {
     experimental: true,
     dir_var: Some("CODEX_HOME"),
     fallback: ".codex",
+    fallback_in_config: false,
     install: Install::MergeJson {
         file: "hooks.json",
         nested: true,
@@ -165,6 +183,7 @@ pub(crate) const COPILOT: Host = Host {
     experimental: false,
     dir_var: Some("COPILOT_HOME"),
     fallback: ".copilot",
+    fallback_in_config: false,
     install: Install::OwnedJson {
         dir: "hooks",
         file: "rotter.json",
@@ -194,6 +213,7 @@ pub(crate) const DROID: Host = Host {
     experimental: true,
     dir_var: None,
     fallback: ".factory",
+    fallback_in_config: false,
     install: Install::MergeJson {
         file: "hooks.json",
         nested: false,
@@ -214,7 +234,103 @@ pub(crate) const DROID: Host = Host {
     injectable: false,
 };
 
-pub(crate) const HOSTS: [&Host; 5] = [&CLAUDE, &GROK, &CODEX, &COPILOT, &DROID];
+/// Pi: `$PI_CODING_AGENT_DIR/extensions/*.ts`, an `agent_before_settle` extension.
+pub(crate) const PI: Host = Host {
+    id: "pi",
+    hook: "pi",
+    label: "Pi",
+    experimental: true,
+    dir_var: Some("PI_CODING_AGENT_DIR"),
+    fallback: ".pi/agent",
+    fallback_in_config: false,
+    install: Install::OwnedShim {
+        dir: "extensions",
+        file: "rotter-review.ts",
+        templates: &[include_str!("shims/pi-v1.ts")],
+        max_timeout: Some(120),
+    },
+    event: "agent_before_settle",
+    command_key: "",
+    timeout_key: "",
+    shadows: &[],
+    legacy: false,
+    // The shim writes exactly these; it skips runs that did not complete.
+    session_keys: &["session_id"],
+    cwd_keys: &["cwd"],
+    cwd_fallback: false,
+    continuation_keys: &[],
+    end_reason: None,
+    notes: Notes::Stderr,
+    default_timeout: 120,
+    // The shim passes only PATH and LANG, and Pi's Bun build loads a project `.env`.
+    injectable: true,
+};
+
+/// Letta Code: `~/.letta/mods/*.js`, a `turn_end` mod (no directory variable reaches its loader).
+pub(crate) const LETTA: Host = Host {
+    id: "letta",
+    hook: "letta",
+    label: "Letta Code",
+    experimental: true,
+    dir_var: None,
+    fallback: ".letta",
+    fallback_in_config: false,
+    install: Install::OwnedShim {
+        dir: "mods",
+        file: "rotter-review.js",
+        templates: &[include_str!("shims/letta-v1.js")],
+        max_timeout: Some(120),
+    },
+    event: "turn_end",
+    command_key: "",
+    timeout_key: "",
+    shadows: &[],
+    legacy: false,
+    session_keys: &["session_id"],
+    cwd_keys: &["cwd"],
+    cwd_fallback: false,
+    continuation_keys: &[],
+    end_reason: None,
+    notes: Notes::Stderr,
+    default_timeout: 120,
+    injectable: true,
+};
+
+/// OpenCode: `$OPENCODE_CONFIG_DIR/plugins/*.js` (a directory OpenCode loads plugins from in
+/// addition to `$XDG_CONFIG_HOME/opencode`), a plugin reacting to `session.idle`.
+pub(crate) const OPENCODE: Host = Host {
+    id: "opencode",
+    hook: "opencode",
+    label: "OpenCode",
+    experimental: true,
+    dir_var: Some("OPENCODE_CONFIG_DIR"),
+    fallback: "opencode",
+    fallback_in_config: true,
+    install: Install::OwnedShim {
+        dir: "plugins",
+        file: "rotter-review.js",
+        templates: &[include_str!("shims/opencode-v1.js")],
+        // OpenCode does not await plugin event handlers.
+        max_timeout: None,
+    },
+    event: "session.idle",
+    command_key: "",
+    timeout_key: "",
+    shadows: &[],
+    legacy: false,
+    session_keys: &["session_id"],
+    cwd_keys: &["cwd"],
+    cwd_fallback: false,
+    continuation_keys: &[],
+    end_reason: None,
+    notes: Notes::Stderr,
+    default_timeout: 120,
+    injectable: true,
+};
+
+pub(crate) const HOSTS: [&Host; 8] = [
+    &CLAUDE, &GROK, &CODEX, &COPILOT, &DROID, &PI, &LETTA, &OPENCODE,
+];
 
 /// Hosts whose contract addendum (`docs/hosts.md`) could not be completed, with the reason.
 pub(crate) const UNSUPPORTED: [(&str, &str); 4] = [
@@ -270,7 +386,10 @@ pub fn names() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{CLAUDE, CODEX, COPILOT, DROID, GROK, HOSTS, UNSUPPORTED, by_hook, by_id};
+    use super::{
+        CLAUDE, CODEX, COPILOT, DROID, GROK, HOSTS, Install, LETTA, OPENCODE, PI, UNSUPPORTED,
+        by_hook, by_id,
+    };
 
     #[test]
     fn hook_names_and_ids_map_to_one_host() {
@@ -282,6 +401,9 @@ mod tests {
             ("codex", &CODEX),
             ("copilot", &COPILOT),
             ("droid", &DROID),
+            ("pi", &PI),
+            ("letta", &LETTA),
+            ("opencode", &OPENCODE),
         ] {
             assert_eq!(by_hook(name).map(|found| found.id), Some(host.id), "{name}");
         }
@@ -293,6 +415,7 @@ mod tests {
             "codex-stop",
             "cursor",
             "devin",
+            "opencode-stop",
         ] {
             assert!(by_hook(name).is_none(), "{name:?}");
         }
@@ -310,8 +433,10 @@ mod tests {
                 assert_ne!(host.hook, other.hook);
                 assert_ne!(host.id, other.id);
             }
-            // Timeouts are written in whole seconds under the host's own key.
-            assert!(host.default_timeout > 0 && !host.timeout_key.is_empty());
+            // Timeouts are written in whole seconds under the host's own key (a shim's is in
+            // its code).
+            let shim = matches!(host.install, Install::OwnedShim { .. });
+            assert!(host.default_timeout > 0 && (shim || !host.timeout_key.is_empty()));
         }
     }
 }

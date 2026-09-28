@@ -844,6 +844,8 @@ units = ["function_declaration"]
                 .env("GROK_HOME", format!("{evil}/grok"))
                 .env("CODEX_HOME", format!("{evil}/codex"))
                 .env("COPILOT_HOME", format!("{evil}/copilot"))
+                .env("PI_CODING_AGENT_DIR", format!("{evil}/pi"))
+                .env("OPENCODE_CONFIG_DIR", format!("{evil}/opencode"))
                 .output()
                 .unwrap();
             assert!(output.status.success(), "{output:?}");

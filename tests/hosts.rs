@@ -182,6 +182,10 @@ fn concurrent_stops_respect_the_remaining_capacity() {
     }
 }
 
+fn stderr_text(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
 #[test]
 fn every_hook_name_exits_zero() {
     let root = temp("names");
@@ -194,6 +198,10 @@ fn every_hook_name_exits_zero() {
         &["hook", "cursor"],
         &["hook", "mastracode"],
         &["hook", "codex", "x"],
+        &["hook", "pi", "--timeout"],
+        &["hook", "letta", "x", "1"],
+        &["hook", "opencode", "--timeout", "1", "x"],
+        &["hook", "kilo"],
     ] {
         let output = rotter(&root, args, &root, "{}", &[]);
         assert_eq!(output.status.code(), Some(0), "{args:?}: {output:?}");
@@ -219,11 +227,24 @@ fn every_hook_name_exits_zero() {
             assert!(output.stdout.is_empty(), "{args:?}");
         }
     }
-    for name in ["claude", "grok", "codex", "copilot", "droid"] {
-        let output = rotter(&root, &["hook", name], &root, "not json", &[]);
+    // Input without a session returns before any directory is looked at, so the shim hosts
+    // (whose HOME comes from the password database) can run here too.
+    for args in [
+        &["hook", "claude"][..],
+        &["hook", "grok"],
+        &["hook", "codex"],
+        &["hook", "copilot"],
+        &["hook", "droid"],
+        &["hook", "pi", "--timeout", "5"],
+        &["hook", "letta", "--timeout", "x"],
+        &["hook", "opencode", "--timeout", "7"],
+        &["hook", "claude", "--timeout", "0"],
+    ] {
+        let output = rotter(&root, args, &root, "not json", &[]);
         assert_eq!(
-            (output.status.code(), stdout(&output)),
-            (Some(0), String::new())
+            (output.status.code(), stdout(&output), stderr_text(&output)),
+            (Some(0), String::new(), String::new()),
+            "{args:?}"
         );
     }
     fs::remove_dir_all(root).unwrap();

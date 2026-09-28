@@ -8,9 +8,11 @@ use std::process::ExitCode;
 const SKILL: &str = include_str!("../skills/rotter-comment-review/SKILL.md");
 
 const USAGE: &str = "usage: rotter --skill
-       rotter integration (install | uninstall) (claude | grok | codex | copilot | droid)
+       rotter integration (install | uninstall)
+                          (claude | grok | codex | copilot | droid | pi | letta | opencode)
        rotter integration status
-       rotter hook (claude | claude-stop | grok | grok-stop | codex | copilot | droid)
+       rotter hook (claude | claude-stop | grok | grok-stop | codex | copilot | droid | pi | letta
+                   | opencode) [--timeout <seconds>]
        rotter parser install [<name>...]
        rotter parser list
        rotter extract (--staged | --worktree | --base <rev> | --full)
@@ -25,10 +27,15 @@ $GROK_HOME/hooks/rotter.json (default ~/.grok; the home must exist), a file rott
 timeout is max(60, parse_timeout_seconds + 30); re-run install after changing
 parse_timeout_seconds. install codex merges `hook codex` into $CODEX_HOME/hooks.json (default
 ~/.codex; trust it in Codex's /hooks), install copilot writes $COPILOT_HOME/hooks/rotter.json
-(default ~/.copilot) and install droid merges `hook droid` into ~/.factory/hooks.json; codex
-and droid are experimental. A host directory inside a git work tree is refused. status shows
-every host, including the unsupported ones and why. `hook claude` and `hook grok` are the same
-hooks as `hook claude-stop` and `hook grok-stop`; every `rotter hook ...` exits 0.
+(default ~/.copilot) and install droid merges `hook droid` into ~/.factory/hooks.json. install
+pi writes the extension $PI_CODING_AGENT_DIR/extensions/rotter-review.ts (default ~/.pi/agent)
+and install letta the mod ~/.letta/mods/rotter-review.js (timeout capped at 120 s, the host
+waits); install opencode writes the plugin $OPENCODE_CONFIG_DIR/plugins/rotter-review.js
+(default $XDG_CONFIG_HOME/opencode, else ~/.config/opencode), which re-prompts the session with a
+visible message. Each runs `hook <host> --timeout <n>` with only PATH and LANG. codex, droid,
+pi, letta and opencode are experimental. A host directory inside a git work tree is refused.
+status shows every host, including the unsupported ones and why. `hook claude` and `hook grok`
+are the same hooks as `hook claude-stop` and `hook grok-stop`; every `rotter hook ...` exits 0.
 
 parser install fetches each enabled external grammar at its pinned commit (or copies its local
 path), compiles it with cc and caches it under $XDG_CACHE_HOME/rotter/parsers (default
@@ -159,10 +166,18 @@ fn main() -> ExitCode {
             // A hook must never fail the host's turn: every `rotter hook …` exits 0, even on a
             // panic, and problems surface as a systemMessage or on stderr, per host.
             let _ = std::panic::catch_unwind(|| match rest {
-                [name] if let Some(host) = hosts::by_hook(name) => {
+                [name, rest @ ..]
+                    if let Some(host) = hosts::by_hook(name)
+                        && matches!(rest, [] | ["--timeout", _]) =>
+                {
+                    // A shim's own timeout; anything but a positive integer is ignored.
+                    let timeout = match rest {
+                        ["--timeout", value] => value.parse().ok().filter(|value| *value > 0),
+                        _ => None,
+                    };
                     let mut input = String::new();
                     let _ = std::io::stdin().read_to_string(&mut input);
-                    integration::stop(host, &input, &Sources::for_host(host));
+                    integration::stop(host, &input, &Sources::for_host(host), timeout);
                 }
                 _ => eprintln!(
                     "rotter: unknown hook {:?}; available: {}",
