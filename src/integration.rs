@@ -1,31 +1,72 @@
+use crate::config::{self, Config, absolute_var, home};
 use crate::json::Json;
-use crate::{Mode, Options, extract};
+use crate::{Mode, Options, extract, toplevel};
 use serde_json::{Value, json};
 use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 /// Marks the settings entry this binary owns; everything else in settings.json is left alone.
 const HOOK_ARGS: &str = "hook claude-stop";
 
-fn home() -> PathBuf {
-    std::env::var_os("HOME").map_or_else(|| PathBuf::from("."), PathBuf::from)
+/// Claude Code's default hook timeout, assumed when the installed entry has no usable one.
+const DEFAULT_HOOK_TIMEOUT: u64 = 60;
+/// Seconds of the hook timeout kept free for git and reporting after the per-file phases.
+const HOOK_RESERVE: u64 = 15;
+
+/// Where dedupe state lives; None (no absolute location) means the hook does not dedupe.
+fn state_dir() -> Option<PathBuf> {
+    absolute_var("ROTTER_STATE_DIR").or_else(|| {
+        absolute_var("XDG_STATE_HOME")
+            .or_else(|| home().map(|home| home.join(".local/state")))
+            .map(|base| base.join("rotter"))
+    })
 }
 
-fn state_dir() -> PathBuf {
-    if let Some(dir) = std::env::var_os("ROTTER_STATE_DIR") {
-        return PathBuf::from(dir);
-    }
-    std::env::var_os("XDG_STATE_HOME")
-        .map_or_else(|| home().join(".local/state"), PathBuf::from)
-        .join("rotter")
+fn claude_settings() -> Result<PathBuf, String> {
+    absolute_var("CLAUDE_CONFIG_DIR")
+        .or_else(|| home().map(|home| home.join(".claude")))
+        .map(|dir| dir.join("settings.json"))
+        .ok_or_else(|| {
+            "cannot locate Claude Code settings: set HOME or an absolute CLAUDE_CONFIG_DIR"
+                .to_owned()
+        })
 }
 
-fn claude_settings() -> PathBuf {
-    std::env::var_os("CLAUDE_CONFIG_DIR")
-        .map_or_else(|| home().join(".claude"), PathBuf::from)
-        .join("settings.json")
+/// The hook `timeout` to install: room for one full parse plus git and reporting.
+pub fn hook_timeout(parse_timeout_seconds: u64) -> u64 {
+    DEFAULT_HOOK_TIMEOUT.max(parse_timeout_seconds.saturating_add(30))
+}
+
+/// Smallest positive integer `timeout` among entries with exactly this command, else 60.
+fn installed_timeout(settings: &Value, command: &str) -> u64 {
+    our_entries(settings)
+        .filter(|entry| entry["command"].as_str() == Some(command))
+        .filter_map(|entry| entry["timeout"].as_u64().filter(|timeout| *timeout > 0))
+        .min()
+        .unwrap_or(DEFAULT_HOOK_TIMEOUT)
+}
+
+/// Soft budget for the per-file phases of one hook run.
+fn run_budget(computed: u64, installed: u64) -> Duration {
+    Duration::from_secs(computed.min(installed).saturating_sub(HOOK_RESERVE))
+}
+
+/// The installed timeout from the user settings.json; a missing or non-regular file counts as 60.
+fn settings_timeout(command: &str) -> u64 {
+    claude_settings()
+        .ok()
+        .filter(|path| fs::symlink_metadata(path).is_ok_and(|meta| meta.is_file()))
+        .and_then(|path| read_settings(&path).ok())
+        .map_or(DEFAULT_HOOK_TIMEOUT, |settings| {
+            installed_timeout(&settings, command)
+        })
+}
+
+fn hook_command() -> String {
+    format!("{} {HOOK_ARGS}", shell_quote(&exe()))
 }
 
 fn exe() -> String {
@@ -47,6 +88,7 @@ fn units(report: &Json) -> usize {
 /// Blocks once when the working tree has changes that relate to comments, never blocks a
 /// continuation it caused, and asks again only after the report changes.
 pub fn claude_stop(input: &str) -> Option<String> {
+    let start = Instant::now();
     let input: Value = serde_json::from_str(input).unwrap_or(Value::Null);
     // Claude Code sends stop_hook_active; Grok Build sends stopHookActive.
     if ["stop_hook_active", "stopHookActive"]
@@ -68,32 +110,48 @@ pub fn claude_stop(input: &str) -> Option<String> {
     if !inside {
         return None;
     }
-    let message =
-        |text: String| Some(json!({ "systemMessage": format!("rotter: {text}") }).to_string());
+    // Config problems never block: they become one systemMessage and builtins are used.
+    let mut notes = Vec::new();
+    let config = match config::load(toplevel(&cwd).ok().as_deref()) {
+        Ok(loaded) => {
+            notes.extend(loaded.note);
+            loaded.config
+        }
+        Err(error) => {
+            notes.push(format!(
+                "config error: {error}; external languages disabled"
+            ));
+            Config::default()
+        }
+    };
+    let message = |mut notes: Vec<String>, text: Option<String>| {
+        notes.extend(text);
+        (!notes.is_empty()).then(|| {
+            json!({ "systemMessage": format!("rotter: {}", notes.join("; ")) }).to_string()
+        })
+    };
     let rotter = exe();
     let command = format!(
         "{rotter} extract --worktree --include-untracked -C {}",
         cwd.display()
     );
-    let options = Options {
-        mode: Mode::Worktree,
-        include_untracked: true,
-        paths: Vec::new(),
-        languages: Vec::new(),
-    };
+    let budget = run_budget(
+        hook_timeout(config.parse_timeout_seconds),
+        settings_timeout(&hook_command()),
+    );
+    let mut options = Options::new(Mode::Worktree);
+    options.include_untracked = true;
+    options.grammars = config.languages();
+    options.languages = config.override_languages(&options.grammars);
+    options.parse_timeout = config.parse_timeout();
+    options.deadline = start.checked_add(budget);
     let report = match extract(&cwd, &options) {
         Ok(report) => report,
-        Err(error) => return message(format!("extract failed: {error}")),
+        Err(error) => return message(notes, Some(format!("extract failed: {error}"))),
     };
     let found = units(&report.json);
-    if found == 0 {
-        return (!report.complete)
-            .then(|| {
-                message(format!(
-                    "some changed files could not be analysed; run {command}"
-                ))
-            })
-            .flatten();
+    if found == 0 && report.complete {
+        return message(notes, None);
     }
 
     let text = report.json.to_string();
@@ -113,13 +171,24 @@ pub fn claude_stop(input: &str) -> Option<String> {
             }
         })
         .collect();
-    let dir = state_dir().join("claude-stop");
-    let state = dir.join(session);
-    if fs::read_to_string(&state).is_ok_and(|seen| seen.trim() == fingerprint) {
-        return None;
+    // Incomplete reports without units are recorded too, so each is announced once.
+    if let Some(dir) = state_dir().map(|dir| dir.join("claude-stop")) {
+        let state = dir.join(session);
+        if fs::read_to_string(&state).is_ok_and(|seen| seen.trim() == fingerprint) {
+            return message(notes, None);
+        }
+        // Failing to record state only means the same report may be requested again.
+        let _ =
+            fs::create_dir_all(&dir).and_then(|()| fs::write(&state, format!("{fingerprint}\n")));
     }
-    // Failing to record state only means the same report may be requested again.
-    let _ = fs::create_dir_all(&dir).and_then(|()| fs::write(&state, format!("{fingerprint}\n")));
+    if found == 0 {
+        return message(
+            notes,
+            Some(format!(
+                "some changed files could not be analysed; run {command}"
+            )),
+        );
+    }
     let reason = format!(
         "rotter found {found} changed code unit(s) with related comments in {} (report complete: {}). \
          Before finishing, review them with the rotter-comment-review skill in working tree mode \
@@ -129,7 +198,11 @@ pub fn claude_stop(input: &str) -> Option<String> {
         cwd.display(),
         report.complete
     );
-    Some(json!({ "decision": "block", "reason": reason }).to_string())
+    let mut output = json!({ "decision": "block", "reason": reason });
+    if !notes.is_empty() {
+        output["systemMessage"] = format!("rotter: {}", notes.join("; ")).into();
+    }
+    Some(output.to_string())
 }
 
 fn shell_quote(text: &str) -> String {
@@ -211,18 +284,29 @@ fn target(name: &str) -> Result<(), String> {
     }
 }
 
-pub fn install(name: &str) -> Result<String, String> {
-    target(name)?;
-    let path = claude_settings();
-    let mut settings = read_settings(&path)?;
-    let command = format!("{} {HOOK_ARGS}", shell_quote(&exe()));
-    let current = settings["hooks"]["Stop"]
+/// Every Stop hook entry that belongs to some rotter binary.
+fn our_entries(settings: &Value) -> impl Iterator<Item = &Value> {
+    settings["hooks"]["Stop"]
         .as_array()
         .into_iter()
         .flatten()
         .flat_map(|group| group["hooks"].as_array().into_iter().flatten())
         .filter(|entry| is_ours(entry))
-        .map(|entry| entry["command"].as_str() == Some(command.as_str()))
+}
+
+/// Installs the Stop hook with `timeout` sized for `parse_timeout_seconds`.
+pub fn install(name: &str, parse_timeout_seconds: u64) -> Result<String, String> {
+    target(name)?;
+    let path = claude_settings()?;
+    let mut settings = read_settings(&path)?;
+    let command = hook_command();
+    let timeout = hook_timeout(parse_timeout_seconds);
+    // Current only when both command and timeout match; otherwise it is replaced.
+    let current = our_entries(&settings)
+        .map(|entry| {
+            entry["command"].as_str() == Some(command.as_str())
+                && entry["timeout"].as_u64() == Some(timeout)
+        })
         .collect::<Vec<_>>();
     if current == [true] {
         return Ok(format!("claude: already installed ({})", path.display()));
@@ -237,7 +321,7 @@ pub fn install(name: &str) -> Result<String, String> {
     settings["hooks"]["Stop"]
         .as_array_mut()
         .expect("Stop is an array")
-        .push(json!({ "hooks": [{ "type": "command", "command": command, "timeout": 60 }] }));
+        .push(json!({ "hooks": [{ "type": "command", "command": command, "timeout": timeout }] }));
     write_settings(&path, &settings)?;
     let verb = if replaced > 0 { "updated" } else { "installed" };
     Ok(format!("claude: {verb} Stop hook in {}", path.display()))
@@ -245,7 +329,7 @@ pub fn install(name: &str) -> Result<String, String> {
 
 pub fn uninstall(name: &str) -> Result<String, String> {
     target(name)?;
-    let path = claude_settings();
+    let path = claude_settings()?;
     let mut settings = read_settings(&path)?;
     if remove_ours(&mut settings) == 0 {
         return Ok(format!("claude: not installed ({})", path.display()));
@@ -254,22 +338,92 @@ pub fn uninstall(name: &str) -> Result<String, String> {
     Ok(format!("claude: removed Stop hook from {}", path.display()))
 }
 
-pub fn status() -> Result<String, String> {
-    let path = claude_settings();
+/// Reports the hook state; `parse_timeout_seconds` gives the expected timeout.
+pub fn status(parse_timeout_seconds: u64) -> Result<String, String> {
+    let path = claude_settings()?;
     let settings = read_settings(&path)?;
-    let command = format!("{} {HOOK_ARGS}", shell_quote(&exe()));
-    let ours: Vec<&str> = settings["hooks"]["Stop"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .flat_map(|group| group["hooks"].as_array().into_iter().flatten())
-        .filter(|entry| is_ours(entry))
-        .filter_map(|entry| entry["command"].as_str())
-        .collect();
+    let command = hook_command();
+    let expected = hook_timeout(parse_timeout_seconds);
+    let ours: Vec<&Value> = our_entries(&settings).collect();
     let state = match ours.as_slice() {
         [] => "not installed".to_owned(),
-        [only] if *only == command => "installed (current)".to_owned(),
-        _ => format!("installed for another binary: {}", ours.join(", ")),
+        [only] if only["command"].as_str() == Some(command.as_str()) => {
+            if only["timeout"].as_u64() == Some(expected) {
+                "installed (current)".to_owned()
+            } else {
+                format!(
+                    "installed (timeout {}, expected {expected}); run `rotter integration install claude`",
+                    only["timeout"]
+                )
+            }
+        }
+        _ => format!(
+            "installed for another binary: {}",
+            ours.iter()
+                .filter_map(|entry| entry["command"].as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
     };
     Ok(format!("claude: {state} ({})", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{hook_timeout, installed_timeout, run_budget};
+    use serde_json::{Value, json};
+    use std::time::Duration;
+
+    const COMMAND: &str = "'/bin/rotter' hook claude-stop";
+
+    fn settings(timeouts: &[Value]) -> Value {
+        let hooks: Vec<Value> = timeouts
+            .iter()
+            .map(|timeout| json!({ "type": "command", "command": COMMAND, "timeout": timeout }))
+            .collect();
+        json!({ "hooks": { "Stop": [{ "hooks": hooks }] } })
+    }
+
+    #[test]
+    fn run_budget_uses_the_smaller_timeout_minus_the_reserve() {
+        let default = hook_timeout(60);
+        assert_eq!(default, 90);
+        let budget = |timeouts: &[Value]| {
+            run_budget(default, installed_timeout(&settings(timeouts), COMMAND))
+        };
+        assert_eq!(budget(&[json!(10)]), Duration::ZERO);
+        assert_eq!(
+            budget(&[json!(0)]),
+            Duration::from_secs(45),
+            "0 counts as unset"
+        );
+        assert_eq!(budget(&[json!(60)]), Duration::from_secs(45));
+        assert_eq!(budget(&[json!(90)]), Duration::from_secs(75));
+        assert_eq!(budget(&[json!("90")]), Duration::from_secs(45));
+        assert_eq!(budget(&[json!(-5)]), Duration::from_secs(45));
+        assert_eq!(budget(&[json!(90.5)]), Duration::from_secs(45));
+        assert_eq!(budget(&[]), Duration::from_secs(45), "missing entry");
+        assert_eq!(
+            budget(&[json!(90), json!(30)]),
+            Duration::from_secs(15),
+            "smallest wins"
+        );
+        let other = json!({ "hooks": { "Stop": [{ "hooks": [
+            { "type": "command", "command": "'/other/rotter' hook claude-stop", "timeout": 5 }
+        ] }] } });
+        assert_eq!(
+            installed_timeout(&other, COMMAND),
+            60,
+            "another binary's entry"
+        );
+        assert_eq!(
+            run_budget(
+                hook_timeout(300),
+                installed_timeout(&settings(&[json!(90)]), COMMAND)
+            ),
+            Duration::from_secs(75)
+        );
+        assert_eq!(hook_timeout(300), 330);
+        assert_eq!(hook_timeout(1), 60);
+    }
 }

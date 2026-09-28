@@ -1,7 +1,7 @@
 use crate::json::Json;
 use crate::{
-    Change, Detected, Language, detect_content, detect_path, error_lines, full_units,
-    parse_partial, units,
+    Change, Detected, Grammar, Languages, ParseError, error_lines, full_units, parse_with_deadline,
+    units,
 };
 use std::ffi::OsStr;
 use std::fs;
@@ -10,8 +10,9 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Which pair of snapshots to compare; there is deliberately no default.
 #[derive(Clone, Debug)]
@@ -32,8 +33,29 @@ pub struct Options {
     pub include_untracked: bool,
     /// Git pathspecs relative to the directory the command runs in; empty means the whole repo.
     pub paths: Vec<String>,
-    /// `--lang` overrides: repository-relative glob and the language to parse matches with.
-    pub languages: Vec<(String, Language, &'static str)>,
+    /// `--lang` then config `[overrides]`: repository-relative glob, grammar and dialect label.
+    pub languages: Vec<(String, Arc<Grammar>, String)>,
+    /// Builtins plus enabled externals, for extension, shebang and file name detection.
+    pub grammars: Languages,
+    /// Per-file parse limit (`parse_timeout_seconds`).
+    pub parse_timeout: Duration,
+    /// Soft run-wide deadline: files not started by then are skipped as `parse_timeout`.
+    pub deadline: Option<Instant>,
+}
+
+impl Options {
+    /// Builtin languages, no overrides, the default 60 s parse limit and no run deadline.
+    pub fn new(mode: Mode) -> Self {
+        Self {
+            mode,
+            include_untracked: false,
+            paths: Vec::new(),
+            languages: Vec::new(),
+            grammars: Languages::default(),
+            parse_timeout: Duration::from_secs(crate::config::DEFAULT_PARSE_TIMEOUT),
+            deadline: None,
+        }
+    }
 }
 
 pub struct Report {
@@ -104,6 +126,11 @@ fn git_text(dir: &Path, args: &[&str]) -> Result<String, String> {
     String::from_utf8(output)
         .map(|text| text.trim_end().to_owned())
         .map_err(|_| "git printed non-UTF-8 output".to_owned())
+}
+
+/// The repository's top-level directory as git reports it.
+pub fn toplevel(dir: &Path) -> Result<PathBuf, String> {
+    git_text(dir, &["rev-parse", "--show-toplevel"]).map(PathBuf::from)
 }
 
 /// Private scratch directory for diff inputs; removed on drop.
@@ -263,7 +290,7 @@ fn parse_raw(output: &[u8]) -> Result<Vec<Entry>, String> {
 struct Side {
     json: Vec<(&'static str, Json)>,
     text: Option<String>,
-    language: Option<Language>,
+    language: Option<Arc<Grammar>>,
     in_scope: bool,
 }
 
@@ -288,10 +315,16 @@ enum Source<'a> {
 struct Run<'a> {
     top: &'a Path,
     scratch: Scratch,
-    languages: &'a [(String, Language, &'static str)],
+    options: &'a Options,
 }
 
 impl Run<'_> {
+    fn deadline_passed(&self) -> bool {
+        self.options
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+    }
+
     fn load(&self, path: &[u8], mode: &str, source: Source<'_>) -> Side {
         let display = String::from_utf8_lossy(path).into_owned();
         let relative = Path::new(OsStr::from_bytes(path));
@@ -306,16 +339,27 @@ impl Run<'_> {
             "160000" => return side.status("skipped_submodule", None, false),
             _ => {}
         }
+        let grammars = &self.options.grammars;
         let override_language = self
+            .options
             .languages
             .iter()
             .find(|(pattern, _, _)| crate::glob_match(pattern, &display));
         let mut detected = match override_language {
-            Some((_, language, dialect)) => Detected::Supported(*language, dialect),
-            None => detect_path(relative),
+            Some((_, grammar, dialect)) => {
+                Detected::Supported(Arc::clone(grammar), dialect.clone())
+            }
+            None => grammars.detect_path(relative),
         };
-        if detected == Detected::NotInScope {
+        if matches!(detected, Detected::NotInScope) {
             return side.status("not_in_scope", None, false);
+        }
+        if self.deadline_passed() {
+            return side.status(
+                "parse_timeout",
+                Some("skipped: the run's time budget ran out before this file".into()),
+                true,
+            );
         }
         let bytes = match source {
             Source::Blob(oid) => git(
@@ -331,7 +375,7 @@ impl Run<'_> {
                         return side.status("skipped_symlink", None, false);
                     }
                     Ok(meta) if !meta.is_file() => Err("not a regular file".to_owned()),
-                    Ok(_) if detected == Detected::NeedsContent => {
+                    Ok(_) if matches!(detected, Detected::NeedsContent) => {
                         // Decide from the first line before reading the rest of the file.
                         let mut first = Vec::new();
                         let prefix = fs::File::open(&full)
@@ -342,7 +386,7 @@ impl Run<'_> {
                                 .split(|byte| *byte == b'\n')
                                 .next()
                                 .unwrap_or_default();
-                            detect_content(relative, &String::from_utf8_lossy(line))
+                            grammars.detect_content(relative, &String::from_utf8_lossy(line))
                         }) {
                             Ok(Detected::NotInScope) => {
                                 return side.status("not_in_scope", None, false);
@@ -368,12 +412,12 @@ impl Run<'_> {
             Ok(bytes) => bytes,
             Err(error) => return side.status("read_error", Some(error), true),
         };
-        if detected == Detected::NeedsContent {
+        if matches!(detected, Detected::NeedsContent) {
             let first = bytes
                 .split(|byte| *byte == b'\n')
                 .next()
                 .unwrap_or_default();
-            detected = detect_content(relative, &String::from_utf8_lossy(first));
+            detected = grammars.detect_content(relative, &String::from_utf8_lossy(first));
         }
         let (language, dialect) = match detected {
             Detected::Supported(language, dialect) => (language, dialect),
@@ -391,6 +435,10 @@ impl Run<'_> {
         };
         side.json.push(("language", language.name().into()));
         side.json.push(("dialect", dialect.into()));
+        // The only place a grammar that cannot be loaded becomes a status.
+        if let Err(detail) = language.language() {
+            return side.status("parser_not_installed", Some(detail), true);
+        }
         let blob = match source {
             Source::Blob(oid) => Ok(oid.to_owned()),
             Source::Disk => git(
@@ -458,8 +506,12 @@ impl Run<'_> {
         let [before, after] = sides;
         let side_json = |side: Option<Side>, is_after: bool, complete: &mut bool| {
             let mut side = side?;
-            if let (Some(text), Some(language)) = (&side.text, side.language) {
-                match parse_partial(language, text) {
+            if let (Some(text), Some(language)) = (&side.text, side.language.clone()) {
+                let limit = self.options.parse_timeout;
+                let budget = self.options.deadline.map_or(limit, |deadline| {
+                    limit.min(deadline.saturating_duration_since(Instant::now()))
+                });
+                match parse_with_deadline(&language, text, budget) {
                     Ok(tree) => {
                         // Keep what parsed; units touching an error are flagged, not dropped.
                         let errors = error_lines(&tree);
@@ -477,11 +529,25 @@ impl Run<'_> {
                             ));
                         }
                         let found = if full {
-                            full_units(language, text, &tree)
+                            full_units(&language, text, &tree)
                         } else {
-                            units(language, text, &tree, &changes(&hunks, is_after))
+                            units(&language, text, &tree, &changes(&hunks, is_after))
                         };
                         side.json.push(("units", found));
+                    }
+                    Err(ParseError::Timeout) => {
+                        *complete = false;
+                        side.json.push(("status", "parse_timeout".into()));
+                        let detail = if budget < limit {
+                            "stopped: the run's time budget ran out during this file".to_owned()
+                        } else {
+                            format!(
+                                "stopped after {} s; the limit is parse_timeout_seconds in \
+                                 $XDG_CONFIG_HOME/rotter/config.toml",
+                                limit.as_secs()
+                            )
+                        };
+                        side.json.push(("detail", detail.into()));
                     }
                     Err(error) => {
                         *complete = false;
@@ -542,7 +608,7 @@ impl Run<'_> {
 
 /// Extracts changed units and their comments for one explicitly chosen diff mode.
 pub fn extract(dir: &Path, options: &Options) -> Result<Report, String> {
-    let top = PathBuf::from(git_text(dir, &["rev-parse", "--show-toplevel"])?);
+    let top = toplevel(dir)?;
     let (rev, commit) = match &options.mode {
         Mode::Base(rev) => {
             if rev.is_empty() || rev.starts_with('-') {
@@ -704,7 +770,7 @@ pub fn extract(dir: &Path, options: &Options) -> Result<Report, String> {
     let run = Run {
         top: &top,
         scratch,
-        languages: &options.languages,
+        options,
     };
     let after_on_disk = !matches!(options.mode, Mode::Staged);
     let mut complete = true;

@@ -1,5 +1,5 @@
-use crate::Language;
 use crate::json::Json;
+use crate::{Grammar, Language};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::Range;
 use tree_sitter::{Node, Point, Tree};
@@ -12,8 +12,8 @@ pub enum Change {
     Gap(usize),
 }
 
-fn is_comment(kind: &str) -> bool {
-    matches!(kind, "comment" | "line_comment" | "block_comment")
+fn has(kinds: &[String], kind: &str) -> bool {
+    kinds.iter().any(|known| known == kind)
 }
 
 /// Last row that holds text of `node`; Rust doc comments end at column 0 of the next row.
@@ -54,7 +54,7 @@ impl<'t> Selected<'t> {
 }
 
 struct File<'t> {
-    language: Language,
+    grammar: &'t Grammar,
     source: &'t str,
     root: Node<'t>,
     line_starts: Vec<usize>,
@@ -95,8 +95,8 @@ pub fn error_lines(tree: &Tree) -> Vec<usize> {
 }
 
 /// Full mode: every unit that has a comment, each with only the comments that belong to it.
-pub fn full_units(language: Language, source: &str, tree: &Tree) -> Json {
-    let mut file = File::new(language, source, tree);
+pub fn full_units(grammar: &Grammar, source: &str, tree: &Tree) -> Json {
+    let mut file = File::new(grammar, source, tree);
     file.text_limit = Some(FULL_TEXT_LINES);
     let mut selected: BTreeMap<(usize, usize), Selected<'_>> = BTreeMap::new();
     for comment in &file.comments {
@@ -118,8 +118,8 @@ pub fn full_units(language: Language, source: &str, tree: &Tree) -> Json {
 }
 
 /// Maps the changes on one side of a file to units and their related comments.
-pub fn units(language: Language, source: &str, tree: &Tree, changes: &[Change]) -> Json {
-    let mut file = File::new(language, source, tree);
+pub fn units(grammar: &Grammar, source: &str, tree: &Tree, changes: &[Change]) -> Json {
+    let mut file = File::new(grammar, source, tree);
     for change in changes {
         if let Change::Rows(rows) = change {
             file.changed_rows.extend(rows.clone());
@@ -207,10 +207,10 @@ pub fn units(language: Language, source: &str, tree: &Tree, changes: &[Change]) 
 }
 
 impl<'t> File<'t> {
-    fn new(language: Language, source: &'t str, tree: &'t Tree) -> Self {
+    fn new(grammar: &'t Grammar, source: &'t str, tree: &'t Tree) -> Self {
         let root = tree.root_node();
         let mut file = File {
-            language,
+            grammar,
             source,
             root,
             line_starts: std::iter::once(0)
@@ -244,18 +244,18 @@ impl<'t> File<'t> {
         if node.is_error() || node.is_missing() {
             self.errors.push(node.byte_range());
         }
-        if is_comment(node.kind()) {
+        if has(&self.grammar.comment_kinds, node.kind()) {
             self.comments.push(node);
             return;
         }
         let kind = node.kind();
-        if !matches!(self.language, Language::Yaml | Language::Toml)
+        if self.grammar.references
             && node.child_count() == 0
             && (kind.ends_with("identifier") || kind == "variable_name" || kind == "word")
         {
             self.identifiers.push(node);
         }
-        if self.language.attribute_kinds().contains(&node.kind()) {
+        if has(&self.grammar.attribute_kinds, node.kind()) {
             self.attribute_rows
                 .extend(node.start_position().row..=last_row(node));
         }
@@ -281,7 +281,7 @@ impl<'t> File<'t> {
     }
 
     fn is_unit(&self, node: Node<'_>) -> bool {
-        self.language.unit_kinds().contains(&node.kind())
+        has(&self.grammar.unit_kinds, node.kind())
     }
 
     /// Row where a unit begins, including attribute lines directly above it.
@@ -319,16 +319,14 @@ impl<'t> File<'t> {
         while let Some(node) = current {
             if self.is_unit(node) {
                 chain.push(node);
-            } else if value_at.is_none()
-                && self.language.function_value_kinds().contains(&node.kind())
-            {
+            } else if value_at.is_none() && has(&self.grammar.value_kinds, node.kind()) {
                 value_at = Some(chain.len());
             }
             current = node.parent();
         }
         let declared = chain
             .iter()
-            .position(|node| self.language.function_kinds().contains(&node.kind()));
+            .position(|node| has(&self.grammar.function_kinds, node.kind()));
         // A function value only counts when a unit (binding, var, field) holds it.
         let value = value_at.filter(|index| *index < chain.len());
         if let Some(index) = [declared, value].into_iter().flatten().min() {
@@ -358,7 +356,7 @@ impl<'t> File<'t> {
     fn unit_for(&self, node: Node<'t>) -> Node<'t> {
         let mut current = Some(node);
         while let Some(candidate) = current {
-            if is_comment(candidate.kind()) {
+            if has(&self.grammar.comment_kinds, candidate.kind()) {
                 if self.standalone(candidate)
                     && let Some(unit) = self.follow(candidate)
                 {
@@ -430,7 +428,7 @@ impl<'t> File<'t> {
             let text = &self.source[comment.byte_range()];
             if comment.start_byte() >= node.start_byte()
                 || comment_style(*comment, text) == "doc_inner"
-                || directive(self.language, text) == Some("shebang")
+                || directive(self.grammar, text) == Some("shebang")
             {
                 break;
             }
@@ -526,7 +524,7 @@ impl<'t> File<'t> {
         Json::Obj(vec![
             ("relation", relation.into()),
             ("style", comment_style(first, text).into()),
-            ("directive", directive(self.language, text).into()),
+            ("directive", directive(self.grammar, text).into()),
             (
                 "changed",
                 rows.into_iter()
@@ -549,9 +547,8 @@ impl<'t> File<'t> {
     /// Consecutive standalone line comments read as one block; directives stay separate.
     fn joins(&self, previous: Node<'_>, next: Node<'_>) -> bool {
         let text = |node: Node<'_>| &self.source[node.byte_range()];
-        let plain = |node: Node<'_>| {
-            self.standalone(node) && directive(self.language, text(node)).is_none()
-        };
+        let plain =
+            |node: Node<'_>| self.standalone(node) && directive(self.grammar, text(node)).is_none();
         plain(previous)
             && plain(next)
             && comment_style(previous, text(previous)) == comment_style(next, text(next))
@@ -701,8 +698,15 @@ fn comment_style(comment: Node<'_>, text: &str) -> &'static str {
 }
 
 /// Comments that tools read as instructions; they must not be treated as prose.
-fn directive(language: Language, text: &str) -> Option<&'static str> {
+fn directive<'g>(grammar: &'g Grammar, text: &str) -> Option<&'g str> {
     let text = text.trim_end();
+    let Some(language) = grammar.builtin else {
+        return grammar
+            .directives
+            .iter()
+            .find(|(prefix, _)| text.starts_with(prefix.as_str()))
+            .map(|(_, label)| label.as_str());
+    };
     match language {
         Language::Go => [
             "//go:",

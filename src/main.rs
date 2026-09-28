@@ -1,6 +1,7 @@
-use rotter::{Language, Mode, Options, extract, integration};
+use rotter::config::{self, Config};
+use rotter::{Mode, Options, extract, integration, toplevel};
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 /// The review skill ships inside the binary so it always matches this version of the CLI.
@@ -16,16 +17,23 @@ const USAGE: &str = "usage: rotter --skill
 
 --skill prints the comment review skill for coding agents (it matches this binary's version).
 integration install claude registers `rotter hook claude-stop` as a Claude Code Stop hook in
-$CLAUDE_CONFIG_DIR/settings.json (default ~/.claude), keeping a .rotter-bak copy.
+$CLAUDE_CONFIG_DIR/settings.json (default ~/.claude), keeping a .rotter-bak copy. Its timeout is
+max(60, parse_timeout_seconds + 30); re-run it after changing parse_timeout_seconds.
 
 Prints changed code units and their related comments as JSON. --full reports every commented
 unit of the tracked working-tree files instead of a diff. Pathspecs limit any mode.
 --lang parses files whose repository-relative path matches <glob> as <language> (go, lua, nix,
-bash, sh, yaml, toml, rust), ahead of extension and shebang detection; `*` stays within one
-directory, `**` crosses directories. The first matching --lang wins.
+bash, sh, yaml, toml, rust, or an enabled external language), ahead of config overrides and
+extension and shebang detection; `*` stays within one directory, `**` crosses directories. The
+first matching --lang wins.
+Config: $XDG_CONFIG_HOME/rotter/config.toml (default ~/.config) sets parse_timeout_seconds
+(default 60), [language.<name>] external grammars and [overrides] <glob> = <language>.
 Exit status: 0 complete, 1 printed but incomplete (unreadable, unparsed or unsupported files), 2 error.";
 
-fn parse_args(args: &[String]) -> Result<(PathBuf, Options), String> {
+/// `--lang` values, resolved once the config says which external languages exist.
+type LangArgs = Vec<(String, String)>;
+
+fn parse_args(args: &[String]) -> Result<(PathBuf, Options, LangArgs), String> {
     let mut args = args.iter();
     if args.next().map(String::as_str) != Some("extract") {
         return Err("expected the extract command".into());
@@ -56,9 +64,7 @@ fn parse_args(args: &[String]) -> Result<(PathBuf, Options), String> {
                 let (pattern, name) = value
                     .rsplit_once('=')
                     .ok_or_else(|| format!("--lang needs <glob>=<language>: {value}"))?;
-                let (language, dialect) = Language::from_name(name)
-                    .ok_or_else(|| format!("unknown --lang language: {name}"))?;
-                languages.push((pattern.to_owned(), language, dialect));
+                languages.push((pattern.to_owned(), name.to_owned()));
             }
             "-C" => dir = args.next().ok_or("-C needs a directory")?.into(),
             other => match other.strip_prefix("--base=") {
@@ -71,15 +77,37 @@ fn parse_args(args: &[String]) -> Result<(PathBuf, Options), String> {
     if include_untracked && matches!(mode, Mode::Staged) {
         return Err("--include-untracked does not apply to --staged".into());
     }
-    Ok((
-        dir,
-        Options {
-            mode,
-            include_untracked,
-            paths,
-            languages,
-        },
-    ))
+    let mut options = Options::new(mode);
+    options.include_untracked = include_untracked;
+    options.paths = paths;
+    Ok((dir, options, languages))
+}
+
+/// Loads the config for a CLI command; an untrusted config is reported and ignored.
+fn cli_config(repo: Option<&Path>) -> Result<Config, String> {
+    let loaded = config::load(repo)?;
+    if let Some(note) = loaded.note {
+        eprintln!("rotter: {note}");
+    }
+    Ok(loaded.config)
+}
+
+/// Applies the config and resolves `--lang` names; `--lang` globs come before `[overrides]`.
+fn configure(dir: &Path, options: &mut Options, languages: LangArgs) -> Result<(), String> {
+    let config = cli_config(Some(&toplevel(dir)?))?;
+    options.grammars = config.languages();
+    options.parse_timeout = config.parse_timeout();
+    for (pattern, name) in languages {
+        let (grammar, dialect) = options
+            .grammars
+            .by_name(&name)
+            .ok_or_else(|| format!("unknown --lang language: {name}"))?;
+        options.languages.push((pattern, grammar, dialect));
+    }
+    options
+        .languages
+        .extend(config.override_languages(&options.grammars));
+    Ok(())
 }
 
 fn main() -> ExitCode {
@@ -110,9 +138,14 @@ fn main() -> ExitCode {
             }
             return ExitCode::SUCCESS;
         }
-        ["integration", "install", name] => Some(integration::install(name)),
+        ["integration", "install", name] => Some(
+            cli_config(None)
+                .and_then(|config| integration::install(name, config.parse_timeout_seconds)),
+        ),
         ["integration", "uninstall", name] => Some(integration::uninstall(name)),
-        ["integration", "status"] => Some(integration::status()),
+        ["integration", "status"] => Some(
+            cli_config(None).and_then(|config| integration::status(config.parse_timeout_seconds)),
+        ),
         _ => None,
     };
     if let Some(result) = result {
@@ -131,13 +164,17 @@ fn main() -> ExitCode {
         println!("{USAGE}");
         return ExitCode::SUCCESS;
     }
-    let (dir, options) = match parse_args(&args) {
+    let (dir, mut options, languages) = match parse_args(&args) {
         Ok(parsed) => parsed,
         Err(error) => {
             eprintln!("rotter: {error}\n{USAGE}");
             return ExitCode::from(2);
         }
     };
+    if let Err(error) = configure(&dir, &mut options, languages) {
+        eprintln!("rotter: {error}");
+        return ExitCode::from(2);
+    }
     match extract(&dir, &options) {
         Ok(report) => {
             let text = report.json.to_string();

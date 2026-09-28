@@ -27,9 +27,22 @@ fn git(dir: &Path, args: &[&str]) {
 }
 
 fn hook(input: &str, state: &Path) -> String {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_rotter"))
+    hook_with(input, state, &[])
+}
+
+/// Runs the hook with config and Claude settings pinned under `state` unless `env` sets them.
+fn hook_with(input: &str, state: &Path, env: &[(&str, &str)]) -> String {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_rotter"));
+    command
         .args(["hook", "claude-stop"])
+        .current_dir(state)
         .env("ROTTER_STATE_DIR", state)
+        .env("XDG_CONFIG_HOME", state.join("xdg-config"))
+        .env("CLAUDE_CONFIG_DIR", state.join("claude"));
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -102,6 +115,7 @@ fn integration(config: &Path, args: &[&str]) -> (i32, String) {
         .arg("integration")
         .args(args)
         .env("CLAUDE_CONFIG_DIR", config)
+        .env("XDG_CONFIG_HOME", config.join("xdg-config"))
         .output()
         .unwrap();
     let text =
@@ -190,6 +204,202 @@ fn integration_install_creates_missing_settings() {
     assert_eq!(integration(&config, &["install", "claude"]).0, 0);
     let value: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(config.join("settings.json")).unwrap()).unwrap();
-    assert_eq!(value["hooks"]["Stop"][0]["hooks"][0]["timeout"], 60);
+    assert_eq!(value["hooks"]["Stop"][0]["hooks"][0]["timeout"], 90);
     fs::remove_dir_all(&config).unwrap();
+}
+
+fn command() -> String {
+    format!("'{}' hook claude-stop", env!("CARGO_BIN_EXE_rotter"))
+}
+
+fn seed_settings(dir: &Path, timeout: serde_json::Value) {
+    fs::create_dir_all(dir).unwrap();
+    let settings = serde_json::json!({ "hooks": { "Stop": [{ "hooks": [
+        { "type": "command", "command": command(), "timeout": timeout }
+    ] }] } });
+    fs::write(dir.join("settings.json"), settings.to_string()).unwrap();
+}
+
+fn write_config(xdg: &Path, text: &str) -> PathBuf {
+    fs::create_dir_all(xdg.join("rotter")).unwrap();
+    let path = xdg.join("rotter/config.toml");
+    fs::write(&path, text).unwrap();
+    path
+}
+
+fn changed_repo(name: &str) -> PathBuf {
+    let repo = temp(name);
+    fs::write(
+        repo.join("a.go"),
+        "package p\n\n// F returns one.\nfunc F() int { return 1 }\n",
+    )
+    .unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-q", "-m", "c"]);
+    fs::write(
+        repo.join("a.go"),
+        "package p\n\n// F returns one.\nfunc F() int { return 2 }\n",
+    )
+    .unwrap();
+    repo
+}
+
+#[test]
+fn short_installed_timeout_reports_timeouts_once() {
+    let repo = changed_repo("timeout-repo");
+    let state = temp("timeout-state");
+    // min(90, 10) - 15 saturates to zero: the run deadline is the hook's start.
+    seed_settings(&state.join("claude"), serde_json::json!(10));
+    let stop = format!(r#"{{"session_id": "t", "cwd": "{}"}}"#, repo.display());
+    let first = hook(&stop, &state);
+    let value: serde_json::Value = serde_json::from_str(&first).unwrap();
+    assert!(value.get("decision").is_none(), "{first}");
+    assert!(
+        value["systemMessage"]
+            .as_str()
+            .unwrap()
+            .contains("could not be analysed"),
+        "{first}"
+    );
+    assert!(
+        state.join("claude-stop/t").is_file(),
+        "dedupe state written"
+    );
+    assert_eq!(
+        hook(&stop, &state),
+        "",
+        "the same incomplete report is announced once"
+    );
+    fs::remove_dir_all(&repo).unwrap();
+    fs::remove_dir_all(&state).unwrap();
+}
+
+#[test]
+fn invalid_config_warns_once_and_still_reviews_builtins() {
+    let repo = changed_repo("badconfig-repo");
+    let state = temp("badconfig-state");
+    write_config(&state.join("xdg-config"), "parse_timeout_seconds = 0\n");
+    let stop = format!(r#"{{"session_id": "b", "cwd": "{}"}}"#, repo.display());
+    let output = hook(&stop, &state);
+    let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(value["decision"], "block", "{output}");
+    let message = value["systemMessage"].as_str().unwrap();
+    assert!(message.starts_with("rotter: config error: "), "{message}");
+    assert!(
+        message.ends_with("; external languages disabled"),
+        "{message}"
+    );
+    fs::remove_dir_all(&repo).unwrap();
+    fs::remove_dir_all(&state).unwrap();
+}
+
+#[test]
+fn relative_state_dir_is_ignored() {
+    let repo = changed_repo("relstate-repo");
+    let state = temp("relstate-state");
+    let xdg_state = temp("relstate-xdg");
+    let stop = format!(r#"{{"session_id": "r", "cwd": "{}"}}"#, repo.display());
+    let xdg = xdg_state.display().to_string();
+    let env = [
+        ("ROTTER_STATE_DIR", "rel-state"),
+        ("XDG_STATE_HOME", xdg.as_str()),
+    ];
+    assert!(hook_with(&stop, &state, &env).contains(r#""decision":"block""#));
+    assert!(xdg_state.join("rotter/claude-stop/r").is_file());
+    assert!(!state.join("rel-state").exists() && !repo.join("rel-state").exists());
+    assert_eq!(
+        hook_with(&stop, &state, &env),
+        "",
+        "deduped through XDG_STATE_HOME"
+    );
+    for dir in [repo, state, xdg_state] {
+        fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[test]
+fn install_sizes_the_timeout_from_the_config() {
+    let config = temp("sizing");
+    seed_settings(&config, serde_json::json!(60));
+    let xdg = config.join("xdg-config");
+    let settings = || -> serde_json::Value {
+        serde_json::from_str(&fs::read_to_string(config.join("settings.json")).unwrap()).unwrap()
+    };
+    let ours = |value: &serde_json::Value| -> Vec<serde_json::Value> {
+        value["hooks"]["Stop"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|group| group["hooks"].as_array().unwrap().clone())
+            .collect()
+    };
+    let expect = |timeout: u64| {
+        let entries = ours(&settings());
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert_eq!(entries[0]["command"].as_str().unwrap(), command());
+        assert_eq!(entries[0]["timeout"], timeout);
+    };
+
+    let (_, text) = integration(&config, &["status"]);
+    assert!(
+        text.contains("installed (timeout 60, expected 90)"),
+        "{text}"
+    );
+    assert_eq!(integration(&config, &["install", "claude"]).0, 0);
+    expect(90);
+    assert!(
+        integration(&config, &["status"])
+            .1
+            .contains("installed (current)")
+    );
+
+    let path = write_config(&xdg, "parse_timeout_seconds = 300\n");
+    assert!(
+        integration(&config, &["status"])
+            .1
+            .contains("installed (timeout 90, expected 330)")
+    );
+    assert_eq!(integration(&config, &["install", "claude"]).0, 0);
+    expect(330);
+    write_config(&xdg, "parse_timeout_seconds = 120\n");
+    assert_eq!(integration(&config, &["install", "claude"]).0, 0);
+    expect(150);
+
+    // A refused config is reported and the default applies.
+    write_config(&xdg, "parse_timeout_seconds = 3600\n");
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o664)).unwrap();
+    let (_, text) = integration(&config, &["status"]);
+    assert!(
+        text.contains("expected 90") && text.contains("refused"),
+        "{text}"
+    );
+    let (code, text) = integration(&config, &["install", "claude"]);
+    assert_eq!(code, 0, "{text}");
+    assert!(text.contains("refused"), "{text}");
+    expect(90);
+
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+    write_config(&xdg, "parse_timeout_seconds = 0\n");
+    assert_eq!(integration(&config, &["install", "claude"]).0, 2);
+    assert_eq!(integration(&config, &["status"]).0, 2);
+    expect(90);
+    fs::remove_dir_all(&config).unwrap();
+}
+
+#[test]
+fn install_without_home_or_absolute_claude_dir_writes_nothing() {
+    let work = temp("nohome");
+    let output = Command::new(env!("CARGO_BIN_EXE_rotter"))
+        .args(["integration", "install", "claude"])
+        .current_dir(&work)
+        .env_remove("HOME")
+        .env_remove("XDG_CONFIG_HOME")
+        .env("CLAUDE_CONFIG_DIR", "rel-claude")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert_eq!(fs::read_dir(&work).unwrap().count(), 0, "nothing written");
+    fs::remove_dir_all(&work).unwrap();
 }

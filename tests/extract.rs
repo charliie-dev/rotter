@@ -3,11 +3,12 @@ use rotter::{Mode, Options, Report, extract};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 
-struct Repo(PathBuf, Vec<(String, rotter::Language, &'static str)>);
+struct Repo(PathBuf, Vec<(String, Arc<rotter::Grammar>, String)>);
 
 impl Repo {
     fn new() -> Self {
@@ -63,16 +64,11 @@ impl Repo {
         include_untracked: bool,
         paths: &[&str],
     ) -> Report {
-        let report = extract(
-            dir,
-            &Options {
-                mode,
-                include_untracked,
-                paths: paths.iter().map(|path| path.to_string()).collect(),
-                languages: self.1.clone(),
-            },
-        )
-        .unwrap();
+        let mut options = Options::new(mode);
+        options.include_untracked = include_untracked;
+        options.paths = paths.iter().map(|path| path.to_string()).collect();
+        options.languages = self.1.clone();
+        let report = extract(dir, &options).unwrap();
         self.check_ranges(&report.json);
         report
     }
@@ -526,12 +522,7 @@ fn base_mode_requires_a_resolvable_revision() {
     repo.write("a.toml", "a = 2\n");
     repo.commit();
     repo.write("a.toml", "a = 3\n");
-    let options = |rev: &str| Options {
-        mode: Mode::Base(rev.to_owned()),
-        include_untracked: false,
-        paths: Vec::new(),
-        languages: Vec::new(),
-    };
+    let options = |rev: &str| Options::new(Mode::Base(rev.to_owned()));
     assert!(extract(&repo.0, &options("missing")).is_err());
     assert!(extract(&repo.0, &options("--output=x")).is_err());
     let report = repo.extract(Mode::Base(first.trim().to_owned()), false);
@@ -1030,7 +1021,7 @@ fn language_overrides_cover_helpers_without_a_shebang() {
     );
 
     for (pattern, name) in [("**/lib/*", "bash"), ("conf/*.txt", "yaml")] {
-        let (language, dialect) = rotter::Language::from_name(name).unwrap();
+        let (language, dialect) = rotter::Languages::default().by_name(name).unwrap();
         repo.1.push((pattern.to_owned(), language, dialect));
     }
     let report = repo.extract(Mode::Worktree, false);
