@@ -32,23 +32,42 @@ fn command(host: &Host, exe: &str) -> String {
 
 /// The host's directory: its variable when absolute, else `<home>/<fallback>`.
 fn host_dir(host: &Host, sources: &Sources) -> Result<PathBuf, String> {
-    sources
-        .var(host.dir_var)
+    host.dir_var
+        .and_then(|name| sources.var(name))
         .map(Path::to_owned)
         .or_else(|| sources.home.as_ref().map(|home| home.join(host.fallback)))
-        .ok_or_else(|| {
-            format!(
-                "cannot locate {}'s directory: set HOME or an absolute {}",
-                host.label, host.dir_var
-            )
+        .ok_or_else(|| match host.dir_var {
+            Some(name) => format!(
+                "cannot locate {}'s directory: set HOME or an absolute {name}",
+                host.label
+            ),
+            None => format!("cannot locate {}'s directory: set HOME", host.label),
         })
+}
+
+/// `(nested, grouped)`: whether the event map is the document's `"hooks"` object, and whether
+/// the event's array holds `{"hooks":[…]}` groups rather than handlers.
+fn shape(host: &Host) -> (bool, bool) {
+    match host.install {
+        Install::MergeJson { nested, .. } => (nested, true),
+        Install::OwnedJson { grouped, .. } => (true, grouped),
+    }
+}
+
+/// The value at the host's event in a hook document (null when absent).
+fn event_list<'a>(host: &Host, document: &'a Value) -> &'a Value {
+    if shape(host).0 {
+        &document["hooks"][host.event]
+    } else {
+        &document[host.event]
+    }
 }
 
 /// The file holding the host's hook under `dir`.
 fn hook_file(host: &Host, dir: &Path) -> PathBuf {
     match host.install {
-        Install::MergeJson { file } => dir.join(file),
-        Install::OwnedJson { dir: sub, file } => dir.join(sub).join(file),
+        Install::MergeJson { file, .. } => dir.join(file),
+        Install::OwnedJson { dir: sub, file, .. } => dir.join(sub).join(file),
     }
 }
 
@@ -60,8 +79,13 @@ pub fn hook_timeout(parse_timeout_seconds: u64) -> u64 {
 /// Smallest positive integer `timeout` among the host's event entries with exactly this command.
 fn entry_timeout(host: &Host, settings: &Value, command: &str) -> Option<u64> {
     event_entries(host, settings)
-        .filter(|entry| entry["command"].as_str() == Some(command))
-        .filter_map(|entry| entry["timeout"].as_u64().filter(|timeout| *timeout > 0))
+        .into_iter()
+        .filter(|entry| entry[host.command_key].as_str() == Some(command))
+        .filter_map(|entry| {
+            entry[host.timeout_key]
+                .as_u64()
+                .filter(|timeout| *timeout > 0)
+        })
         .min()
 }
 
@@ -772,24 +796,47 @@ fn write_merged(path: &Path, value: &Value, original: Option<&str>) -> Result<()
     replace_file(path, &text, mode, Some(original.map(str::as_bytes)))
 }
 
+/// The groups of the host's event in a merged file, when it is an array.
+fn event_groups_mut<'a>(host: &Host, settings: &'a mut Value) -> Option<&'a mut Vec<Value>> {
+    // get_mut, not IndexMut: indexing would insert `"hooks": null` into untouched settings.
+    let events = if shape(host).0 {
+        settings.get_mut("hooks")?
+    } else {
+        settings
+    };
+    events.get_mut(host.event)?.as_array_mut()
+}
+
 /// Removes rotter's entries (any [`Ours`]) and returns how many were removed. Only groups this
 /// emptied are removed; other tools' empty groups stay.
 fn remove_ours(host: &Host, settings: &mut Value, exe: &str) -> usize {
-    // get_mut, not IndexMut: indexing would insert `"hooks": null` into untouched settings.
-    let Some(groups) = settings
-        .get_mut("hooks")
-        .and_then(|hooks| hooks.get_mut(host.event))
-        .and_then(Value::as_array_mut)
-    else {
+    prune_ours(host, settings, exe, |_| false)
+}
+
+/// Visits rotter's entries in file order; `keep` may rewrite one in place and keep it (true)
+/// or have it removed (false). Returns how many rotter entries there were. Only groups this
+/// emptied are removed, so other groups keep their positions (Codex keys hook trust on them).
+fn prune_ours(
+    host: &Host,
+    settings: &mut Value,
+    exe: &str,
+    mut keep: impl FnMut(&mut Value) -> bool,
+) -> usize {
+    let Some(groups) = event_groups_mut(host, settings) else {
         return 0;
     };
-    let mut removed = 0;
+    let mut found = 0;
     let mut emptied = Vec::new();
     for (index, group) in groups.iter_mut().enumerate() {
         if let Some(hooks) = group.get_mut("hooks").and_then(Value::as_array_mut) {
             let before = hooks.len();
-            hooks.retain(|entry| entry_ours(host, entry, exe).is_none());
-            removed += before - hooks.len();
+            hooks.retain_mut(|entry| {
+                if entry_ours(host, entry, exe).is_none() {
+                    return true;
+                }
+                found += 1;
+                keep(entry)
+            });
             if hooks.is_empty() && before > 0 {
                 emptied.push(index);
             }
@@ -800,16 +847,19 @@ fn remove_ours(host: &Host, settings: &mut Value, exe: &str) -> usize {
         index += 1;
         !emptied.contains(&(index - 1))
     });
-    removed
+    found
 }
 
 fn entry_ours(host: &Host, entry: &Value, exe: &str) -> Option<Ours> {
-    entry["command"]
+    entry[host.command_key]
         .as_str()
         .and_then(|command| ours(host, command, exe))
 }
 
 fn target(name: &str) -> Result<&'static Host, String> {
+    if let Some((_, why)) = hosts::UNSUPPORTED.iter().find(|(id, _)| *id == name) {
+        return Err(format!("{name} is not supported: {why}"));
+    }
     hosts::by_id(name).ok_or_else(|| {
         format!(
             "unknown integration {name:?}; available: {}",
@@ -823,17 +873,21 @@ fn target(name: &str) -> Result<&'static Host, String> {
 }
 
 /// Every hook entry of the host's event, in any group.
-fn event_entries<'a>(host: &Host, settings: &'a Value) -> impl Iterator<Item = &'a Value> {
-    settings["hooks"][host.event]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .flat_map(|group| group["hooks"].as_array().into_iter().flatten())
+fn event_entries<'a>(host: &Host, settings: &'a Value) -> Vec<&'a Value> {
+    let items = event_list(host, settings).as_array().into_iter().flatten();
+    if shape(host).1 {
+        items
+            .flat_map(|group| group["hooks"].as_array().into_iter().flatten())
+            .collect()
+    } else {
+        items.collect()
+    }
 }
 
 /// The host's entries that belong to some rotter binary, with how.
 fn our_entries<'a>(host: &Host, settings: &'a Value, exe: &str) -> Vec<(Ours, &'a Value)> {
     event_entries(host, settings)
+        .into_iter()
         .filter_map(|entry| Some((entry_ours(host, entry, exe)?, entry)))
         .collect()
 }
@@ -912,7 +966,7 @@ fn outside_work_tree(host: &Host, dir: &Path, sources: &Sources) -> Result<(), S
             dir.display(),
             top.display(),
             host.label,
-            host.dir_var
+            host.dir_var.unwrap_or("HOME")
         )),
     }
 }
@@ -921,7 +975,7 @@ fn outside_work_tree(host: &Host, dir: &Path, sources: &Sources) -> Result<(), S
 /// symlink); None when `<dir>` does not exist. With `create`, a missing `<dir>` is created at
 /// 0700 (never its parents).
 fn owned_file(host: &Host, home: &Path, create: bool) -> Result<Option<PathBuf>, String> {
-    let Install::OwnedJson { dir, file } = host.install else {
+    let Install::OwnedJson { dir, file, .. } = host.install else {
         unreachable!("an owned-file host");
     };
     let hooks = home.join(dir);
@@ -942,9 +996,36 @@ fn owned_file(host: &Host, home: &Path, create: bool) -> Result<Option<PathBuf>,
     Ok(Some(hooks.join(file)))
 }
 
+/// The document rotter writes for an owned-file host: see [`owned_handler`].
+fn owned_document(host: &Host, command: &str, timeout: u64) -> Value {
+    let Install::OwnedJson {
+        version, grouped, ..
+    } = host.install
+    else {
+        unreachable!("an owned-file host");
+    };
+    let mut handler = serde_json::Map::new();
+    handler.insert("type".into(), "command".into());
+    handler.insert(host.command_key.into(), command.into());
+    handler.insert(host.timeout_key.into(), timeout.into());
+    let item = if grouped {
+        json!({ "hooks": [handler] })
+    } else {
+        Value::Object(handler)
+    };
+    let mut document = serde_json::Map::new();
+    if let Some(version) = version {
+        document.insert("version".into(), version.into());
+    }
+    document.insert("hooks".into(), json!({ host.event: [item] }));
+    Value::Object(document)
+}
+
 /// The only handler of a rotter-generated document, which parses to exactly
-/// `{"hooks":{"<event>":[{"hooks":[{"type":"command","command":C,"timeout":N}]}]}}` with C
-/// `'<absolute path>' hook <name> || true` and N a positive integer; None for anything else.
+/// `{["version":V,]"hooks":{"<event>":[H]}}` (H wrapped as `{"hooks":[H]}` for grouped hosts,
+/// V only for hosts that version the file) with H `{"type":"command",<command key>:C,<timeout
+/// key>:N}`, C `'<absolute path>' hook <name> || true` and N a positive integer; None for
+/// anything else.
 fn owned_handler<'a>(host: &Host, document: &'a Value) -> Option<&'a Value> {
     fn only<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
         let object = value.as_object()?;
@@ -954,18 +1035,34 @@ fn owned_handler<'a>(host: &Host, document: &'a Value) -> Option<&'a Value> {
             None
         }
     }
-    let [group] = only(only(document, "hooks")?, host.event)?
-        .as_array()?
-        .as_slice()
+    let Install::OwnedJson {
+        version, grouped, ..
+    } = host.install
     else {
         return None;
     };
-    let [handler] = only(group, "hooks")?.as_array()?.as_slice() else {
+    let top = document.as_object()?;
+    let hooks = match version {
+        Some(version) if top.len() == 2 && top.get("version")?.as_u64() == Some(version) => {
+            top.get("hooks")?
+        }
+        Some(_) => return None,
+        None => only(document, "hooks")?,
+    };
+    let [item] = only(hooks, host.event)?.as_array()?.as_slice() else {
         return None;
+    };
+    let handler = if grouped {
+        let [handler] = only(item, "hooks")?.as_array()?.as_slice() else {
+            return None;
+        };
+        handler
+    } else {
+        item
     };
     let fields = handler.as_object()?;
     let quoted = fields
-        .get("command")?
+        .get(host.command_key)?
         .as_str()?
         .strip_suffix(format!(" hook {} || true", host.hook).as_str())?;
     let path = quoted
@@ -975,7 +1072,7 @@ fn owned_handler<'a>(host: &Host, document: &'a Value) -> Option<&'a Value> {
     (fields.len() == 3
         && fields.get("type")? == "command"
         && fields
-            .get("timeout")?
+            .get(host.timeout_key)?
             .as_u64()
             .is_some_and(|timeout| timeout > 0)
         && path.starts_with('/')
@@ -1035,12 +1132,17 @@ fn install_merged(
     outside_work_tree(host, &dir, sources)?;
     let path = hook_file(host, &dir);
     let (mut settings, original) = read_merged(&path)?;
+    if original.is_none() {
+        unshadowed(host, &dir)?;
+    }
     let command = command(host, exe);
     // Current only when it is the one entry and both command and timeout match; otherwise
     // (the older form, another rotter binary, several entries) it is replaced.
     let current = our_entries(host, &settings, exe)
         .iter()
-        .map(|(how, entry)| *how == Ours::Current && entry["timeout"].as_u64() == Some(timeout))
+        .map(|(how, entry)| {
+            *how == Ours::Current && entry[host.timeout_key].as_u64() == Some(timeout)
+        })
         .collect::<Vec<_>>();
     if current == [true] {
         return Ok(format!(
@@ -1049,17 +1151,39 @@ fn install_merged(
             display.display()
         ));
     }
-    let replaced = remove_ours(host, &mut settings, exe);
-    if !settings["hooks"].is_object() {
-        settings["hooks"] = json!({});
+    let mut entry = serde_json::Map::new();
+    entry.insert("type".into(), "command".into());
+    entry.insert(host.command_key.into(), command.into());
+    entry.insert(host.timeout_key.into(), timeout.into());
+    let entry = Value::Object(entry);
+    // The first rotter entry is rewritten where it is and any others are removed, so no other
+    // hook changes position.
+    let mut placed = false;
+    let replaced = prune_ours(host, &mut settings, exe, |slot| {
+        if placed {
+            return false;
+        }
+        slot.clone_from(&entry);
+        placed = true;
+        true
+    });
+    if !placed {
+        let events = if shape(host).0 {
+            if !settings["hooks"].is_object() {
+                settings["hooks"] = json!({});
+            }
+            &mut settings["hooks"]
+        } else {
+            &mut settings
+        };
+        if !events[host.event].is_array() {
+            events[host.event] = json!([]);
+        }
+        events[host.event]
+            .as_array_mut()
+            .expect("the event is an array")
+            .push(json!({ "hooks": [entry] }));
     }
-    if !settings["hooks"][host.event].is_array() {
-        settings["hooks"][host.event] = json!([]);
-    }
-    settings["hooks"][host.event]
-        .as_array_mut()
-        .expect("the event is an array")
-        .push(json!({ "hooks": [{ "type": "command", "command": command, "timeout": timeout }] }));
     if let Some(original) = &original {
         write_backup(&path, original)?;
     }
@@ -1071,6 +1195,36 @@ fn install_merged(
         host.event,
         display.display()
     ))
+}
+
+/// Refuses to create the host's hook file while a file it shadows declares hooks: the host
+/// reads those only while the hook file is missing, so creating it would disable them.
+fn unshadowed(host: &Host, dir: &Path) -> Result<(), String> {
+    for name in host.shadows {
+        let path = dir.join(name);
+        let (settings, _) = read_settings(&path).map_err(|why| {
+            format!(
+                "cannot tell whether {} declares hooks: {why}",
+                path.display()
+            )
+        })?;
+        let declares = match &settings["hooks"] {
+            Value::Null => false,
+            Value::Object(events) => !events.is_empty(),
+            Value::Array(items) => !items.is_empty(),
+            _ => true,
+        };
+        if declares {
+            return Err(format!(
+                "refusing to create {}: {} declares hooks, which {} reads only while that file is \
+                 missing. Move them into it first (Droid's /hooks does this on its next save)",
+                hook_file(host, dir).display(),
+                path.display(),
+                host.label
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Writes the host's owned file, which rotter owns entirely (no backup).
@@ -1086,8 +1240,8 @@ fn install_owned(
     let installed = owned_installed(host, &path)?;
     let command = command(host, exe);
     if let Some(handler) = &installed
-        && handler["command"] == command
-        && handler["timeout"] == timeout
+        && handler[host.command_key] == command
+        && handler[host.timeout_key] == timeout
     {
         return Ok(format!(
             "{}: already installed ({})",
@@ -1095,9 +1249,7 @@ fn install_owned(
             path.display()
         ));
     }
-    let document = json!({ "hooks": { host.event: [{ "hooks": [
-        { "type": "command", "command": command, "timeout": timeout }
-    ] }] } });
+    let document = owned_document(host, &command, timeout);
     let text = serde_json::to_string_pretty(&document).map_err(|error| error.to_string())? + "\n";
     // Exactly 0600 whatever the umask; nothing is copied from the old file.
     replace_file(&path, &text, Some(0o600), None)?;
@@ -1198,7 +1350,7 @@ fn describe(host: &Host, ours: &[(Ours, &Value)], expected: u64) -> String {
     match ours {
         [] => "not installed".to_owned(),
         [(Ours::Current, only)] => {
-            let timeout = &only["timeout"];
+            let timeout = &only[host.timeout_key];
             if timeout.as_u64() == Some(expected) {
                 return "installed (current)".to_owned();
             }
@@ -1218,7 +1370,7 @@ fn describe(host: &Host, ours: &[(Ours, &Value)], expected: u64) -> String {
         _ => format!(
             "installed for another binary: {}",
             ours.iter()
-                .filter_map(|(_, entry)| entry["command"].as_str())
+                .filter_map(|(_, entry)| entry[host.command_key].as_str())
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
@@ -1258,7 +1410,7 @@ fn owned_status(
     let ours: Vec<(Ours, &Value)> = handler
         .iter()
         .map(|handler| {
-            let how = if handler["command"] == command(host, exe) {
+            let how = if handler[host.command_key] == command(host, exe) {
                 Ours::Current
             } else {
                 Ours::Other
@@ -1293,6 +1445,44 @@ fn compat_status(sources: &Sources, exe: &str) -> Option<String> {
     }
 }
 
+/// What Codex needs besides the entry: its `hooks` feature (on unless `[features]` in
+/// `config.toml` turns off `hooks` or its older name `codex_hooks`) and a `/hooks` review, which
+/// Codex records by the hook's hash and rotter does not check. Read-only; any problem reading
+/// the file is "unknown".
+fn codex_status(dir: &Path) -> String {
+    let path = dir.join("config.toml");
+    let feature = match open_regular(&path) {
+        Ok(None) => "on (default)".to_owned(),
+        Ok(Some(mut file)) => {
+            let mut text = String::new();
+            match file
+                .read_to_string(&mut text)
+                .map_err(|error| error.to_string())
+                .and_then(|_| {
+                    toml::from_str::<toml::Table>(&text).map_err(|error| error.to_string())
+                }) {
+                Ok(config) => {
+                    let features = config.get("features").and_then(toml::Value::as_table);
+                    let off = ["hooks", "codex_hooks"].iter().any(|key| {
+                        features.and_then(|table| table.get(*key)) == Some(&false.into())
+                    });
+                    if off {
+                        format!("off in {}; set [features] hooks = true", path.display())
+                    } else {
+                        "on".to_owned()
+                    }
+                }
+                Err(why) => format!("unknown: {}: {why}", path.display()),
+            }
+        }
+        Err(why) => format!("unknown: {why}"),
+    };
+    format!(
+        "codex: hooks feature {feature}; Codex runs a new or changed hook only after you trust \
+         it in /hooks (not checked)"
+    )
+}
+
 /// Reports each host's hook state; `parse_timeout_seconds` gives the expected timeout.
 pub fn status(parse_timeout_seconds: u64) -> Result<String, String> {
     let sources = Sources::from_env();
@@ -1300,17 +1490,34 @@ pub fn status(parse_timeout_seconds: u64) -> Result<String, String> {
     let expected = hook_timeout(parse_timeout_seconds);
     let mut lines = Vec::new();
     for host in hosts::HOSTS {
-        lines.push(match host.install {
-            // The shared file's errors (e.g. a FIFO) fail status, as before.
-            Install::MergeJson { .. } => merged_status(host, &sources, &exe, expected)?,
+        let line = match host.install {
+            // Claude's shared file's errors (e.g. a FIFO) fail status, as before; the other
+            // hosts' are reported on their line.
+            Install::MergeJson { .. } => match merged_status(host, &sources, &exe, expected) {
+                Err(why) if host.id != CLAUDE.id => format!("{}: {why}", host.id),
+                line => line?,
+            },
             Install::OwnedJson { .. } => format!(
                 "{}: {}",
                 host.id,
                 owned_status(host, &sources, &exe, expected).unwrap_or_else(|why| why)
             ),
+        };
+        lines.push(if host.experimental {
+            format!("{line} [experimental]")
+        } else {
+            line
         });
+        if host.id == hosts::CODEX.id
+            && let Ok(dir) = host_dir(host, &sources)
+        {
+            lines.push(codex_status(&dir));
+        }
     }
     lines.extend(compat_status(&sources, &exe));
+    for (id, why) in hosts::UNSUPPORTED {
+        lines.push(format!("{id}: unsupported: {why}"));
+    }
     // The git a run in this directory would use, or why none is (hooks then stay silent).
     lines.push(format!(
         "git: {}",
@@ -1330,11 +1537,11 @@ pub fn status(parse_timeout_seconds: u64) -> Result<String, String> {
 mod tests {
     use super::{
         Ours, Verdict, allow_request, entry_timeout, evaluate, faithful, hook_timeout, ours,
-        owned_handler, record, remove_ours, replace_file, reset_requests, rewritable, run_budget,
-        session, trusted_home, verdict,
+        owned_document, owned_handler, record, remove_ours, replace_file, reset_requests,
+        rewritable, run_budget, session, trusted_home, verdict,
     };
     use crate::config::{Meta, Sources, lstat, user};
-    use crate::hosts::{CLAUDE, GROK, Host};
+    use crate::hosts::{CLAUDE, COPILOT, DROID, GROK, Host};
     use serde_json::{Value, json};
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
@@ -1581,6 +1788,78 @@ mod tests {
         for document in rejected {
             assert_eq!(owned_handler(&GROK, &document), None, "{document}");
         }
+    }
+
+    #[test]
+    fn copilot_documents_are_flat_and_versioned() {
+        let command = "'/bin/rotter' hook copilot || true";
+        let good = owned_document(&COPILOT, command, 90);
+        assert_eq!(
+            good,
+            json!({ "version": 1, "hooks": { "agentStop": [
+                { "type": "command", "bash": command, "timeoutSec": 90 }
+            ] } })
+        );
+        assert_eq!(
+            owned_handler(&COPILOT, &good),
+            Some(&good["hooks"]["agentStop"][0])
+        );
+        // The run budget reads the installed timeout under Copilot's own key.
+        assert_eq!(installed(&COPILOT, &good, command), 90);
+        assert_eq!(installed(&COPILOT, &json!({}), command), 30);
+        assert_eq!(
+            owned_document(&GROK, GROK_COMMAND, 90),
+            json!({ "hooks": { "Stop": [{ "hooks": [
+                { "type": "command", "command": GROK_COMMAND, "timeout": 90 }
+            ] }] } })
+        );
+        let handler = good["hooks"]["agentStop"][0].clone();
+        let with = |key: &str, value: Value| {
+            let mut handler = handler.clone();
+            handler[key] = value;
+            json!({ "version": 1, "hooks": { "agentStop": [handler] } })
+        };
+        let rejected = [
+            json!({ "hooks": { "agentStop": [handler] } }),
+            json!({ "version": 2, "hooks": { "agentStop": [handler] } }),
+            json!({ "version": "1", "hooks": { "agentStop": [handler] } }),
+            json!({ "version": 1, "hooks": { "agentStop": [{ "hooks": [handler] }] } }),
+            json!({ "version": 1, "hooks": { "agentStop": [handler, handler] } }),
+            json!({ "version": 1, "hooks": { "Stop": [handler] } }),
+            json!({ "version": 1, "hooks": { "agentStop": [handler] }, "x": 1 }),
+            with("cwd", json!("/")),
+            with("env", json!({})),
+            with("timeoutSec", json!(0)),
+            with("bash", json!("'/bin/rotter' hook copilot")),
+            with("bash", json!("'/bin/rotter' hook grok-stop || true")),
+            json!({ "version": 1, "hooks": { "agentStop": [
+                { "type": "command", "command": command, "timeoutSec": 90 }
+            ] } }),
+            json!({ "version": 1, "hooks": { "agentStop": [
+                { "type": "command", "bash": command, "timeout": 90 }
+            ] } }),
+        ];
+        for document in rejected {
+            assert_eq!(owned_handler(&COPILOT, &document), None, "{document}");
+        }
+        // A Grok document is not a Copilot one and back.
+        assert_eq!(owned_handler(&GROK, &good), None);
+    }
+
+    #[test]
+    fn droid_entries_sit_in_top_level_events() {
+        let ours = json!({ "type": "command", "command": "'/b/rotter' hook droid || true" });
+        let mut settings = json!({ "Stop": [
+            { "hooks": [ours] },
+            { "hooks": [{ "type": "command", "command": "/x.sh" }] },
+        ], "hooks": { "Stop": [{ "hooks": [ours] }] } });
+        assert_eq!(remove_ours(&DROID, &mut settings, "/b/rotter"), 1);
+        // A nested "hooks" object is not Droid's hooks.json shape and stays.
+        assert_eq!(
+            settings,
+            json!({ "Stop": [{ "hooks": [{ "type": "command", "command": "/x.sh" }] }],
+                "hooks": { "Stop": [{ "hooks": [ours] }] } })
+        );
     }
 
     /// The real lstat with owner and mode replaced for `at`.
@@ -1832,6 +2111,8 @@ mod tests {
                 .env("ROTTER_STATE_DIR", evil.join("state"))
                 .env("TMPDIR", evil.join("tmp"))
                 .env("CLAUDE_CONFIG_DIR", evil.join("claude"))
+                .env("CODEX_HOME", evil.join("codex"))
+                .env("COPILOT_HOME", evil.join("copilot"))
                 .output()
                 .unwrap();
             assert!(output.status.success(), "{output:?}");

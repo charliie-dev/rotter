@@ -67,7 +67,9 @@ fn run_hook(name: &str, input: &str, state: &Path, cwd: &Path, env: &[(&str, &st
         .env("XDG_CACHE_HOME", state.join("xdg-cache"))
         .env("XDG_STATE_HOME", state.join("xdg-state"))
         .env("CLAUDE_CONFIG_DIR", state.join("claude"))
-        .env("GROK_HOME", state.join("grok"));
+        .env("GROK_HOME", state.join("grok"))
+        .env("CODEX_HOME", state.join("codex"))
+        .env("COPILOT_HOME", state.join("copilot"));
     for (key, value) in env {
         command.env(key, value);
     }
@@ -186,6 +188,8 @@ fn finish_env(config: &Path, mut command: Command, env: &[(&str, Option<&str>)])
         .env("HOME", config.join("home"))
         .env("CLAUDE_CONFIG_DIR", config)
         .env("GROK_HOME", config.join("grok"))
+        .env("CODEX_HOME", config.join("codex"))
+        .env("COPILOT_HOME", config.join("copilot"))
         .env("XDG_CONFIG_HOME", config.join("xdg-config"))
         .env("XDG_CACHE_HOME", config.join("xdg-cache"))
         .env("XDG_STATE_HOME", config.join("xdg-state"));
@@ -1251,6 +1255,8 @@ fn a_block_that_cannot_be_written_is_not_recorded() {
         .env("XDG_STATE_HOME", state.join("xdg-state"))
         .env("CLAUDE_CONFIG_DIR", state.join("claude"))
         .env("GROK_HOME", state.join("grok"))
+        .env("CODEX_HOME", state.join("codex"))
+        .env("COPILOT_HOME", state.join("copilot"))
         .stdin(Stdio::piped())
         .stdout(writer)
         .stderr(Stdio::null())

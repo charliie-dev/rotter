@@ -74,7 +74,10 @@ impl Sources {
             path: std::env::var_os("PATH"),
             vars: crate::hosts::HOSTS
                 .iter()
-                .filter_map(|host| Some((host.dir_var, absolute_var(host.dir_var)?)))
+                .filter_map(|host| {
+                    let name = host.dir_var?;
+                    Some((name, absolute_var(name)?))
+                })
                 .collect(),
             home,
         }
@@ -839,6 +842,8 @@ units = ["function_declaration"]
                 .env("TMPDIR", format!("{evil}/tmp"))
                 .env("CLAUDE_CONFIG_DIR", format!("{evil}/claude"))
                 .env("GROK_HOME", format!("{evil}/grok"))
+                .env("CODEX_HOME", format!("{evil}/codex"))
+                .env("COPILOT_HOME", format!("{evil}/copilot"))
                 .output()
                 .unwrap();
             assert!(output.status.success(), "{output:?}");

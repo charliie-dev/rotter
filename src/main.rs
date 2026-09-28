@@ -8,9 +8,9 @@ use std::process::ExitCode;
 const SKILL: &str = include_str!("../skills/rotter-comment-review/SKILL.md");
 
 const USAGE: &str = "usage: rotter --skill
-       rotter integration (install | uninstall) (claude | grok)
+       rotter integration (install | uninstall) (claude | grok | codex | copilot | droid)
        rotter integration status
-       rotter hook (claude | claude-stop | grok | grok-stop)
+       rotter hook (claude | claude-stop | grok | grok-stop | codex | copilot | droid)
        rotter parser install [<name>...]
        rotter parser list
        rotter extract (--staged | --worktree | --base <rev> | --full)
@@ -23,9 +23,12 @@ hook in $CLAUDE_CONFIG_DIR/settings.json (default ~/.claude), keeping a .rotter-
 uninstall removes. integration install grok writes `'<rotter>' hook grok-stop || true` to
 $GROK_HOME/hooks/rotter.json (default ~/.grok; the home must exist), a file rotter owns. Their
 timeout is max(60, parse_timeout_seconds + 30); re-run install after changing
-parse_timeout_seconds. A host directory inside a git work tree is refused. status shows both
-hosts. `hook claude` and `hook grok` are the same hooks as `hook claude-stop` and
-`hook grok-stop`; every `rotter hook ...` exits 0.
+parse_timeout_seconds. install codex merges `hook codex` into $CODEX_HOME/hooks.json (default
+~/.codex; trust it in Codex's /hooks), install copilot writes $COPILOT_HOME/hooks/rotter.json
+(default ~/.copilot) and install droid merges `hook droid` into ~/.factory/hooks.json; codex
+and droid are experimental. A host directory inside a git work tree is refused. status shows
+every host, including the unsupported ones and why. `hook claude` and `hook grok` are the same
+hooks as `hook claude-stop` and `hook grok-stop`; every `rotter hook ...` exits 0.
 
 parser install fetches each enabled external grammar at its pinned commit (or copies its local
 path), compiles it with cc and caches it under $XDG_CACHE_HOME/rotter/parsers (default

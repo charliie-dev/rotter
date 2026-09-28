@@ -137,8 +137,8 @@ pub fn changed_repo(repo: &Path) {
     fs::write(repo.join("a.go"), go(2)).unwrap();
 }
 
-/// `rotter <args>` in `cwd` with HOME, XDG_*, CLAUDE_CONFIG_DIR, GROK_HOME and ROTTER_STATE_DIR
-/// pinned under `root`, then `env` (None removes a variable); `input` on stdin. A run that does
+/// `rotter <args>` in `cwd` with HOME, XDG_*, CLAUDE_CONFIG_DIR, GROK_HOME, CODEX_HOME,
+/// COPILOT_HOME and ROTTER_STATE_DIR pinned under `root` (Droid has no variable: `~/.factory`), then `env` (None removes a variable); `input` on stdin. A run that does
 /// not finish promptly fails the test instead of hanging it.
 pub fn rotter(
     root: &Path,
@@ -159,6 +159,8 @@ pub fn rotter(
         .env("XDG_STATE_HOME", root.join("xdg-state"))
         .env("CLAUDE_CONFIG_DIR", root.join("claude"))
         .env("GROK_HOME", root.join("grok"))
+        .env("CODEX_HOME", root.join("codex"))
+        .env("COPILOT_HOME", root.join("copilot"))
         .env("ROTTER_STATE_DIR", root.join("state"));
     for (key, value) in env {
         match value {
@@ -195,6 +197,30 @@ pub fn claude_input(session: &str, cwd: &Path) -> String {
 pub fn grok_input(session: &str, cwd: &Path) -> String {
     serde_json::json!({ "hookEventName": "stop", "hook_event_name": "Stop", "sessionId": session,
         "cwd": cwd, "workspaceRoot": cwd, "stopHookActive": false, "reason": "end_turn" })
+    .to_string()
+}
+
+/// Codex's Stop input (codex-rs/hooks/src/events/stop.rs).
+pub fn codex_input(session: &str, cwd: &Path) -> String {
+    serde_json::json!({ "session_id": session, "turn_id": "t1", "transcript_path": null,
+        "cwd": cwd, "hook_event_name": "Stop", "model": "m", "permission_mode": "default",
+        "stop_hook_active": false, "last_assistant_message": "done" })
+    .to_string()
+}
+
+/// GitHub Copilot CLI's agentStop input (hooks reference, camelCase event).
+pub fn copilot_input(session: &str, cwd: &Path) -> String {
+    serde_json::json!({ "sessionId": session, "timestamp": 1_700_000_000_000_u64, "cwd": cwd,
+        "transcriptPath": "/nonexistent/transcript.jsonl", "stopReason": "end_turn",
+        "stop_hook_active": false })
+    .to_string()
+}
+
+/// Factory Droid's Stop input (hooks reference: common fields plus `stop_hook_active`).
+pub fn droid_input(session: &str, cwd: &Path) -> String {
+    serde_json::json!({ "session_id": session, "transcript_path": "/nonexistent/t.jsonl",
+        "cwd": cwd, "permission_mode": "default", "hook_event_name": "Stop",
+        "stop_hook_active": false })
     .to_string()
 }
 

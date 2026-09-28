@@ -1,11 +1,11 @@
-//! The host abstraction for claude and grok: host-id keying, the loop cap, merged-file
-//! hardening, the install work-tree probe and the upgrade from S0-written files.
+//! The host abstraction: host-id keying, the loop cap, merged-file hardening, the install
+//! work-tree probe, the upgrade from S0-written files, and per-host install and hook cases.
 
 mod common;
 
 use common::{
-    changed_repo, claude_input, git, go, grok_input, is_block, native_git, real_git, rotter,
-    set_mode, stdout, temp,
+    changed_repo, claude_input, codex_input, copilot_input, droid_input, git, go, grok_input,
+    is_block, native_git, real_git, rotter, set_mode, stdout, temp,
 };
 use serde_json::{Value, json};
 use std::ffi::OsStr;
@@ -41,9 +41,12 @@ fn listing(dir: &Path) -> Vec<String> {
 
 type Input = fn(&str, &Path) -> String;
 
-const HOSTS: [(&str, &str, Input); 2] = [
+const HOSTS: [(&str, &str, Input); 5] = [
     ("claude", "claude-stop", claude_input),
     ("grok", "grok-stop", grok_input),
+    ("codex", "codex", codex_input),
+    ("copilot", "copilot", copilot_input),
+    ("droid", "droid", droid_input),
 ];
 
 #[test]
@@ -132,6 +135,8 @@ fn concurrent(root: &Path, canonical: &str, input: Input, repos: [&Path; 2]) -> 
                 .env("XDG_CONFIG_HOME", root.join("xdg-config"))
                 .env("CLAUDE_CONFIG_DIR", root.join("claude"))
                 .env("GROK_HOME", root.join("grok"))
+                .env("CODEX_HOME", root.join("codex"))
+                .env("COPILOT_HOME", root.join("copilot"))
                 .env("ROTTER_STATE_DIR", root.join("state"))
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
@@ -186,6 +191,9 @@ fn every_hook_name_exits_zero() {
         &["hook", "claude", "x"],
         &["hook", "grok", "x"],
         &["hook", "Claude"],
+        &["hook", "cursor"],
+        &["hook", "mastracode"],
+        &["hook", "codex", "x"],
     ] {
         let output = rotter(&root, args, &root, "{}", &[]);
         assert_eq!(output.status.code(), Some(0), "{args:?}: {output:?}");
@@ -211,7 +219,7 @@ fn every_hook_name_exits_zero() {
             assert!(output.stdout.is_empty(), "{args:?}");
         }
     }
-    for name in ["claude", "grok"] {
+    for name in ["claude", "grok", "codex", "copilot", "droid"] {
         let output = rotter(&root, &["hook", name], &root, "not json", &[]);
         assert_eq!(
             (output.status.code(), stdout(&output)),
@@ -615,5 +623,434 @@ fn owned_file_status_names_other_binaries() {
     fs::remove_dir_all(shims).unwrap();
     let (code, text) = integration(&root, &["install", "grok"], &[]);
     assert_eq!((code, text.contains("updated")), (0, true), "{text}");
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// A host added in S2: where its hook lives and what rotter writes there.
+struct New {
+    id: &'static str,
+    /// The directory variable, if the host has one.
+    var: Option<&'static str>,
+    /// Under `root/home` when the variable is unset or relative.
+    fallback: &'static str,
+    /// The hook file below the host directory.
+    file: &'static str,
+    /// The file rotter writes into an empty host directory, for command C and timeout 90.
+    document: fn(&str) -> Value,
+}
+
+const NEW: [New; 3] = [
+    New {
+        id: "codex",
+        var: Some("CODEX_HOME"),
+        fallback: ".codex",
+        file: "hooks.json",
+        document: |command| {
+            json!({ "hooks": { "Stop": [{ "hooks": [
+                { "type": "command", "command": command, "timeout": 90 }
+            ] }] } })
+        },
+    },
+    New {
+        id: "copilot",
+        var: Some("COPILOT_HOME"),
+        fallback: ".copilot",
+        file: "hooks/rotter.json",
+        document: |command| {
+            json!({ "version": 1, "hooks": { "agentStop": [
+                { "type": "command", "bash": command, "timeoutSec": 90 }
+            ] } })
+        },
+    },
+    New {
+        id: "droid",
+        var: None,
+        fallback: ".factory",
+        file: "hooks.json",
+        document: |command| {
+            json!({ "Stop": [{ "hooks": [
+                { "type": "command", "command": command, "timeout": 90 }
+            ] }] })
+        },
+    },
+];
+
+fn env<'a>(pairs: &'a [(&'a str, Option<PathBuf>)]) -> Vec<(&'a str, Option<&'a OsStr>)> {
+    pairs
+        .iter()
+        .map(|(key, value)| (*key, value.as_deref().map(Path::as_os_str)))
+        .collect()
+}
+
+#[test]
+fn new_hosts_install_exactly_their_entry_where_their_variable_points() {
+    for host in NEW {
+        let root = temp("new-install");
+        let command = format!("'{EXE}' hook {} || true", host.id);
+        // The variable when absolute, else `~/<fallback>`: unset and relative both fall back.
+        let fallback = root.join("home").join(host.fallback);
+        let cases = match host.var {
+            Some(var) => vec![
+                (Some((var, Some(root.join("by-var")))), root.join("by-var")),
+                (
+                    Some((var, Some(PathBuf::from(format!("rel-{}", host.id))))),
+                    fallback.clone(),
+                ),
+                (Some((var, None)), fallback),
+            ],
+            None => vec![(None, fallback)],
+        };
+        for (setting, dir) in cases {
+            let pairs: Vec<_> = setting.into_iter().collect();
+            let env = env(&pairs);
+            // A missing host directory is never created.
+            let (code, text) = integration(&root, &["install", host.id], &env);
+            assert_eq!((code, text.contains("does not exist")), (2, true), "{text}");
+            assert!(!dir.exists(), "{}", dir.display());
+            fs::create_dir_all(&dir).unwrap();
+            set_mode(&dir, 0o700);
+            let (code, text) = integration(&root, &["install", host.id], &env);
+            let file = dir.join(host.file);
+            assert_eq!(code, 0, "{}: {text}", host.id);
+            assert!(text.contains(&file.display().to_string()), "{text}");
+            assert_eq!(read_json(&file), (host.document)(&command), "{}", host.id);
+            assert!(!listing(&root).contains(&format!("rel-{}", host.id)));
+            let (code, text) = integration(&root, &["install", host.id], &env);
+            assert_eq!(
+                (code, text.contains("already installed")),
+                (0, true),
+                "{text}"
+            );
+            let (_, text) = integration(&root, &["status"], &env);
+            let line = text
+                .lines()
+                .find(|line| line.starts_with(&format!("{}: ", host.id)))
+                .unwrap();
+            assert!(line.contains("installed (current)"), "{line}");
+            assert_eq!(
+                line.ends_with("[experimental]"),
+                host.id != "copilot",
+                "{line}"
+            );
+            // Every installed command exits 0 even when the binary it names exits 2.
+            let stub = root.join("stub");
+            fs::write(&stub, "#!/bin/sh\nexit 2\n").unwrap();
+            set_mode(&stub, 0o755);
+            let status = Command::new("/bin/sh")
+                .arg("-c")
+                .arg(command.replace(EXE, &stub.display().to_string()))
+                .status()
+                .unwrap();
+            assert_eq!(status.code(), Some(0));
+            let (code, text) = integration(&root, &["uninstall", host.id], &env);
+            assert_eq!((code, text.contains("removed")), (0, true), "{text}");
+            if host.id == "copilot" {
+                assert!(!file.exists());
+                assert_eq!(mode(&dir.join("hooks")), 0o700);
+            } else {
+                let empty = if host.id == "codex" {
+                    json!({ "hooks": { "Stop": [] } })
+                } else {
+                    json!({ "Stop": [] })
+                };
+                assert_eq!(read_json(&file), empty);
+            }
+            let (code, text) = integration(&root, &["uninstall", host.id], &env);
+            assert_eq!((code, text.contains("not installed")), (0, true), "{text}");
+            fs::remove_dir_all(&dir).unwrap();
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+fn mode(path: &Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    fs::symlink_metadata(path).unwrap().permissions().mode() & 0o777
+}
+
+/// Every install kind, with the host file rotter would write: (host, dir, file, owned).
+fn kinds(root: &Path) -> [(&'static str, PathBuf, PathBuf, bool); 5] {
+    [
+        (
+            "claude",
+            root.join("claude"),
+            root.join("claude/settings.json"),
+            false,
+        ),
+        (
+            "codex",
+            root.join("codex"),
+            root.join("codex/hooks.json"),
+            false,
+        ),
+        (
+            "droid",
+            root.join("home/.factory"),
+            root.join("home/.factory/hooks.json"),
+            false,
+        ),
+        (
+            "grok",
+            root.join("grok"),
+            root.join("grok/hooks/rotter.json"),
+            true,
+        ),
+        (
+            "copilot",
+            root.join("copilot"),
+            root.join("copilot/hooks/rotter.json"),
+            true,
+        ),
+    ]
+}
+
+#[test]
+fn every_install_kind_refuses_unsafe_or_foreign_targets_and_leaves_them() {
+    let root = temp("unsafe");
+    for (host, dir, file, owned) in kinds(&root) {
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        set_mode(&dir, 0o700);
+        set_mode(file.parent().unwrap(), 0o700);
+        // A symlink at the target: never followed, never replaced.
+        let elsewhere = root.join(format!("{host}-elsewhere.json"));
+        fs::write(&elsewhere, "{}\n").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &file).unwrap();
+        for action in ["install", "uninstall"] {
+            let (code, text) = integration(&root, &[action, host], &[]);
+            assert_eq!(code, 2, "{host} {action}: {text}");
+            assert!(fs::symlink_metadata(&file).unwrap().is_symlink());
+            assert_eq!(fs::read_to_string(&elsewhere).unwrap(), "{}\n");
+        }
+        fs::remove_file(&file).unwrap();
+        // A file others can write: refused and untouched.
+        fs::write(&file, "{}\n").unwrap();
+        set_mode(&file, 0o666);
+        let (code, text) = integration(&root, &["install", host], &[]);
+        assert_eq!(code, 2, "{host}: {text}");
+        assert_eq!(fs::read_to_string(&file).unwrap(), "{}\n");
+        assert_eq!(mode(&file), 0o666);
+        set_mode(&file, 0o600);
+        // Another program's entry, shaped like rotter's except for the binary's name.
+        let foreign = format!("'/x/rotter-proxy' hook {host} || true");
+        let text = if owned {
+            let key = if host == "copilot" { "bash" } else { "command" };
+            let handler = json!({ "type": "command", key: foreign, "timeout": 90 });
+            json!({ "hooks": { "Stop": [{ "hooks": [handler] }] } }).to_string()
+        } else {
+            let entry = json!({ "hooks": [{ "type": "command", "command": foreign }] });
+            let event = if host == "droid" {
+                json!({ "Stop": [entry] })
+            } else {
+                json!({ "hooks": { "Stop": [entry] } })
+            };
+            event.to_string()
+        };
+        fs::write(&file, &text).unwrap();
+        set_mode(&file, 0o600);
+        let (code, output) = integration(&root, &["install", host], &[]);
+        if owned {
+            assert_eq!(code, 2, "{host}: {output}");
+            assert!(output.contains("not managed by rotter"), "{output}");
+            assert_eq!(fs::read_to_string(&file).unwrap(), text);
+            let (code, _) = integration(&root, &["uninstall", host], &[]);
+            assert_eq!(code, 2);
+            assert_eq!(fs::read_to_string(&file).unwrap(), text);
+        } else {
+            assert_eq!(code, 0, "{host}: {output}");
+            assert!(commands_of(host, &file).contains(&foreign), "{host}");
+            let (code, _) = integration(&root, &["uninstall", host], &[]);
+            assert_eq!(code, 0);
+            assert_eq!(commands_of(host, &file), [foreign], "{host}");
+        }
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// The commands of a merged file's Stop groups.
+fn commands_of(host: &str, path: &Path) -> Vec<String> {
+    let document = read_json(path);
+    let groups = if host == "droid" {
+        &document["Stop"]
+    } else {
+        &document["hooks"]["Stop"]
+    };
+    groups
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|group| group["hooks"].as_array().unwrap().clone())
+        .map(|entry| entry["command"].as_str().unwrap_or_default().to_owned())
+        .collect()
+}
+
+#[test]
+fn codex_entries_keep_their_positions_and_status_names_the_trust_step() {
+    let root = temp("codex");
+    let dir = root.join("codex");
+    fs::create_dir(&dir).unwrap();
+    let file = dir.join("hooks.json");
+    // Codex keys a hook's trust on its group and handler index.
+    let seed = json!({ "hooks": { "Stop": [
+        { "hooks": [{ "type": "command", "command": "/a.sh" }] },
+        { "hooks": [{ "type": "command", "command": "'/else/rotter' hook codex || true",
+            "timeout": 5 }] },
+        { "hooks": [{ "type": "command", "command": "'/x/rotter-proxy' hook codex" }] },
+    ] }, "PreToolUse": [] });
+    fs::write(&file, serde_json::to_string_pretty(&seed).unwrap()).unwrap();
+    let (_, text) = integration(&root, &["status"], &[]);
+    assert!(
+        text.contains("codex: installed for another binary"),
+        "{text}"
+    );
+    assert!(
+        text.contains("codex: hooks feature on (default); Codex runs a new or changed hook only after you trust it in /hooks"),
+        "{text}"
+    );
+    let (code, text) = integration(&root, &["install", "codex"], &[]);
+    assert_eq!((code, text.contains("updated")), (0, true), "{text}");
+    let ours = format!("'{EXE}' hook codex || true");
+    assert_eq!(
+        commands_of("codex", &file),
+        ["/a.sh", ours.as_str(), "'/x/rotter-proxy' hook codex"]
+    );
+    assert_eq!(read_json(&file)["PreToolUse"], json!([]));
+    assert!(dir.join("hooks.json.rotter-bak").is_file());
+    let (code, _) = integration(&root, &["uninstall", "codex"], &[]);
+    assert_eq!(code, 0);
+    assert_eq!(
+        commands_of("codex", &file),
+        ["/a.sh", "'/x/rotter-proxy' hook codex"]
+    );
+    assert!(!dir.join("hooks.json.rotter-bak").exists());
+    for (config, feature) in [
+        ("[features]\nhooks = false\n", "hooks feature off in"),
+        ("[features]\ncodex_hooks = false\n", "hooks feature off in"),
+        ("[features]\nhooks = true\n", "hooks feature on;"),
+        ("not toml [", "hooks feature unknown"),
+    ] {
+        fs::write(dir.join("config.toml"), config).unwrap();
+        let (code, text) = integration(&root, &["status"], &[]);
+        assert_eq!(code, 0, "{text}");
+        assert!(
+            text.contains(&format!("codex: {feature}")),
+            "{config}: {text}"
+        );
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn droid_never_hides_hooks_declared_in_its_settings() {
+    let root = temp("droid");
+    let dir = root.join("home/.factory");
+    fs::create_dir_all(&dir).unwrap();
+    for name in ["settings.json", "settings.local.json"] {
+        let declared = json!({ "model": "x", "hooks": { "Stop": [{ "hooks": [
+            { "type": "command", "command": "/their.sh" }
+        ] }] } });
+        fs::write(dir.join(name), declared.to_string()).unwrap();
+        let (code, text) = integration(&root, &["install", "droid"], &[]);
+        assert_eq!(code, 2, "{text}");
+        assert!(text.contains("declares hooks"), "{text}");
+        assert!(!dir.join("hooks.json").exists());
+        fs::write(dir.join(name), "{\"model\": \"x\", \"hooks\": {}}").unwrap();
+    }
+    // Unreadable as JSON: whether it declares hooks is unknown, so nothing is created.
+    fs::write(dir.join("settings.json"), "// comment\n{}").unwrap();
+    let (code, text) = integration(&root, &["install", "droid"], &[]);
+    assert_eq!((code, text.contains("cannot tell")), (2, true), "{text}");
+    fs::write(dir.join("settings.json"), "{}").unwrap();
+    let (code, text) = integration(&root, &["install", "droid"], &[]);
+    assert_eq!(code, 0, "{text}");
+    // Once hooks.json exists Droid no longer reads the settings' hooks.
+    fs::write(
+        dir.join("settings.json"),
+        "{\"hooks\": {\"Stop\": [{\"hooks\": []}]}}",
+    )
+    .unwrap();
+    let (code, text) = integration(&root, &["install", "droid"], &[]);
+    assert_eq!(
+        (code, text.contains("already installed")),
+        (0, true),
+        "{text}"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn new_hosts_answer_in_their_own_protocol() {
+    for (host, input) in [
+        ("codex", codex_input as Input),
+        ("copilot", copilot_input),
+        ("droid", droid_input),
+    ] {
+        let root = temp("protocol");
+        let repo = root.join("repo");
+        changed_repo(&repo);
+        let stop = input("s", &repo);
+        let output = hook(&root, host, &stop);
+        let reply: Value = serde_json::from_str(&stdout(&output)).unwrap();
+        let keys: Vec<&str> = reply
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(keys, ["decision", "reason"], "{host}");
+        assert_eq!(reply["decision"], "block");
+        assert!(reply["reason"].as_str().unwrap().contains("' --skill`"));
+        // The same report again: silent.
+        assert_eq!(stdout(&hook(&root, host, &stop)), "", "{host}");
+        // A continuation the host started, or (Copilot) a stop that ends no turn: silent.
+        fs::write(repo.join("a.go"), go(7)).unwrap();
+        let mut continuation: Value = serde_json::from_str(&stop).unwrap();
+        continuation["stop_hook_active"] = true.into();
+        assert_eq!(stdout(&hook(&root, host, &continuation.to_string())), "");
+        if host == "copilot" {
+            let mut other: Value = serde_json::from_str(&stop).unwrap();
+            other["stopReason"] = "error".into();
+            assert_eq!(stdout(&hook(&root, host, &other.to_string())), "");
+        }
+        // Notes: a systemMessage for Codex, stderr for the others; the decision is unchanged.
+        let config = root.join("xdg-config/rotter");
+        fs::create_dir_all(&config).unwrap();
+        fs::write(config.join("config.toml"), "parse_timeout_seconds = 0\n").unwrap();
+        let output = hook(&root, host, &input("n", &repo));
+        let reply: Value = serde_json::from_str(&stdout(&output)).unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if host == "codex" {
+            assert!(
+                reply["systemMessage"]
+                    .as_str()
+                    .unwrap()
+                    .contains("config error"),
+                "{reply}"
+            );
+        } else {
+            assert!(reply.get("systemMessage").is_none(), "{reply}");
+            assert!(stderr.contains("config error"), "{host}: {stderr}");
+        }
+        assert_eq!(reply["decision"], "block");
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn unsupported_hosts_are_named_and_refused() {
+    let root = temp("unsupported");
+    let (_, status) = integration(&root, &["status"], &[]);
+    for host in ["mastracode", "devin", "cursor", "antigravity-cli"] {
+        let (code, text) = integration(&root, &["install", host], &[]);
+        assert_eq!(code, 2, "{text}");
+        assert!(
+            text.contains(&format!("{host} is not supported: ")),
+            "{text}"
+        );
+        assert!(
+            status.contains(&format!("\n{host}: unsupported: ")),
+            "{status}"
+        );
+    }
+    assert!(listing(&root).is_empty(), "{:?}", listing(&root));
     fs::remove_dir_all(root).unwrap();
 }

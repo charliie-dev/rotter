@@ -983,6 +983,8 @@ fn hook(world: &World, repo: &Path) -> String {
         .command(&["hook", "claude-stop"])
         .env("ROTTER_STATE_DIR", &state)
         .env("CLAUDE_CONFIG_DIR", world.root.join("claude"))
+        .env("CODEX_HOME", world.root.join("codex"))
+        .env("COPILOT_HOME", world.root.join("copilot"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
