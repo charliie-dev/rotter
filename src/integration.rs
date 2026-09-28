@@ -1,4 +1,5 @@
 use crate::config::{self, Config, absolute_var, home};
+use crate::git::git_class;
 use crate::grammar::{create_private, open_regular};
 use crate::json::Json;
 use crate::{Mode, Options, extract, toplevel};
@@ -98,11 +99,36 @@ pub fn claude_stop(input: &str) -> Option<String> {
     {
         return None;
     }
+    let session: String = input["session_id"]
+        .as_str()
+        .or(input["sessionId"].as_str())
+        .unwrap_or("unknown")
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || "._-".contains(character) {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let state = state_dir();
+    // Too old or unrecognised git: no repository is looked at, not even to find its top level.
+    // One note per session; the refusal is only rendered here, per host. Without git on the
+    // absolute PATH entries there is nothing to do, silently, as before.
+    crate::install::git_program().ok()?;
+    if let Err(error) = git_class() {
+        let repeated = state
+            .as_ref()
+            .is_some_and(|dir| !first_time(&dir.join("claude-stop-errors"), &session, &error));
+        return (!repeated)
+            .then(|| json!({ "systemMessage": format!("rotter: {error}") }).to_string());
+    }
     let cwd = input["cwd"]
         .as_str()
         .map(PathBuf::from)
         .or_else(|| std::env::current_dir().ok())?;
-    // Outside a work tree (or without git on the absolute PATH entries) there is nothing to do.
+    // Outside a work tree there is nothing to do.
     let top = toplevel(&cwd).ok()?;
     // Config problems never block: they become one systemMessage per session and builtins are
     // used.
@@ -119,20 +145,6 @@ pub fn claude_stop(input: &str) -> Option<String> {
             Config::default()
         }
     };
-    let session: String = input["session_id"]
-        .as_str()
-        .or(input["sessionId"].as_str())
-        .unwrap_or("unknown")
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || "._-".contains(character) {
-                character
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    let state = state_dir();
     if !notes.is_empty()
         && let Some(dir) = &state
         && !first_time(&dir.join("claude-stop-notes"), &session, &notes.join("\n"))

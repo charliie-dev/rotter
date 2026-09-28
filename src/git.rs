@@ -13,8 +13,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Which pair of snapshots to compare; there is deliberately no default.
@@ -67,12 +67,93 @@ pub struct Report {
     pub complete: bool,
 }
 
-fn git(dir: &Path, args: &[&OsStr], input: Option<&[u8]>, ok: &[i32]) -> Result<Vec<u8>, String> {
-    git_in(dir, args, input, ok, None, None)
+fn git(
+    dir: &Path,
+    args: &[&OsStr],
+    input: Option<&[u8]>,
+    ok: &[i32],
+    guard: &[String],
+) -> Result<Vec<u8>, String> {
+    git_in(dir, args, input, ok, None, None, guard)
+}
+
+/// Oldest git rotter reads a repository with: `safe.bareRepository` exists from 2.38 and the
+/// `.gitattributes` overflow CVE-2022-23521 is fixed in 2.39.1.
+const MIN_GIT: (u32, u32, u32) = (2, 39, 1);
+/// First git whose `GIT_NO_LAZY_FETCH` rotter relies on; older ones get the promisor gate.
+const LAZY_FETCH_GIT: (u32, u32, u32) = (2, 45, 1);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum GitClass {
+    BelowMinimum,
+    /// Partial clones and promisor remotes are refused.
+    Gated,
+    LazyFetch,
+}
+
+/// Classifies `git version` output by its leading numeric `X.Y.Z`; other suffixes are ignored,
+/// except that `.rc`/`-rc` ranks below the release. Anything without the triple is too old.
+pub(crate) fn classify(output: &str) -> GitClass {
+    let Some(mut rest) = output.strip_prefix("git version ") else {
+        return GitClass::BelowMinimum;
+    };
+    let mut triple = [0u32; 3];
+    for (index, part) in triple.iter_mut().enumerate() {
+        if index > 0 {
+            let Some(after) = rest.strip_prefix('.') else {
+                return GitClass::BelowMinimum;
+            };
+            rest = after;
+        }
+        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+        let Ok(value) = rest[..digits].parse() else {
+            return GitClass::BelowMinimum;
+        };
+        *part = value;
+        rest = &rest[digits..];
+    }
+    let release = !(rest.starts_with(".rc") || rest.starts_with("-rc"));
+    let version = (triple[0], triple[1], triple[2], release);
+    let at = |(x, y, z): (u32, u32, u32)| (x, y, z, true);
+    if version < at(MIN_GIT) {
+        GitClass::BelowMinimum
+    } else if version < at(LAZY_FETCH_GIT) {
+        GitClass::Gated
+    } else {
+        GitClass::LazyFetch
+    }
+}
+
+/// The class and `git version` text of the git on PATH, asked once per process outside any
+/// repository; below the minimum (or unrecognised) is an error.
+pub(crate) fn git_class() -> Result<(GitClass, &'static str), String> {
+    static CLASS: OnceLock<Result<(GitClass, String), String>> = OnceLock::new();
+    let (class, version) = CLASS
+        .get_or_init(|| {
+            let output = Command::new(crate::install::git_program()?)
+                .arg("version")
+                .current_dir("/")
+                .stdin(Stdio::null())
+                .stderr(Stdio::null())
+                .output()
+                .map_err(|error| format!("cannot run git: {error}"))?;
+            let text = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+            Ok((classify(&text), text))
+        })
+        .as_ref()
+        .map_err(Clone::clone)?;
+    if *class == GitClass::BelowMinimum {
+        return Err(format!(
+            "git reports {version:?}; rotter needs git 2.39.1 or newer to read repositories \
+             safely; put a newer git earlier on PATH"
+        ));
+    }
+    Ok((*class, version))
 }
 
 /// Runs git, resolved from the absolute PATH entries only; `index` points it at a private copy so
-/// index refreshes never touch the repository, and `ceiling` stops repository discovery.
+/// index refreshes never touch the repository, `ceiling` stops repository discovery and `guard`
+/// holds the repository's filter and hook resets from [`guard_args`].
 fn git_in(
     dir: &Path,
     args: &[&OsStr],
@@ -80,6 +161,7 @@ fn git_in(
     ok: &[i32],
     index: Option<&Path>,
     ceiling: Option<&Path>,
+    guard: &[String],
 ) -> Result<Vec<u8>, String> {
     let mut command = Command::new(crate::install::git_program()?);
     if let Some(index) = index {
@@ -95,9 +177,23 @@ fn git_in(
         .arg("-C")
         .arg(dir)
         .args(["--no-pager", "-c", "core.fsmonitor=false"])
+        // Repository config must not run commands: no implicitly found bare repository, no
+        // $GIT_DIR/hooks, and no index write (what fires index hooks, file or config based).
+        .args([
+            "-c",
+            "safe.bareRepository=explicit",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "diff.autoRefreshIndex=false",
+        ])
+        .args(guard)
         .args(args)
         // Never write the index opportunistically; the checked repository stays untouched.
         .env("GIT_OPTIONAL_LOCKS", "0")
+        // A missing object is an error, never a promisor fetch (honoured from git 2.45.1).
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .env("ROTTER_EMPTY_VALUE", "")
         .stdin(if input.is_some() {
             Stdio::piped()
         } else {
@@ -128,17 +224,110 @@ fn git_in(
     }
 }
 
-fn git_text(dir: &Path, args: &[&str]) -> Result<String, String> {
+fn git_text(dir: &Path, guard: &[String], args: &[&str]) -> Result<String, String> {
     let args: Vec<&OsStr> = args.iter().map(OsStr::new).collect();
-    let output = git(dir, &args, None, &[0])?;
+    let output = git(dir, &args, None, &[0], guard)?;
     String::from_utf8(output)
         .map(|text| text.trim_end().to_owned())
         .map_err(|_| "git printed non-UTF-8 output".to_owned())
 }
 
-/// The repository's top-level directory as git reports it.
+/// The repository's top-level directory as git reports it; git's version is checked first.
 pub fn toplevel(dir: &Path) -> Result<PathBuf, String> {
-    git_text(dir, &["rev-parse", "--show-toplevel"]).map(PathBuf::from)
+    git_class()?;
+    git_text(dir, &[], &["rev-parse", "--show-toplevel"]).map(PathBuf::from)
+}
+
+/// `git config --null --name-only --get-regexp <pattern>` in `top`: the matching keys, empty
+/// when none (exit 1); any other failure is an error.
+fn config_keys(top: &Path, pattern: &str) -> Result<Vec<u8>, String> {
+    let args = ["config", "--null", "--name-only", "--get-regexp", pattern].map(OsStr::new);
+    git_in(top, &args, None, &[0, 1], None, None, &[])
+}
+
+/// Refuses partial clones and promisor remotes, by key presence: git before 2.45.1 may fetch a
+/// missing object through repository-configured commands. Keys are canonical (lower-case
+/// section and variable); the optional middle also catches a nameless `remote.promisor`.
+fn promisor_gate(top: &Path, version: &str) -> Result<(), String> {
+    let keys = config_keys(
+        top,
+        r"^(extensions\.partialclone|remote\.(.*\.)?(promisor|partialclonefilter))$",
+    )
+    .map_err(|error| format!("cannot check for a partial clone: {error}"))?;
+    if keys.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "refusing to read {}: it is a partial clone or has a promisor remote, and {version} \
+         (older than 2.45.1) could fetch missing objects through repository-configured \
+         commands; put git 2.45.1 or newer earlier on PATH",
+        top.display()
+    ))
+}
+
+/// `--config-env` resets from `git config --null --name-only` keys under `filter.` and `hook.`:
+/// every filter driver name gets empty `clean`, `smudge`, `process` and `required`, every hook
+/// name with an `event` key empty events. The name is the text up to the last dot, so `=` and
+/// `.` in it survive (git splits `--config-env` at the last `=`). A middle-less key is skipped,
+/// except `hook.event`, which refuses: git 2.54 builds a hook from it.
+fn guard_args(keys: &[u8]) -> Result<Vec<String>, String> {
+    let keys = std::str::from_utf8(keys).map_err(|_| "non-UTF-8 filter or hook name")?;
+    let mut filters: Vec<&str> = Vec::new();
+    let mut hooks: Vec<&str> = Vec::new();
+    for key in keys.split('\0').filter(|key| !key.is_empty()) {
+        if let Some(rest) = key.strip_prefix("filter.") {
+            if let Some((name, _)) = rest.rsplit_once('.')
+                && !filters.contains(&name)
+            {
+                filters.push(name);
+            }
+        } else if let Some(rest) = key.strip_prefix("hook.") {
+            match rest.rsplit_once('.') {
+                Some((name, "event")) if !hooks.contains(&name) => hooks.push(name),
+                Some(_) => {}
+                None if rest == "event" => {
+                    return Err("the repository config has a hook.event key".to_owned());
+                }
+                None => {}
+            }
+        }
+    }
+    let reset = |key: String| format!("--config-env={key}=ROTTER_EMPTY_VALUE");
+    Ok(filters
+        .iter()
+        .flat_map(|name| {
+            ["clean", "smudge", "process", "required"]
+                .map(|var| reset(format!("filter.{name}.{var}")))
+        })
+        .chain(hooks.iter().map(|name| reset(format!("hook.{name}.event"))))
+        .collect())
+}
+
+/// Whether a working-tree `M` entry differs from its before blob only in stat data (git no
+/// longer checks: diff.autoRefreshIndex=false). The disk file is read through rotter's own
+/// no-follow descriptor and hashed from those bytes without filters; any doubt keeps the entry.
+fn stat_only(top: &Path, entry: &Entry, guard: &[String]) -> bool {
+    let (Some((_, old_mode, old_oid)), Some((path, new_mode, new_oid))) = (&entry.old, &entry.new)
+    else {
+        return false;
+    };
+    if entry.status != "M"
+        || !is_zero(new_oid)
+        || old_mode != new_mode
+        || !matches!(old_mode.as_str(), "100644" | "100755")
+    {
+        return false;
+    }
+    let Ok(Some(mut file)) = open_regular(&top.join(OsStr::from_bytes(path))) else {
+        return false;
+    };
+    let mut bytes = Vec::new();
+    if file.read_to_end(&mut bytes).is_err() {
+        return false;
+    }
+    let args = ["hash-object", "--no-filters", "--stdin"].map(OsStr::new);
+    git(top, &args, Some(&bytes), &[0], guard)
+        .is_ok_and(|out| out.trim_ascii() == old_oid.as_bytes())
 }
 
 /// Private scratch directory under the trusted temp root for the index copy and diff inputs;
@@ -307,7 +496,7 @@ fn diff_in(dir: &Path, ceiling: &Path, before: &str, after: &str) -> Result<Vec<
     .chain([old.as_os_str(), new.as_os_str()])
     .collect();
     // No repository discovery above the scratch directory.
-    git_in(dir, &args, None, &[0, 1], None, Some(ceiling))
+    git_in(dir, &args, None, &[0, 1], None, Some(ceiling), &[])
 }
 
 fn changes(hunks: &[Hunk], after: bool) -> Vec<Change> {
@@ -403,6 +592,7 @@ struct Run<'a> {
     top: &'a Path,
     scratch: Scratch,
     options: &'a Options,
+    guard: &'a [String],
 }
 
 impl Run<'_> {
@@ -454,6 +644,7 @@ impl Run<'_> {
                 &[OsStr::new("cat-file"), OsStr::new("blob"), OsStr::new(oid)],
                 None,
                 &[0],
+                self.guard,
             ),
             Source::Disk => {
                 let full = self.top.join(relative);
@@ -533,6 +724,7 @@ impl Run<'_> {
                 &["hash-object", "--no-filters", "--stdin"].map(OsStr::new),
                 Some(&bytes),
                 &[0],
+                self.guard,
             )
             .map(|out| String::from_utf8_lossy(&out).trim().to_owned()),
         };
@@ -696,6 +888,16 @@ impl Run<'_> {
 /// Extracts changed units and their comments for one explicitly chosen diff mode.
 pub fn extract(dir: &Path, options: &Options) -> Result<Report, String> {
     let top = toplevel(dir)?;
+    // Before any object is read: the promisor gate for older git, then the filter and hook
+    // resets that every later call carries.
+    let (class, version) = git_class()?;
+    if class == GitClass::Gated {
+        promisor_gate(&top, version)?;
+    }
+    let guard = config_keys(&top, r"^(filter|hook)\.")
+        .and_then(|keys| guard_args(&keys))
+        .map_err(|error| format!("refusing to read {}: {error}", top.display()))?;
+    let guard = guard.as_slice();
     let (rev, commit) = match &options.mode {
         Mode::Base(rev) => {
             if rev.is_empty() || rev.starts_with('-') {
@@ -703,6 +905,7 @@ pub fn extract(dir: &Path, options: &Options) -> Result<Report, String> {
             }
             let commit = git_text(
                 &top,
+                guard,
                 &[
                     "rev-parse",
                     "--verify",
@@ -713,10 +916,23 @@ pub fn extract(dir: &Path, options: &Options) -> Result<Report, String> {
             .map_err(|_| format!("cannot resolve base revision {rev:?}"))?;
             (rev.clone(), Some(commit))
         }
-        Mode::Staged | Mode::Worktree | Mode::Full => (
-            "HEAD".to_owned(),
-            git_text(&top, &["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]).ok(),
-        ),
+        Mode::Staged | Mode::Worktree | Mode::Full => {
+            // "No commits yet" means HEAD does not resolve; a HEAD naming a commit that cannot
+            // be read (e.g. missing from a partial clone) is an error, not an empty snapshot.
+            let commit = match git_text(&top, guard, &["rev-parse", "--verify", "--quiet", "HEAD"])
+            {
+                Ok(_) => Some(
+                    git_text(
+                        &top,
+                        guard,
+                        &["rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
+                    )
+                    .map_err(|_| "HEAD does not name a readable commit".to_owned())?,
+                ),
+                Err(_) => None,
+            };
+            ("HEAD".to_owned(), commit)
+        }
     };
     let full = matches!(options.mode, Mode::Full);
     // Pathspecs are relative to `dir`, so commands that take them run there with top-level
@@ -738,16 +954,21 @@ pub fn extract(dir: &Path, options: &Options) -> Result<Report, String> {
         Some(commit) => commit.clone(),
         None => {
             let args = ["hash-object", "-t", "tree", "--stdin"].map(OsStr::new);
-            String::from_utf8_lossy(&git(&top, &args, Some(b""), &[0])?)
+            String::from_utf8_lossy(&git(&top, &args, Some(b""), &[0], guard)?)
                 .trim()
                 .to_owned()
         }
     };
-    // `git diff <tree>` refreshes stat data and rewrites the index even with
-    // GIT_OPTIONAL_LOCKS=0, so every index read goes through a private copy.
+    // `git diff <tree>` would refresh stat data and rewrite the index even with
+    // GIT_OPTIONAL_LOCKS=0 (now off through diff.autoRefreshIndex), so every index read also
+    // goes through a private copy.
     let scratch = Scratch::new()?;
     let index = scratch.dir.join("index");
-    let real_index = top.join(git_text(&top, &["rev-parse", "--git-path", "index"])?);
+    let real_index = top.join(git_text(
+        &top,
+        guard,
+        &["rev-parse", "--git-path", "index"],
+    )?);
     copy_index(&real_index, &index)?;
     let index = Some(index.as_path());
     let mut args = vec!["diff"];
@@ -762,6 +983,8 @@ pub fn extract(dir: &Path, options: &Options) -> Result<Report, String> {
         "--no-ext-diff",
         "--no-textconv",
         "--no-relative",
+        // No `git status` inside submodules, which would run with their own config.
+        "--ignore-submodules=dirty",
         tree.as_str(),
     ]);
     let mut entries = if full {
@@ -772,6 +995,7 @@ pub fn extract(dir: &Path, options: &Options) -> Result<Report, String> {
             &[0],
             index,
             None,
+            guard,
         )?;
         let mut entries: Vec<Entry> = Vec::new();
         for record in listed
@@ -800,19 +1024,24 @@ pub fn extract(dir: &Path, options: &Options) -> Result<Report, String> {
         }
         entries
     } else {
-        parse_raw(&git_in(
+        let mut entries = parse_raw(&git_in(
             dir,
             &args_with(&args, &specs),
             None,
             &[0],
             index,
             None,
-        )?)?
+            guard,
+        )?)?;
+        if matches!(options.mode, Mode::Worktree | Mode::Base(_)) {
+            entries.retain(|entry| !stat_only(&top, entry, guard));
+        }
+        entries
     };
 
     // HEAD→disk diffs report conflicted paths as plain modifications; keep them visible.
     let unmerged_args = with_specs(&["ls-files", "--unmerged", "-z", "--full-name"]);
-    let mut unmerged: Vec<Vec<u8>> = git_in(dir, &unmerged_args, None, &[0], index, None)?
+    let mut unmerged: Vec<Vec<u8>> = git_in(dir, &unmerged_args, None, &[0], index, None, guard)?
         .split(|byte| *byte == 0)
         .filter_map(|record| {
             let tab = record.iter().position(|byte| *byte == b'\t')?;
@@ -845,7 +1074,7 @@ pub fn extract(dir: &Path, options: &Options) -> Result<Report, String> {
         "-z",
         "--full-name",
     ]);
-    let untracked: Vec<Vec<u8>> = git_in(dir, &untracked_args, None, &[0], index, None)?
+    let untracked: Vec<Vec<u8>> = git_in(dir, &untracked_args, None, &[0], index, None, guard)?
         .split(|byte| *byte == 0)
         .filter(|path| !path.is_empty())
         .map(<[u8]>::to_vec)
@@ -863,6 +1092,7 @@ pub fn extract(dir: &Path, options: &Options) -> Result<Report, String> {
         top: &top,
         scratch,
         options,
+        guard,
     };
     let after_on_disk = !matches!(options.mode, Mode::Staged);
     let mut complete = true;
@@ -925,7 +1155,10 @@ pub fn extract(dir: &Path, options: &Options) -> Result<Report, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Change, Hunk, Scratch, changes, diff, parse_raw, temp_root, write_new};
+    use super::{
+        Change, GitClass, Hunk, Scratch, changes, classify, diff, guard_args, parse_raw, temp_root,
+        write_new,
+    };
     use std::fs;
     use std::os::unix::fs::{PermissionsExt, symlink};
     use std::path::PathBuf;
@@ -1010,5 +1243,71 @@ mod tests {
         }];
         assert_eq!(changes(&hunks, false), [Change::Gap(5)]);
         assert_eq!(changes(&hunks, true), [Change::Rows(5..7)]);
+    }
+
+    #[test]
+    fn git_versions_classify_by_their_leading_triple() {
+        let below = [
+            "git version 2.37.9",
+            "git version 2.38.0",
+            "git version 2.38.2",
+            "git version 2.39.0",
+            "git version 2.39.1.rc1",
+            "git version abc",
+            "",
+            "git version 2.45",
+            "git version 2.31.0",
+        ];
+        for output in below {
+            assert_eq!(classify(output), GitClass::BelowMinimum, "{output:?}");
+        }
+        let gated = [
+            "git version 2.39.1",
+            "git version 2.39.5 (Apple Git-154)",
+            "git version 2.40.10",
+            "git version 2.39.10",
+            "git version 2.40.0.rc0",
+            "git version 2.45.0",
+            "git version 2.45.1.rc0",
+            "git version 2.44.0-rc2",
+        ];
+        for output in gated {
+            assert_eq!(classify(output), GitClass::Gated, "{output:?}");
+        }
+        let lazy = [
+            "git version 2.45.1",
+            "git version 2.46.0.windows.1",
+            "git version 2.54.0 (Apple Git-157)",
+            "git version 2.50.0.5.gdeadbee",
+            "git version 3.0.0",
+        ];
+        for output in lazy {
+            assert_eq!(classify(output), GitClass::LazyFetch, "{output:?}");
+        }
+    }
+
+    #[test]
+    fn guard_args_reset_exact_filter_and_hook_names() {
+        let keys = b"filter.x=y.clean\0filter.a.b.process\0filter.X.smudge\0filter.x=y.required\0\
+filter..clean\0filter.clean\0hook.Pre.Commit.event\0hook.Pre.Commit.command\0hook.noevent.command\0\
+hook.command\0";
+        let reset = |key: &str| format!("--config-env={key}=ROTTER_EMPTY_VALUE");
+        let filter = |name: &str| {
+            ["clean", "smudge", "process", "required"]
+                .map(|var| reset(&format!("filter.{name}.{var}")))
+        };
+        let mut expected: Vec<String> = Vec::new();
+        for name in ["x=y", "a.b", "X", ""] {
+            expected.extend(filter(name));
+        }
+        expected.push(reset("hook.Pre.Commit.event"));
+        assert_eq!(guard_args(keys).unwrap(), expected);
+        assert_eq!(guard_args(b"").unwrap(), Vec::<String>::new());
+        let error = guard_args(b"filter.x.clean\0hook.event\0").unwrap_err();
+        assert!(error.contains("hook.event"), "{error}");
+        assert!(
+            guard_args(b"filter.\xff.clean\0").is_err(),
+            "non-UTF-8 fails closed"
+        );
     }
 }
