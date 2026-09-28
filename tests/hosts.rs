@@ -1056,11 +1056,77 @@ fn new_hosts_answer_in_their_own_protocol() {
     }
 }
 
+/// Codex, Copilot and Droid: a continuation the host itself started, and (Copilot only, since
+/// it is the one of the three with a documented end-reason field) a stop that ends no turn, both
+/// run no git at all — reusing the native recording wrapper from `tests/common`.
+#[test]
+fn codex_copilot_and_droid_run_no_git_on_a_continuation_or_a_non_end_turn_stop() {
+    for (host, input) in [
+        ("codex", codex_input as Input),
+        ("copilot", copilot_input),
+        ("droid", droid_input),
+    ] {
+        let root = temp("no-git");
+        let repo = root.join("repo");
+        changed_repo(&repo);
+        let wrapper = root.join("wrapper");
+        let log = root.join("git.log");
+        native_git(
+            &wrapper,
+            &[
+                ("log", &log.display().to_string()),
+                ("real", &real_git().display().to_string()),
+            ],
+        );
+        let path = std::env::join_paths(
+            std::iter::once(wrapper.clone())
+                .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+        )
+        .unwrap();
+        let env = [("PATH", Some(path.as_os_str()))];
+
+        // A continuation the host itself started because of a block: silent, no git.
+        let mut continuation: Value = serde_json::from_str(&input("c", &repo)).unwrap();
+        continuation["stop_hook_active"] = true.into();
+        let output = rotter(
+            &root,
+            &["hook", host],
+            &root,
+            &continuation.to_string(),
+            &env,
+        );
+        assert_eq!(stdout(&output), "", "{host}");
+        assert!(!log.exists(), "{host}: git ran on a continuation");
+
+        if host == "copilot" {
+            let mut other: Value = serde_json::from_str(&input("o", &repo)).unwrap();
+            other["stopReason"] = "error".into();
+            let output = rotter(&root, &["hook", host], &root, &other.to_string(), &env);
+            assert_eq!(stdout(&output), "", "{host}");
+            assert!(!log.exists(), "{host}: git ran on a non-end_turn stop");
+        }
+
+        // Positive control: an ordinary Stop does use the wrapper.
+        let output = rotter(&root, &["hook", host], &root, &input("p", &repo), &env);
+        assert!(is_block(&output), "{host}: {output:?}");
+        assert!(log.exists(), "{host}: positive control, wrapper unused");
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
 #[test]
 fn unsupported_hosts_are_named_and_refused() {
     let root = temp("unsupported");
     let (_, status) = integration(&root, &["status"], &[]);
-    for host in ["mastracode", "devin", "cursor", "antigravity-cli"] {
+    for host in [
+        "omp",
+        "kilo",
+        "hermes",
+        "mastracode",
+        "devin",
+        "cursor",
+        "antigravity-cli",
+    ] {
         let (code, text) = integration(&root, &["install", host], &[]);
         assert_eq!(code, 2, "{text}");
         assert!(
@@ -1072,6 +1138,56 @@ fn unsupported_hosts_are_named_and_refused() {
             "{status}"
         );
     }
+    for host in ["omp", "kilo", "hermes"] {
+        assert!(
+            status.contains(&format!("{host}: unsupported: not supported yet (TODO)")),
+            "{status}"
+        );
+    }
     assert!(listing(&root).is_empty(), "{:?}", listing(&root));
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// Every in-scope host (S4): the 15 named in the plan's Host table, each named exactly once in
+/// `status`, whether shipped, experimental or unsupported. China-based agents (kimi, qwen,
+/// qodercli) are deliberately excluded and must never appear.
+#[test]
+fn status_names_every_in_scope_host_exactly_once() {
+    const IN_SCOPE: [&str; 15] = [
+        "claude",
+        "grok",
+        "pi",
+        "omp",
+        "codex",
+        "copilot",
+        "devin",
+        "droid",
+        "opencode",
+        "kilo",
+        "hermes",
+        "cursor",
+        "mastracode",
+        "antigravity-cli",
+        "letta",
+    ];
+    let root = temp("all-hosts");
+    let (code, status) = integration(&root, &["status"], &[]);
+    assert_eq!(code, 0, "{status}");
+    for host in IN_SCOPE {
+        // Codex also prints a second, `hooks feature` line about its own trust step.
+        let occurrences = status
+            .lines()
+            .filter(|line| {
+                line.starts_with(&format!("{host}: ")) && !line.contains("hooks feature")
+            })
+            .count();
+        assert_eq!(occurrences, 1, "{host}: {status}");
+    }
+    for excluded in ["kimi", "qwen", "qodercli"] {
+        assert!(
+            !status.contains(excluded),
+            "excluded host leaked into status: {excluded}"
+        );
+    }
     fs::remove_dir_all(root).unwrap();
 }

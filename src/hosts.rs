@@ -333,7 +333,13 @@ pub(crate) const HOSTS: [&Host; 8] = [
 ];
 
 /// Hosts whose contract addendum (`docs/hosts.md`) could not be completed, with the reason.
-pub(crate) const UNSUPPORTED: [(&str, &str); 4] = [
+/// omp, kilo and hermes are not researched further (user decision, S4): "not supported yet
+/// (TODO)" stands in for a completed addendum. China-based agents (kimi, qwen, qodercli) are
+/// deliberately out of scope and never appear here or in `HOSTS` (see `docs/hosts.md`).
+pub(crate) const UNSUPPORTED: [(&str, &str); 7] = [
+    ("omp", "not supported yet (TODO)"),
+    ("kilo", "not supported yet (TODO)"),
+    ("hermes", "not supported yet (TODO)"),
     (
         "mastracode",
         "Mastra Code continues a Stop only on exit code 2, which the `|| true` command form rules \
