@@ -26,10 +26,9 @@ fn git(dir: &Path, args: &[&str]) {
     assert!(status.success(), "git {args:?}");
 }
 
-fn hook(input: &str, state: &Path, rotter: &str) -> String {
-    let mut child = Command::new("bash")
-        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/hooks/claude-stop.sh"))
-        .env("ROTTER_BIN", rotter)
+fn hook(input: &str, state: &Path) -> String {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rotter"))
+        .args(["hook", "claude-stop"])
         .env("ROTTER_STATE_DIR", state)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -50,7 +49,6 @@ fn hook(input: &str, state: &Path, rotter: &str) -> String {
 fn stop_hook_blocks_once_per_new_report() {
     let repo = temp("repo");
     let state = temp("state");
-    let rotter = env!("CARGO_BIN_EXE_rotter");
     fs::write(
         repo.join("a.go"),
         "package p\n\n// F returns one.\nfunc F() int { return 1 }\n",
@@ -67,28 +65,18 @@ fn stop_hook_blocks_once_per_new_report() {
     };
     let stop = input(r#""stop_hook_active": false"#);
 
-    assert_eq!(hook(&stop, &state, rotter), "", "no changes");
+    assert_eq!(hook(&stop, &state), "", "no changes");
     fs::write(
         repo.join("a.go"),
         "package p\n\n// F returns one.\nfunc F() int { return 2 }\n",
     )
     .unwrap();
-    let first = hook(&stop, &state, rotter);
-    assert!(first.contains(r#""decision": "block""#), "{first}");
-    assert!(first.contains("rotter-comment-review"), "{first}");
-    assert_eq!(
-        hook(&stop, &state, rotter),
-        "",
-        "same report is not reviewed twice"
-    );
-    assert_eq!(
-        hook(&input(r#""stop_hook_active": true"#), &state, rotter),
-        ""
-    );
-    assert_eq!(
-        hook(&input(r#""stopHookActive": true"#), &state, rotter),
-        ""
-    );
+    let first = hook(&stop, &state);
+    assert!(first.contains(r#""decision":"block""#), "{first}");
+    assert!(first.contains("--skill"), "{first}");
+    assert_eq!(hook(&stop, &state), "", "same report is not reviewed twice");
+    assert_eq!(hook(&input(r#""stop_hook_active": true"#), &state), "");
+    assert_eq!(hook(&input(r#""stopHookActive": true"#), &state), "");
 
     fs::write(
         repo.join("b.lua"),
@@ -96,14 +84,112 @@ fn stop_hook_blocks_once_per_new_report() {
     )
     .unwrap();
     assert!(
-        hook(&stop, &state, rotter).contains(r#""decision": "block""#),
+        hook(&stop, &state).contains(r#""decision":"block""#),
         "untracked file"
     );
 
-    let missing = hook(&stop, &state, "/nonexistent/rotter");
-    assert!(missing.contains("systemMessage"), "{missing}");
-    assert!(!missing.contains("decision"), "{missing}");
+    let outside = temp("outside");
+    let elsewhere = format!(r#"{{"session_id": "s", "cwd": "{}"}}"#, outside.display());
+    assert_eq!(hook(&elsewhere, &state), "", "not a git repository");
+    fs::remove_dir_all(&outside).unwrap();
 
     fs::remove_dir_all(&repo).unwrap();
     fs::remove_dir_all(&state).unwrap();
+}
+
+fn integration(config: &Path, args: &[&str]) -> (i32, String) {
+    let output = Command::new(env!("CARGO_BIN_EXE_rotter"))
+        .arg("integration")
+        .args(args)
+        .env("CLAUDE_CONFIG_DIR", config)
+        .output()
+        .unwrap();
+    let text =
+        String::from_utf8(output.stdout).unwrap() + &String::from_utf8(output.stderr).unwrap();
+    (output.status.code().unwrap(), text)
+}
+
+#[test]
+fn integration_install_keeps_other_settings_and_is_idempotent() {
+    let config = temp("claude");
+    let settings = config.join("settings.json");
+    let original = r#"{"model": "x", "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "other"}]}], "SessionStart": []}}"#;
+    fs::write(&settings, original).unwrap();
+    let read = || -> serde_json::Value {
+        serde_json::from_str(&fs::read_to_string(&settings).unwrap()).unwrap()
+    };
+    let ours = |value: &serde_json::Value| -> Vec<String> {
+        value["hooks"]["Stop"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|group| group["hooks"].as_array().unwrap().iter())
+            .filter_map(|entry| entry["command"].as_str())
+            .filter(|command| command.ends_with("hook claude-stop"))
+            .map(str::to_owned)
+            .collect()
+    };
+
+    assert!(
+        integration(&config, &["status"])
+            .1
+            .contains("not installed")
+    );
+    let (code, text) = integration(&config, &["install", "claude"]);
+    assert_eq!(code, 0, "{text}");
+    let installed = read();
+    assert_eq!(ours(&installed).len(), 1);
+    assert!(ours(&installed)[0].contains(env!("CARGO_BIN_EXE_rotter")));
+    assert_eq!(installed["model"], "x");
+    assert_eq!(
+        installed["hooks"]["Stop"][0]["hooks"][0]["command"],
+        "other"
+    );
+    assert_eq!(
+        fs::read_to_string(config.join("settings.json.rotter-bak")).unwrap(),
+        original
+    );
+    assert!(
+        integration(&config, &["status"])
+            .1
+            .contains("installed (current)")
+    );
+
+    assert!(
+        integration(&config, &["install", "claude"])
+            .1
+            .contains("already installed")
+    );
+    assert_eq!(ours(&read()).len(), 1);
+
+    assert_eq!(integration(&config, &["uninstall", "claude"]).0, 0);
+    let removed = read();
+    assert!(ours(&removed).is_empty());
+    assert_eq!(removed["hooks"]["Stop"][0]["hooks"][0]["command"], "other");
+    assert_eq!(removed["hooks"]["SessionStart"], serde_json::json!([]));
+
+    assert_eq!(integration(&config, &["install", "codex"]).0, 2);
+    fs::write(&settings, "[1]").unwrap();
+    assert_eq!(integration(&config, &["install", "claude"]).0, 2);
+    assert_eq!(
+        fs::read_to_string(&settings).unwrap(),
+        "[1]",
+        "invalid settings are not rewritten"
+    );
+    fs::remove_dir_all(&config).unwrap();
+}
+
+#[test]
+fn integration_install_creates_missing_settings() {
+    let config = temp("fresh");
+    assert_eq!(integration(&config, &["uninstall", "claude"]).0, 0);
+    assert!(
+        !config.join("settings.json").exists(),
+        "uninstall without settings writes nothing"
+    );
+    assert_eq!(integration(&config, &["install", "claude"]).0, 0);
+    let value: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(config.join("settings.json")).unwrap()).unwrap();
+    assert_eq!(value["hooks"]["Stop"][0]["hooks"][0]["timeout"], 60);
+    fs::remove_dir_all(&config).unwrap();
 }

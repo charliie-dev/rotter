@@ -1,5 +1,6 @@
 mod comments;
 mod git;
+pub mod integration;
 pub mod json;
 
 pub use comments::{Change, error_lines, full_units, units};

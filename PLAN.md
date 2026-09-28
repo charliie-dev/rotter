@@ -189,7 +189,7 @@ Claude Code、Codex、pi 的目前版本及實際載入仍未驗證。本輪尚�
 
 ### 驗證
 
-- `mise run check`：fmt、Clippy（`-D warnings`）、45 項測試全數通過（parser 17、擷取 23、hook 1、單元 4）。
+- `mise run check`：fmt、Clippy（`-D warnings`）、47 項測試全數通過（parser 17、擷取 23、hook／整合 3、單元 4）。
 - 擷取測試涵蓋步驟一驗收清單：只改程式／只改註解、長函式遠端變更、刪除／新增／改名、
   staged 與 working tree 差異、無 HEAD、base 解析失敗與選項注入、未追蹤檔排除／納入與 gitignore、
   Unicode／CRLF／含空白與非 ASCII 的檔名、語法錯誤／不支援方言、退出碼，以及執行前後
@@ -237,13 +237,16 @@ Claude Code、Codex、pi 的目前版本及實際載入仍未驗證。本輪尚�
 
 ### 4.4 Claude Code Stop hook
 
-`hooks/claude-stop.sh`：在 session `cwd` 執行 `rotter extract --worktree --include-untracked`，
+`rotter hook claude-stop`（原為 bash＋jq 腳本，2026-09-28 改為內建子指令）：在 session `cwd` 執行 `rotter extract --worktree --include-untracked`，
 有關聯單元時回傳 `decision: "block"` 並指向 skill；`stop_hook_active`／`stopHookActive` 為真時放行，
 同一 session 相同報告（cwd＋報告內容的 sha256）不重複要求；擷取失敗以 `systemMessage` 提示。
-`tests/hook.rs` 以假輸入驗證上述行為與未追蹤檔、rotter 不存在的情形。
+`rotter integration install|uninstall|status claude` 管理 `$CLAUDE_CONFIG_DIR/settings.json` 中的
+這一筆（備份、冪等、保留其他設定）；skill 以 `rotter --skill` 隨 binary 發佈，仿 herdr 的形式。
+`tests/hook.rs` 以假輸入驗證 hook 行為，並以暫存 `CLAUDE_CONFIG_DIR` 驗證安裝與移除。
 
 尚未完成：
 
-- 未在 Claude Code 或 Grok Build 實際註冊與觸發；需要使用者安裝 `rotter` 並修改宿主設定。
+- 未在 Claude Code 或 Grok Build 實際註冊與觸發；需要使用者執行 `cargo install` 與
+  `rotter integration install claude`（沙箱內無法寫入 Claude 設定）。
 - 每回合比較的是 HEAD 對工作目錄的累積差異，長 session 中每次程式變動都會重審全部變更單元。
 - Codex、pi 依使用者決定不做。

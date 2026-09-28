@@ -5,6 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
+serde_json = { version = "1", features = ["preserve_order"] }
 tree-sitter = "=0.27.0"
 tree-sitter-bash = "=0.25.1"
 tree-sitter-go = "=0.25.0"

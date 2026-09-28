@@ -1,4 +1,5 @@
-use rotter::{Language, Mode, Options, extract};
+use rotter::{Language, Mode, Options, extract, integration};
+use std::io::Read;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -6,11 +7,16 @@ use std::process::ExitCode;
 const SKILL: &str = include_str!("../skills/rotter-comment-review/SKILL.md");
 
 const USAGE: &str = "usage: rotter --skill
+       rotter integration (install | uninstall) claude
+       rotter integration status
+       rotter hook claude-stop
        rotter extract (--staged | --worktree | --base <rev> | --full)
                       [--include-untracked] [--lang <glob>=<language>]... [-C <dir>]
                       [-- <pathspec>...]
 
 --skill prints the comment review skill for coding agents (it matches this binary's version).
+integration install claude registers `rotter hook claude-stop` as a Claude Code Stop hook in
+$CLAUDE_CONFIG_DIR/settings.json (default ~/.claude), keeping a .rotter-bak copy.
 
 Prints changed code units and their related comments as JSON. --full reports every commented
 unit of the tracked working-tree files instead of a diff. Pathspecs limit any mode.
@@ -85,9 +91,41 @@ fn main() -> ExitCode {
         eprintln!("rotter: arguments must be UTF-8");
         return ExitCode::from(2);
     };
-    if args == ["--skill"] {
-        print!("{SKILL}");
-        return ExitCode::SUCCESS;
+    let result = match args
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .as_slice()
+    {
+        ["--skill"] => {
+            print!("{SKILL}");
+            return ExitCode::SUCCESS;
+        }
+        ["hook", "claude-stop"] => {
+            // A hook must never fail the host's turn; problems surface as systemMessage.
+            let mut input = String::new();
+            let _ = std::io::stdin().read_to_string(&mut input);
+            if let Some(output) = integration::claude_stop(&input) {
+                println!("{output}");
+            }
+            return ExitCode::SUCCESS;
+        }
+        ["integration", "install", name] => Some(integration::install(name)),
+        ["integration", "uninstall", name] => Some(integration::uninstall(name)),
+        ["integration", "status"] => Some(integration::status()),
+        _ => None,
+    };
+    if let Some(result) = result {
+        return match result {
+            Ok(message) => {
+                println!("{message}");
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("rotter: {error}");
+                ExitCode::from(2)
+            }
+        };
     }
     if args.iter().any(|arg| arg == "-h" || arg == "--help") {
         println!("{USAGE}");

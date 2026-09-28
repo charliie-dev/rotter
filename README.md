@@ -2,7 +2,7 @@
 
 針對 Git diff 檢查程式註解的 Rust 專案。目前是 POC：`rotter extract` 擷取變更單元與相關註解，
 輸出 JSON；語意判斷交給 coding agent 依 [共用 skill](skills/rotter-comment-review/SKILL.md) 執行。
-Claude Code 可透過 [Stop hook](hooks/claude-stop.sh) 自動發起審查。
+skill 以 `rotter --skill` 隨 binary 發佈；`rotter integration install claude` 註冊 Claude Code Stop hook。
 
 ## 開發環境
 
@@ -93,33 +93,27 @@ CLI 只讀：Git 以 `GIT_OPTIONAL_LOCKS=0`、`core.fsmonitor=false` 執行，�
 函式值、同檔案引用上限、
 不完整狀態與退出碼，並確認執行前後 index、狀態與檔案內容不變。
 
-## Claude Code Stop hook
+## Agent 整合
 
-`hooks/claude-stop.sh` 需要 `jq` 與可執行的 `rotter`（預設從 PATH 找，或以 `ROTTER_BIN` 指定）。
-每次 Claude 要結束回合時，它在 session 的 `cwd` 執行
-`rotter extract --worktree --include-untracked`；若有關聯到註解的變更單元，就回傳
-`decision: "block"`，請 agent 依 skill 審查。同一 session 中報告內容未變則不再要求；
-由 hook 造成的續跑（`stop_hook_active`）一律放行，所以每回合最多多一次審查。
-擷取失敗只以 `systemMessage` 提示，不阻擋。狀態存放在
-`${XDG_STATE_HOME:-~/.local/state}/rotter/claude-stop/`（可用 `ROTTER_STATE_DIR` 改）。
-
-安裝（由使用者執行）：
+skill 已編進 binary，不需另外安裝或維護：`rotter --skill` 印出與此版本相符的審查 skill。
 
 ```sh
 cargo install --path . --locked
+rotter integration install claude     # 在 Claude Code settings.json 加入 Stop hook
+rotter integration status
+rotter integration uninstall claude
 ```
 
-在 `~/.claude/settings.json`（或專案的 `.claude/settings.json`）加入：
+`install` 會在 `$CLAUDE_CONFIG_DIR/settings.json`（預設 `~/.claude/settings.json`）的 `hooks.Stop`
+加入 `'<rotter 絕對路徑>' hook claude-stop`；修改前備份成 `settings.json.rotter-bak`，重複執行不會
+重複加入，binary 路徑改變時會更新；其他設定與 hooks 不動。`uninstall` 只移除這一筆。
 
-```json
-{
-  "hooks": {
-    "Stop": [
-      { "hooks": [{ "type": "command", "command": "/path/to/rotter/hooks/claude-stop.sh", "timeout": 60 }] }
-    ]
-  }
-}
-```
+`rotter hook claude-stop` 每次 Claude 要結束回合時，在 session 的 `cwd` 執行
+`rotter extract --worktree --include-untracked`；若有關聯到註解的變更單元，就回傳
+`decision: "block"`，請 agent 依 `rotter --skill` 審查。同一 session 中報告內容未變則不再要求；
+由 hook 造成的續跑（`stop_hook_active`）一律放行，所以每回合最多多一次審查。
+擷取失敗只以 `systemMessage` 提示，不阻擋。狀態存放在
+`${XDG_STATE_HOME:-~/.local/state}/rotter/claude-stop/`（可用 `ROTTER_STATE_DIR` 改）。
 
 Grok Build 會讀取 Claude Code hooks；hook 也接受 Grok 的 `stopHookActive` 欄位，
 但尚未在 Grok 實測。其他限制見 [階段計畫](PLAN.md)。相關範圍與進度見 [階段計畫](PLAN.md)；套件來源見
