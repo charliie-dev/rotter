@@ -18,26 +18,39 @@ Use the mode the user or hook named. If none was named, ask; do not guess.
 | staged | `rotter extract --staged` | HEAD → index |
 | working tree | `rotter extract --worktree` | HEAD → working tree (staged + unstaged) |
 | explicit base | `rotter extract --base <rev>` | `<rev>` → working tree |
+| full codebase | `rotter extract --full` | every tracked working-tree file, no diff |
 
-Untracked files are not read unless `--include-untracked` is given (working tree and base
-modes only). Run from inside the repository or pass `-C <dir>`.
+Untracked files are not read unless `--include-untracked` is given (not with `--staged`).
+Run from inside the repository or pass `-C <dir>`. Any mode takes pathspecs after `--`
+(relative to the current directory), e.g. `rotter extract --full -- .mise/tasks config/`.
+
+Full mode has no diff to narrow the search, so reports get large. Review it in batches: one
+file or directory per batch (use pathspecs, or `jq` over `files[]`), finish and record the
+findings of a batch before starting the next, and say which batches were covered.
 
 Exit status: `0` complete, `1` JSON printed but some in-scope file was not analysed,
 `2` error (nothing to review; report the stderr message).
 
 ## 2. Read the report
 
-- `files[].before` / `files[].after`: the two snapshots of one file. `status` other than
-  `ok` means that side was not analysed; `not_in_scope` files are outside the seven languages.
+- `files[].before` / `files[].after`: the two snapshots of one file (full mode has only
+  `after`). `status: "partial"` means the file has syntax errors (`detail` lists the lines;
+  often a grammar limitation, not a real error): its units are usable, but a unit with
+  `overlaps_syntax_error: true` may be cut or misplaced, so read that range in the file.
+  Other statuses except `ok` mean that side was not analysed; `not_in_scope` files are outside
+  the seven languages.
 - `units[]`: a changed declaration, function, binding, or config key.
   `changed_lines` are lines changed on that side; `gaps_between_lines` marks where lines
   exist only on the other side. For example `[[6, 7]]` on the `after` side means lines were
   removed between after lines 6 and 7; the removed text is in the matching `before` unit.
   `text` is the unit's code. `selected_by: "reference"` marks an unchanged unit in the same
   file that uses the name of a changed unit (`referenced_name`); check its comments too.
+  In full mode `selected_by` is `"full"`, each comment appears once under the unit it belongs
+  to, nothing is marked changed, and `text_truncated: true` means `text` stops after 80 lines
+  while `range` covers the whole unit — read the rest from the file when needed.
 - `units[].comments[]`: related comments. `relation` is `leading` (directly above),
-  `inside`, `trailing` (same line after the unit), or `enclosing_leading` (above an
-  enclosing unit, such as a struct or table). `changed: false` marks comments the diff did
+  `inside`, `trailing` (same line after the unit), `enclosing_leading` (above an
+  enclosing unit, such as a struct or table), or `nearby` (full mode: no closer relation). `changed: false` marks comments the diff did
   not touch; these are the main target.
 - `dialect` ending in `-parsed-as-bash` means a POSIX sh family script was parsed with the
   Bash grammar. Do not assume Bash-only behaviour (arrays, `[[ ]]`, `local` semantics) when
@@ -51,7 +64,8 @@ Exit status: `0` complete, `1` JSON printed but some in-scope file was not analy
 ## 3. Judge each comment
 
 For each unit on the `after` side, compare every comment with the unit's code. Use the
-`before` side to see what the comment was written against.
+`before` side to see what the comment was written against. In full mode there is no before
+side: judge each comment only against the current code.
 
 Report a finding only when the comment states something the code now contradicts: a wrong
 return value, parameter, unit, default, limit, order, side effect, error behaviour, or a

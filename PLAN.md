@@ -189,7 +189,7 @@ Claude Code、Codex、pi 的目前版本及實際載入仍未驗證。本輪尚�
 
 ### 驗證
 
-- `mise run check`：fmt、Clippy（`-D warnings`）、40 項測試全數通過（parser 17、擷取 19、hook 1、單元 3）。
+- `mise run check`：fmt、Clippy（`-D warnings`）、43 項測試全數通過（parser 17、擷取 22、hook 1、單元 3）。
 - 擷取測試涵蓋步驟一驗收清單：只改程式／只改註解、長函式遠端變更、刪除／新增／改名、
   staged 與 working tree 差異、無 HEAD、base 解析失敗與選項注入、未追蹤檔排除／納入與 gitignore、
   Unicode／CRLF／含空白與非 ASCII 的檔名、語法錯誤／不支援方言、退出碼，以及執行前後
@@ -213,12 +213,21 @@ Claude Code、Codex、pi 的目前版本及實際載入仍未驗證。本輪尚�
 - 關聯是語法＋行相鄰的啟發式；與單元隔一空行的區段註解、檔案頂部說明不會列為 `leading`。
 - 同檔案引用只比對識別字文字，不解析作用域；YAML／TOML 不做引用。跨檔案影響不在範圍內。
 - 單元原文未截斷：Nix 整檔 lambda 參數變更或大型 YAML block scalar 會輸出整段。
-- 語法錯誤的那一側不輸出任何單元（不提供部分結果），只標 `syntax_error`。
+- 語法錯誤時輸出 `partial`：仍給能解析的單元並標出與錯誤重疊者；錯誤區域內的關聯可能不準。
+  tree-sitter-bash 無法解析 `"${VAR:?訊息 (含括號)}"`，local-env 的 deploy／install 即因此成為 partial。
 - 未處理的 Git 狀態：衝突中的 unmerged 項目僅標不完整；未測試 sha256 物件格式 repo。
 - split index repo：Git 讀取 split index 時會更新 `.git/sharedindex.*` 的 mtime（內容不變，
   `git status` 也會如此）；除此之外 `.git` 與工作目錄不變。
 - 無副檔名檔案：磁碟側只讀前 4096 bytes 判斷 shebang；before 側（Git blob）仍整份讀取。
 - 未驗證其他平台；只在 `aarch64-apple-darwin`、Git 2.54.0 執行。
+
+### Full-codebase 模式與 pathspec（2026-09-28 使用者要求）
+
+- `--full`：快照為工作目錄中的追蹤檔案（已從磁碟刪除者略過），`--include-untracked` 可加入未追蹤檔。
+  以註解為起點選單元；單元原文超過 80 行截斷。沒有 before 側、沒有 changed 標記。
+- pathspec 適用四種模式，相對於執行目錄；不給時等同 `:/`（整個 repo）。
+- local-env 實測：240 個檔案、1072 個單元、1212 則註解、約 1.5MB、1.3 秒；執行前後 index 與狀態不變。
+  full 模式的語意審查尚未實際跑過，skill 只寫了分批方式。
 
 ### 4.4 Claude Code Stop hook
 

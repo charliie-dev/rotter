@@ -33,10 +33,17 @@ cargo run --locked -- extract --worktree            # HEAD → 工作目錄（�
 cargo run --locked -- extract --staged              # HEAD → index
 cargo run --locked -- extract --base <rev>          # 指定版本 → 工作目錄
 cargo run --locked -- extract --worktree --include-untracked -C <repo>
+cargo run --locked -- extract --full -- src/ config/  # 全部追蹤檔案（工作目錄），不看 diff
 ```
 
-必須明確選一種模式，不會自動猜基準。退出碼：`0` 完整、`1` 已輸出 JSON 但有檔案未能分析
+`--` 後的 pathspec 適用所有模式，相對於目前目錄；不給就是整個 repo。
+
+必須明確選一種模式，不會自動猜基準。退出碼：`0` 完整、`1` 已輸出 JSON 但有檔案未能完整分析
 （語法錯誤、非 UTF-8、含 NUL、zsh／ksh 腳本、衝突中的路徑等）、`2` 參數或 Git 錯誤。
+有語法錯誤時狀態為 `partial`：仍輸出能解析的單元，與錯誤重疊者標 `overlaps_syntax_error`。
+
+`--full` 以「每則註解」為起點，列出它所屬或說明的單元，每則註解只出現一次；沒有 before 側，
+超過 80 行的單元原文會截斷（`text_truncated`）。輸出超過 5 MiB 時會在 stderr 提醒用 pathspec 縮小範圍。
 `#!/bin/sh`、dash、ash 腳本以 Bash grammar 解析，dialect 標為 `*-parsed-as-bash`。
 JSON schema 標為 `rotter.extract.poc/0`，仍可能變動。
 
