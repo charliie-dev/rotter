@@ -2,9 +2,15 @@ use rotter::{Language, Mode, Options, extract};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: rotter extract (--staged | --worktree | --base <rev> | --full)
+/// The review skill ships inside the binary so it always matches this version of the CLI.
+const SKILL: &str = include_str!("../skills/rotter-comment-review/SKILL.md");
+
+const USAGE: &str = "usage: rotter --skill
+       rotter extract (--staged | --worktree | --base <rev> | --full)
                       [--include-untracked] [--lang <glob>=<language>]... [-C <dir>]
                       [-- <pathspec>...]
+
+--skill prints the comment review skill for coding agents (it matches this binary's version).
 
 Prints changed code units and their related comments as JSON. --full reports every commented
 unit of the tracked working-tree files instead of a diff. Pathspecs limit any mode.
@@ -79,6 +85,10 @@ fn main() -> ExitCode {
         eprintln!("rotter: arguments must be UTF-8");
         return ExitCode::from(2);
     };
+    if args == ["--skill"] {
+        print!("{SKILL}");
+        return ExitCode::SUCCESS;
+    }
     if args.iter().any(|arg| arg == "-h" || arg == "--help") {
         println!("{USAGE}");
         return ExitCode::SUCCESS;

@@ -714,6 +714,12 @@ fn cli_requires_an_explicit_mode_and_reports_incomplete_status() {
             .output()
             .unwrap()
     };
+    let skill = run(&["--skill"]);
+    assert_eq!(skill.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8(skill.stdout).unwrap(),
+        include_str!("../skills/rotter-comment-review/SKILL.md")
+    );
     assert_eq!(run(&["extract"]).status.code(), Some(2));
     assert_eq!(
         run(&["extract", "--staged", "--worktree"]).status.code(),

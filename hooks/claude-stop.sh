@@ -21,7 +21,6 @@ session=$(jq -r '.session_id // .sessionId // "unknown"' <<<"$input" | tr -c 'A-
 git -C "$cwd" rev-parse --is-inside-work-tree >/dev/null 2>&1 || exit 0
 
 rotter=${ROTTER_BIN:-rotter}
-skill="$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/skills/rotter-comment-review/SKILL.md"
 command=("$rotter" extract --worktree --include-untracked -C "$cwd")
 errors=$(mktemp "${TMPDIR:-/tmp}/rotter-hook.XXXXXX")
 trap 'rm -f "$errors"' EXIT
@@ -50,5 +49,5 @@ printf '%s\n' "$fingerprint" >"$state_dir/$session"
 jq -n --arg reason "rotter found $units changed code unit(s) with related comments in $cwd \
 (report complete: $complete). Before finishing, review them with the rotter-comment-review skill \
 in working tree mode including untracked files: run \`${command[*]}\`. If that skill is not \
-loaded, read $skill and follow it. Report only concrete contradictions between comments and code; \
+loaded, run \`$rotter --skill\` and follow its output. Report only concrete contradictions between comments and code; \
 do not edit files unless the user asked for it." '{decision: "block", reason: $reason}'
