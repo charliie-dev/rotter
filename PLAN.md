@@ -1,6 +1,6 @@
 # 註解檢查 CLI：階段計畫
 
-更新日期：2026-09-28。
+更新日期：2026-09-29。
 
 本文件記錄目前決定、後續階段與第一版範圍。使用者於 2026-09-18 要求安裝工具、
 初始化 Git／Cargo、執行 parser 測試及處理 hooks。本輪已開始工具與 parser 基礎驗證；
@@ -272,6 +272,36 @@ git 最低 2.39.1，見 README 信任說明。S0b：
 
 尚未完成：未在真實 Grok session 實測（Stop 輸入／輸出、handler 是否依序執行、逾時時是否只殺 sh）。
 非目標：專案層級 `.grok/hooks`、Grok TOML 設定中的 hooks、自動關閉 Grok 的 Claude 相容性。
+
+### 4.6 多宿主整合（計畫 revision 11，2026-09-29）
+
+`plan-multi-agent.md`（S0 為既有的 Grok 計畫）分五個切片實作並已全數完成：
+
+- S0：Grok 宿主、`|| true`、exe／目標信任、Design 10 git 強化（見 4.5）。
+- S1：`src/hosts.rs` 宿主抽象；claude、grok 移到共用核心；每宿主每 session 迴圈上限（fail
+  closed）；合併檔案強化（重讀比對、`chmod` 提示、其他 rotter binary 的項目辨識）；
+  `rotter hook <任何名稱>` 一律退出碼 0；git 選擇（排除樹、`(st_dev, st_ino)` identity、原生
+  magic 檢查）、hook 模式 git 環境 allowlist、`Sources` 測試接縫與 env-injectable 處理
+  （`getpwuid_r`、忽略 XDG_*/ROTTER_*/TMPDIR）。
+- S2：codex、copilot、droid 出貨；mastracode、devin、cursor、antigravity-cli 依契約補遺標為
+  不支援。
+- S3：pi、letta、opencode 三個 shim 宿主（OwnedShim、runtime harness、shim env allowlist、
+  argv timeout）。
+- S4（本次）：`docs/hosts.md` 加上摘要表與 omp／kilo／hermes 的不支援理由；README 補上 15 個
+  宿主的狀態、目錄變數／fallback、安裝指令表；`integration status` 覆蓋全部 15 個範圍內宿主；
+  新增／擴充測試涵蓋全部 15 個宿主恰好各出現一次；補齊三個小測試缺口（見下）。
+
+尚未完成／未來事項：
+
+- 沒有任何宿主在真實 session 中實測過（Claude、Grok、Codex、Copilot、Droid、Pi、Letta、
+  OpenCode 皆同）；尤其 Grok 的 handler 執行順序與逾時時的子程序行為（見 4.5）仍待確認。
+- omp、kilo、hermes：使用者決定的 TODO，尚未研究契約，往後要出貨需重新走契約補遺流程。
+- cursor：需要先修改計畫，改用例如 `{ '<exe>' hook cursor || true; }`（用 `{}` 把
+  here-document 接到整個複合指令之後）的指令形式，並補上 env-injectable 處理（project
+  `sessionStart` hook 的 `env` 輸出可影響後續 hook 環境），才能重新評估是否可出貨；本輪只記錄，
+  不實作。
+- devin、antigravity-cli 是否可出貨，取決於它們日後是否公開指令執行方式（shell 與否、退出碼
+  語意）；mastracode 除非改變 Stop 的續跑判斷（目前只認退出碼 2），否則與 `|| true` 的形式互斥。
 
 ### 外部 parser、設定檔與解析時限（2026-09-28 使用者要求，計畫 revision 16）
 

@@ -242,6 +242,30 @@ rotter integration uninstall claude
 rotter integration uninstall grok
 ```
 
+範圍內共 15 個宿主（狀態、目錄環境變數 → fallback、安裝指令）；實驗性的一欄標明 `status` 行尾
+會加註 `[experimental]`（rotter 作者未在真實宿主上執行過，見上方指令清單）：
+
+| 宿主 | 狀態 | 目錄：環境變數 → fallback | 安裝指令 |
+| --- | --- | --- | --- |
+| claude | 已出貨 | `CLAUDE_CONFIG_DIR` → `~/.claude` | `rotter integration install claude` |
+| grok | 已出貨 | `GROK_HOME` → `~/.grok` | `rotter integration install grok` |
+| copilot | 已出貨 | `COPILOT_HOME` → `~/.copilot` | `rotter integration install copilot` |
+| codex | 實驗性 | `CODEX_HOME` → `~/.codex` | `rotter integration install codex` |
+| droid | 實驗性 | 無變數 → `~/.factory` | `rotter integration install droid` |
+| pi | 實驗性 | `PI_CODING_AGENT_DIR` → `~/.pi/agent` | `rotter integration install pi` |
+| letta | 實驗性 | 無變數 → `~/.letta` | `rotter integration install letta` |
+| opencode | 實驗性 | `OPENCODE_CONFIG_DIR` → `$XDG_CONFIG_HOME/opencode` → `~/.config/opencode` | `rotter integration install opencode` |
+| mastracode | 不支援（見下） | `~/.mastracode`（無變數） | 拒絕，退出碼 2 |
+| devin | 不支援（見下） | `XDG_CONFIG_HOME` → `~/.config/devin` | 拒絕，退出碼 2 |
+| cursor | 不支援（見下） | `CURSOR_CONFIG_DIR`（不含 hooks）→ `~/.cursor` | 拒絕，退出碼 2 |
+| antigravity-cli | 不支援（見下） | `~/.gemini/config`（無變數） | 拒絕，退出碼 2 |
+| omp | 不支援：尚未支援（TODO） | — | 拒絕，退出碼 2 |
+| kilo | 不支援：尚未支援（TODO） | — | 拒絕，退出碼 2 |
+| hermes | 不支援：尚未支援（TODO） | — | 拒絕，退出碼 2 |
+
+中國廠商的 agent（kimi、qwen、qodercli）刻意不在範圍內，不會出現在上表、`status` 或
+`install`／`uninstall` 的宿主清單中。
+
 兩個宿主的 hook 指令都是 `'<rotter 絕對路徑>' hook claude-stop || true`／`… hook grok-stop || true`：
 binary 被移除或換成不認得該子指令的舊版時，也不會以退出碼 2 迫使宿主續跑。每個
 `rotter hook <任何名稱>` 都以退出碼 0 結束（未知名稱只在 stderr 提示）。`timeout` 為

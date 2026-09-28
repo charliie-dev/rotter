@@ -5,9 +5,33 @@
 本頁該宿主的每一格都要有出處；查不到時，提示管道預設為 stderr、續跑判斷預設為「只靠
 rotter 的上限」，其他格查不到就標為不支援。已支援：claude、grok、copilot，以及實驗性的 codex、
 droid、pi、letta、opencode（rotter 作者未在真實宿主上執行過，`status` 行尾標 `[experimental]`）；
-mastracode、devin、cursor、antigravity-cli 查核後標為不支援（見 S2 補遺末尾，`status` 列出原因，
-`install` 退出碼 2）。
+mastracode、devin、cursor、antigravity-cli 查核後標為不支援；omp、kilo、hermes 依使用者決定
+（S4，不再研究）直接標為「尚未支援（TODO）」（`status` 列出原因，`install` 退出碼 2，見 S2
+補遺末尾的「不支援」一節）。中國廠商的 agent（kimi、qwen、qodercli）刻意不在範圍內，不出現在
+`src/hosts.rs` 的任何表格中。
 所有出處皆於 2026-09-29 查閱。
+
+## 摘要表（S4：範圍內 15 個宿主）
+
+| 宿主 | 狀態 | 目錄 | 事件 | timeout |
+|---|---|---|---|---|
+| claude | 已出貨 | `CLAUDE_CONFIG_DIR` → `~/.claude` | Stop | 60（保守估計；文件 600） |
+| grok | 已出貨 | `GROK_HOME` → `~/.grok` | Stop | 600 |
+| copilot | 已出貨 | `COPILOT_HOME` → `~/.copilot` | agentStop | 30 |
+| codex | 實驗性 | `CODEX_HOME` → `~/.codex` | Stop | 600 |
+| droid | 實驗性 | 無變數 → `~/.factory` | Stop | 60 |
+| pi | 實驗性（shim） | `PI_CODING_AGENT_DIR` → `~/.pi/agent` | `agent_before_settle` | shim 上限 120 |
+| letta | 實驗性（shim） | 無變數 → `~/.letta` | `turn_end` | shim 上限 120 |
+| opencode | 實驗性（shim） | `OPENCODE_CONFIG_DIR` → `$XDG_CONFIG_HOME/opencode` → `~/.config/opencode` | `session.idle` | shim 不設上限 |
+| mastracode | 不支援 | `~/.mastracode`（無變數） | — | — |
+| devin | 不支援 | `XDG_CONFIG_HOME` → `~/.config/devin` | — | — |
+| cursor | 不支援 | `CURSOR_CONFIG_DIR`（不含 hooks）→ `~/.cursor` | — | — |
+| antigravity-cli | 不支援 | `~/.gemini/config`（無變數） | — | — |
+| omp | 不支援：尚未支援（TODO） | — | — | — |
+| kilo | 不支援：尚未支援（TODO） | — | — | — |
+| hermes | 不支援：尚未支援（TODO） | — | — | — |
+
+不支援的原因見下方「不支援」一節；kimi、qwen、qodercli 不在此表中（刻意排除，見上）。
 
 ## 宿主表
 
@@ -243,6 +267,9 @@ hooks，之後的外部修改只會警告，須在 `/hooks` 檢視。擁有權�
 
 ### 不支援
 
+- omp、kilo、hermes：依使用者決定（S4）標為不支援，不再花時間研究這三個宿主的 hook 契約；
+  `status` 與 `install` 的原因固定為「not supported yet (TODO)」，往後要出貨時需要走完整的
+  契約補遺流程（本文件開頭的規則）。
 - mastracode：`~/.mastracode/hooks.json`（目錄只由 `os.homedir()` 決定，沒有變數），以 `/bin/sh -c`
   執行，`timeout` 單位毫秒、預設 10000，輸入有 `session_id`、`cwd`、`stop_reason`，沒有續跑旗標。
   但 Stop 只有在退出碼為 2 時才阻擋，退出碼 0 時 stdout 的 `decision` 被忽略；rotter 的
