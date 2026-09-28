@@ -4,8 +4,9 @@
 安裝後的確切格式與擁有權判斷，以及 hook 程序的環境可否被 project 設定注入。新增宿主前，
 本頁該宿主的每一格都要有出處；查不到時，提示管道預設為 stderr、續跑判斷預設為「只靠
 rotter 的上限」，其他格查不到就標為不支援。已支援：claude、grok、copilot，以及實驗性的 codex、
-droid（rotter 作者未在真實宿主上執行過，`status` 行尾標 `[experimental]`）；mastracode、devin、
-cursor、antigravity-cli 查核後標為不支援（見文末，`status` 列出原因，`install` 退出碼 2）。
+droid、pi、letta、opencode（rotter 作者未在真實宿主上執行過，`status` 行尾標 `[experimental]`）；
+mastracode、devin、cursor、antigravity-cli 查核後標為不支援（見 S2 補遺末尾，`status` 列出原因，
+`install` 退出碼 2）。
 所有出處皆於 2026-09-29 查閱。
 
 ## 宿主表
@@ -142,7 +143,7 @@ ownership、逾時（10 秒）或非 UTF-8 輸出都拒絕安裝。
 訊息）。Grok 的 Claude 相容性下，原生 grok 與相容的 claude handler 各有自己的計數器，而原生
 handler 會略過 `stopHookActive` 的 Stop，所以一串續跑最多約 3 次要求（接受）。
 
-## env-injectable 宿主（S1 只有機制）
+## env-injectable 宿主
 
 `Sources` 是 hook 路徑上 home、config、state、cache、temp 目錄與 PATH 的唯一來源。
 env-injectable 的宿主改用 `Sources::injectable`：HOME 取自密碼資料庫（`getpwuid_r`，`pw_dir` 須為
@@ -269,3 +270,143 @@ hooks，之後的外部修改只會警告，須在 `/hooks` 檢視。擁有權�
   `timeout` 單位秒、預設 30，輸入有 `conversationId`、`workspacePaths`、`terminationReason`、
   `fullyIdle`，輸出 `{"decision":"continue","reason"}`；但指令的執行方式（shell 與否）、退出碼的
   意義與目錄變數都沒有記載（封閉原始碼）。來源：<https://antigravity.google/docs/hooks/>。
+
+## S3 宿主契約補遺（shim 宿主）
+
+pi、letta 與 opencode 沒有指令型 hook，只在自己的程序內載入程式碼，所以 rotter 安裝的是 shim
+（OwnedShim）：由內嵌範本（`src/shims/pi-v1.ts`、`src/shims/letta-v1.js`、`src/shims/opencode-v1.js`）
+產生、完全屬於 rotter 的檔案。三者的共同規則：
+
+- 範本只有兩個變數，各出現一次：`const EXE = <JSON 字串字面值>;` 與 `const TIMEOUT = <正整數>;`。
+  binary 路徑須為絕對路徑的 UTF-8，不可含控制字元、U+2028、U+2029、`$`、`` ` ``（另有 install 的
+  binary 信任檢查），只放在那個字面值裡，不出現在註解或 template literal。timeout 為
+  `max(60, parse_timeout_seconds + 30)`；pi 與 letta 會等待 handler，上限 120 秒，opencode 不等待
+  （見下），不設上限。
+- 擁有權：從檔案解出兩個字面值，重新驗證並重新產生，必須與 rotter 出過的某個範本版本（全部內嵌，
+  目前只有 v1）逐位元組相同；golden 測試（`tests/fixtures/shim/*-v1.golden.*`）防止已出貨的範本
+  被原地修改。其他內容一律是外來程式碼：install／uninstall 退出碼 2 並保留原檔，`status` 顯示
+  `foreign code at rotter's path, auto-loaded by <宿主>`。檔案須是一般檔案、屬於使用者、群組／他人
+  不可寫；寫入經 `<file>.rotter-tmp`（0600、O_NOFOLLOW），再 rename 成 0600 的 shim。
+- 執行：`child_process.spawn(EXE, ["hook", HOST, "--timeout", String(TIMEOUT)], {shell:false,
+  detached:true, env:{PATH, LANG}, stdio:["pipe","pipe","ignore"]})`；子程序與 stdin／stdout 都有
+  `error` listener，每個 callback 與 kill 各自包在 try/catch，結果只 settle 一次；timeout 到時（或
+  stdout 超過 64 KiB）以 SIGKILL 殺掉整個 process group（只在尚未看到 `exit` 時），timer 在 settle 時
+  清除並 `unref`。只有 stdout 能解析成 JSON 且 `continue` 為字串時才採用。不使用 `exec`、`execSync`、
+  `spawnSync`、`Bun.$`，也不把 `process.env` 傳給 rotter。
+- stdin 只有 `{"session_id":…,"cwd":…}`；rotter 的回覆為 `{"continue":<reason>}`，提示寫到 stderr
+  （shim 忽略）。shim 另有記憶體中的每 session 計數（同樣最多連續 2 次，被上限靜默的那次歸零）與
+  「同時只跑一次」旗標；rotter 端的計數、去重與 fail closed 規則與其他宿主相同。
+- `--timeout <n>`（正整數，其他值忽略）只會縮短 rotter 的軟性期限：`min(依設定計算, n) − 15 秒`，
+  不會延長。
+- env-injectable：shim 只傳 PATH 與 LANG，而且 pi 的 release binary 會讀取工作目錄的 `.env`，所以
+  三個宿主都用 `Sources::injectable`（HOME 取自密碼資料庫，XDG_*、ROTTER_*、TMPDIR 忽略）；PATH 仍
+  經 git 的選擇規則。沒有任何測試以真實的 stop 執行 `rotter hook pi|letta|opencode`（那會用到真實的 home），
+  核心以注入的 `Sources` 在程序內測試。
+- 暫存檔 `rotter-review.ts.rotter-tmp`／`rotter-review.js.rotter-tmp` 不符合三個宿主的載入規則（見
+  下表）。
+
+shim 測試（`tests/shims.rs`）以 `mise.toml` 固定的引擎執行產生的 shim：pi 在 Node 24.21.0 與
+Bun 1.3.14 下各跑一次，letta 用 Node 24.21.0，opencode 用 Bun 1.3.14（都取 mise 安裝目錄下的絕對
+路徑，沒有時測試失敗、不略過；log 印出引擎版本，測試也比對它）。搭配 stub 宿主 API
+（`tests/fixtures/shim/harness.mjs`，含 `uncaughtException`／`unhandledRejection` 偵測，handler 結束
+後再等約 1 秒，然後直接結束、不等 shim 留下的程序）與 stub rotter（`stub.cjs`，以 Node 執行，放在
+含空白、引號與非 ASCII 的目錄）。驗證：直接執行（argv 恰為
+`hook <host> --timeout 1`）、環境只有 PATH 與 LANG（harness 設了 `LD_PRELOAD`、
+`DYLD_INSERT_LIBRARIES`、`DEVELOPER_DIR`、HOME、`GIT_DIR`、`ROTTER_STATE_DIR`）、stdin 內容、三次
+連續要求時第三次被壓下並歸零、同時兩次只跑一次、只有字串的 `continue` 被採用，以及 exe 不存在
+（ENOENT）、不讀 stdin 就結束（EPIPE）、卡住（1 秒後殺掉整個 process group：孫程序原本會睡 300 秒，比 harness 活得久，
+測試結束時必須已不在；拿掉 timer 裡的 `kill()` 時此案例失敗）、
+輸出垃圾、輸出超過 64 KiB（卡住或結束）、恰在 timeout 時回覆、宿主 API 丟出例外、非 completed／
+end_turn 的回合都靜默且不留下未處理的例外。
+
+### pi（實驗性）
+
+| 項目 | 內容 |
+|---|---|
+| 目錄 | `$PI_CODING_AGENT_DIR`（Pi 也接受相對路徑與 `~`；rotter 只用絕對路徑）→ `~/.pi/agent` |
+| 安裝方式 | OwnedShim：`extensions/rotter-review.ts` |
+| 載入 | `extensions/` 下直接的 `*.ts`／`*.js` 檔（或 symlink），以及子目錄的 `index.ts`／`index.js`／`package.json` 的 `pi.extensions`；以 jiti 載入（TypeScript 不需編譯）。`rotter-review.ts.rotter-tmp` 不以 `.ts`／`.js` 結尾，不會載入 |
+| 事件 | `agent_before_settle`：`{type, outcome: "completed"\|"aborted"\|"error", entries, continue, context}`，handler 為 `(event, ctx)`，依序 await（沒有 timeout），例外只回報為錯誤 |
+| session／cwd | `ctx.sessionManager.getSessionId()`、`ctx.cwd` |
+| 續跑判斷 | 沒有續跑旗標：只靠 rotter 的上限與 shim 的計數；shim 只處理 `outcome` 為 `completed` 的回合 |
+| 要求續跑 | 回傳 `{entries: [...event.entries, {type:"custom_message", customType:"rotter-review", content, display:true}], continue: true}`（「append entries and request one continuation」） |
+| 提示管道 | 預設 stderr（shim 忽略；沒有使用 `ctx.ui.notify`） |
+| 引擎 | npm 版：Node ≥ 22.19.0（`engines.node`、README），extension 由 jiti 載入；release binary：Bun 1.3.14 編譯（`build-binaries.yml`），extension 由內嵌的 `jiti/static`（jiti 2.7.0）以 `{moduleCache:false, tryNative:false}` 載入（`loader.ts`、`jiti-static-loader.ts`）。測試在 Node 24.21.0 與 Bun 1.3.14 下都執行；見下方「Bun 下沒有模擬的部分」 |
+| project `.env` | release binary 以 `bun build --compile --no-compile-autoload-bunfig` 建置，沒有關閉 `.env` 自動載入（Bun 的預設為開啟），所以工作目錄的 `.env` 會進入 Pi 程序的環境；npm 版（Node）不會。project extension（`.pi/extensions`）需要 project trust 才會載入 |
+| env-injectable 處理 | 是 |
+
+Bun 下沒有模擬的部分：harness 以 Bun 自己的 TypeScript 載入器 `import()` shim，不是 Pi 的 jiti；
+`bun build --compile` 產生的單一執行檔環境（內嵌模組、`virtualModules`）與 Pi 真正的
+`ExtensionAPI` 也沒有模擬（stub 只有 `on` 與 `agent_before_settle` 的欄位）。有執行到的是 Bun 1.3.14
+的 `node:child_process`（`detached`、process group 的 SIGKILL、stdin／stdout 事件）、timer 與
+Promise 行為，這些是 shim 真正依賴的部分。2026-09-29 另以本機 Bun 快取中的 jiti 2.7.0
+`jiti/static`、Pi 的同一組選項手動載入 shim 執行 once／loop／hang／garbage／throwing，結果與上面相同
+（沒有加入測試：jiti 不是本專案的依賴）。
+
+來源：<https://github.com/badlogic/pi-mono>（文件連結指向 earendil-works/pi）
+commit `fd889a2741891ee45116cb6131052d7fad220886`
+（2026-09-28）：`packages/coding-agent/docs/extensions.md`、`docs/configuration.md`、
+`docs/environment-variables.md`（`PI_CODING_AGENT_DIR`）、`src/config.ts`（`getAgentDir`）、
+`src/core/extensions/loader.ts`（`discoverExtensionsInDir`、jiti）、`src/core/extensions/types.ts`
+（`AgentBeforeSettleEvent`、`BoundaryResult`、`ExtensionContext`）、`src/core/extensions/jiti-static-loader.ts`、`src/core/extensions/runner.ts`
+（`emitBoundary`）、`src/core/agent-session.ts`（`_runBeforeSettleBoundary`）、`package.json`、
+`README.md`、`scripts/build-binaries.sh`、`.github/workflows/build-binaries.yml`；Bun 的
+`.env`／bunfig 自動載入預設：<https://bun.com/docs/bundler/executables>（2026-09-29 查閱）。
+
+### letta（實驗性）
+
+| 項目 | 內容 |
+|---|---|
+| 目錄 | 沒有載入器會讀的變數 → `~/.letta`（`os.homedir()`）；`LETTA_MODS_DIR`／`LETTA_EXTENSIONS_DIR` 只被診斷與 `skills` 子指令使用，mod 載入器固定讀 `~/.letta/mods`（另讀舊的 `~/.letta/extensions`），所以 rotter 不採用這兩個變數 |
+| 安裝方式 | OwnedShim：`mods/rotter-review.js` |
+| 載入 | `mods/` 下直接的一般檔案（不跟隨 symlink、不以 `.` 開頭），副檔名為 `.js`、`.mjs`、`.ts`、`.tsx`；`rotter-review.js.rotter-tmp` 的副檔名是 `.rotter-tmp`，不會載入。模組須 default export 函式（或 `activate`） |
+| 事件 | `letta.events.on("turn_end", (event, ctx) => …)`：`{agentId, conversationId, stopReason, assistantMessage?}`，能力 `letta.capabilities.events.turns`；handler 被 await（沒有 timeout），例外被吞掉 |
+| session／cwd | `event.conversationId`，沒有時 `ctx.sessionId`；`ctx.cwd` |
+| 續跑判斷 | 沒有續跑旗標：只靠 rotter 的上限與 shim 的計數；shim 只處理 `stopReason` 為 `end_turn` 的回合 |
+| 要求續跑 | 回傳 `{continue: "<訊息>"}`（非空字串），Letta 以它作為新的使用者訊息再跑一輪（受 `--max-turns` 約束） |
+| 提示管道 | 預設 stderr（shim 忽略） |
+| 引擎 | npm 版 `letta.js` 以 `Bun.build({target:"node"})` 打包並加上 `#!/usr/bin/env node`，`engines.node` ≥ 22.19.0（也列 `bun` ≥ 1.3.2）；測試以 Node 24.21.0 執行 |
+| project `.env` | Node 不會自動載入 `.env`；settings 的 `env` 只用於少數 Letta 自己的變數，不寫入 `process.env`；Letta 不支援 project mod |
+| env-injectable 處理 | 是（shim 只傳 PATH 與 LANG） |
+
+來源：<https://github.com/letta-ai/letta-code> commit `eb5dd97c65fde1168142b5de822f859bc5034059`（2026-09-28）：
+`src/mods/paths.ts`、`src/mods/mod-sources.ts`（`listModFiles`、`resolveLocalModSources`）、
+`src/mods/file-extensions.ts`、`src/mods/mod-engine.ts`（`getModFactory`、`isTurnEndResultWithContinue`、
+`SUPPORTED_MOD_EVENT_NAMES`）、`src/mods/types.ts`（`ModTurnEndEvent`、`ModTurnEndResult`、`ModContext`）、
+`src/mods/capabilities.ts`、`src/headless.ts` 與 `src/cli/app/use-conversation-loop.ts`（`turn_end` 與續跑）、
+`src/skills/builtin/creating-mods/`（`letta.events.on`、`~/.letta/mods`）、`build.js`、`package.json`。
+
+### opencode（實驗性）
+
+| 項目 | 內容 |
+|---|---|
+| 目錄 | `$OPENCODE_CONFIG_DIR`（rotter 只用絕對路徑）→ `$XDG_CONFIG_HOME/opencode`（rotter 只用絕對的 `XDG_CONFIG_HOME`）→ `~/.config/opencode`。OpenCode 的全域目錄來自 `xdg-basedir`（`Global.Path.config`，啟動時以 `mkdir -p` 建立）；`OPENCODE_CONFIG_DIR` 設定時是**額外**載入的目錄（排在全域與 `.opencode` 之後），不取代全域目錄，但 OpenCode 自己的 `Global.make()` 也以它為 config 目錄，所以 rotter 依 env 優先規則裝在它下面。之後若不再設定該變數，那裡的 plugin 就不會載入（`status` 以當下的環境判斷）；`xdg-basedir` 接受相對的 `XDG_CONFIG_HOME`，rotter 不接受，此時兩者的位置不同 |
+| 安裝方式 | OwnedShim：`plugins/rotter-review.js` |
+| 載入 | 每個 config 目錄下 `{plugin,plugins}/*.{ts,js}`（`Glob.scan`，`dot:true`、跟隨 symlink），以檔案 URL 動態 import；`rotter-review.js.rotter-tmp` 不以 `.ts`／`.js` 結尾，不會載入。模組的**每個** export 都必須是 plugin 函式（`getLegacyPlugins`，否則整個模組載入失敗），所以範本只有一個 export：`export const RotterReview = async (input) => ({ event })` |
+| 事件 | `session.idle`，`properties` 為 `{sessionID}`，由 `SessionStatus.set` 在狀態變成 idle 時發出；plugin 的 `event` hook 收到 `{event: {id, type, properties}}`，以 `void hook["event"]?.(...)` 呼叫，**不被等待**（因此 handler 絕不 reject，否則成為 OpenCode 的 unhandled rejection） |
+| session／cwd | `event.properties.sessionID`；cwd 為 plugin 輸入的 `directory`（該 instance 的目錄；事件只送給 `location.directory` 相同的 instance） |
+| 子 session | 以 `client.session.get({path:{id}})` 取得 session，`parentID` 存在（subagent）或取不到時不做事 |
+| 續跑判斷 | 沒有續跑旗標：只靠 rotter 的上限與 shim 的計數；注入的提示是新的使用者訊息，shim 不把任何使用者訊息當成歸零的訊號 |
+| 要求續跑 | `client.session.promptAsync({path:{id}, body:{parts:[{type:"text", text}]}})`（`POST /session/{id}/prompt_async`，立即返回），在「同時只跑一次」旗標放開之後才呼叫，所以注入的那一輪結束時的 `session.idle` 照常經過計數；失敗被吞掉。這是使用者看得到的新訊息，內容是 rotter 的 `continue`：固定文字、數量、cwd（絕對路徑、無控制字元）與 shell 引用過的 binary 路徑，沒有報告內容或檔名 |
+| 提示管道 | 預設 stderr（shim 忽略；沒有使用 `client.app.log`） |
+| timeout | shim 內的 timeout；OpenCode 不等待 handler，不設 120 秒上限 |
+| 引擎 | release binary 以 `Bun.build({compile})` 建置，macOS／Linux 用 Bun 1.3.14（根目錄 `package.json` 的 `packageManager: bun@1.3.14`）；測試以 Bun 1.3.14 執行 |
+| project `.env` | 建置時 `autoloadDotenv:false`、`autoloadBunfig:false`，工作目錄的 `.env` 不會進入 OpenCode 程序；project 的 `.opencode/plugins/` 本來就在同一個程序內執行任意程式碼（宿主層級） |
+| env-injectable 處理 | 是（shim 只傳 PATH 與 LANG，rotter 端的 HOME 取自密碼資料庫） |
+
+測試（Bun 1.3.14）另外驗證：模組只有一個函式 export；`session.get` 丟出例外時不執行 rotter；
+子 session 不執行 rotter；只有 rotter 要求審查時才呼叫 `promptAsync`（錯誤路徑全部靜默）；
+`promptAsync` reject 時被吞掉；stub `promptAsync` 在返回之前就先發出新的使用者訊息事件與下一個
+`session.idle` 時，第二個 idle 仍會詢問 rotter（旗標沒有被注入的那一輪佔住，改成佔住時此案例
+失敗），三個變動的報告中第三次被壓下（共 3 個 idle、2 次 rotter、2 次 `promptAsync`）。
+
+來源：<https://github.com/sst/opencode> commit `8d05153965bee0a1e46eccffe944dc84d0b0c6f1`
+（2026-09-28，2026-09-29 重新查閱）：`packages/opencode/src/config/plugin.ts`（`load` 的 glob）、
+`src/config/paths.ts`（`directories`）、`src/config/config.ts`（逐目錄載入 plugin）、
+`packages/core/src/global.ts`（`xdg-basedir`、`Global.make`）、`packages/opencode/src/plugin/index.ts`
+（`PluginInput`、`getLegacyPlugins`、`void hook["event"]`）、`src/plugin/shared.ts`（`readV1Plugin`）、
+`src/session/status.ts`（`Event.Idle`）、`packages/plugin/src/index.ts`（`Hooks.event`）、
+`packages/sdk/js/src/gen/sdk.gen.ts`（`Session.get`、`promptAsync`）、
+`packages/sdk/js/src/gen/types.gen.ts`（`Session.parentID`、`EventSessionIdle`、
+`SessionPromptAsyncData`）、`packages/opencode/script/build.ts`（`autoloadDotenv`）、根目錄
+`package.json`、`packages/web/src/content/docs/plugins.mdx`、`config.mdx`（`OPENCODE_CONFIG_DIR`）。

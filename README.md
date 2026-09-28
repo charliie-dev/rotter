@@ -2,7 +2,7 @@
 
 針對 Git diff 檢查程式註解的 Rust 專案。目前是 POC：`rotter extract` 擷取變更單元與相關註解，
 輸出 JSON；語意判斷交給 coding agent 依 [共用 skill](skills/rotter-comment-review/SKILL.md) 執行。
-skill 以 `rotter --skill` 隨 binary 發佈；`rotter integration install claude|grok|codex|copilot|droid` 註冊各宿主的回合結束 hook。
+skill 以 `rotter --skill` 隨 binary 發佈；`rotter integration install claude|grok|codex|copilot|droid|pi|letta|opencode` 註冊各宿主的回合結束 hook。
 
 ## 開發環境
 
@@ -11,11 +11,13 @@ Rust 套件依賴由 [Cargo.toml](Cargo.toml)／[Cargo.lock](Cargo.lock) 固定�
 宿主需要已有 Git 與可用的 C 編譯器／平台 SDK，因為 Tree-sitter 會編譯原生 C 程式。
 
 ```sh
-mise install rust
+mise install rust node bun
 mise run check
 ```
 
-`check` 會執行 Rust 格式檢查、Clippy 和全部測試。任務不會自動安裝從全域 mise 設定
+`check` 會執行 Rust 格式檢查、Clippy 和全部測試。Node 與 Bun（`mise.toml` 固定為 24.21.0 與
+1.3.14）用來在 [shim 測試](tests/shims.rs) 中以宿主實際使用的引擎執行 shim：pi 在兩者下各跑一次，
+letta 用 Node，opencode 用 Bun；沒有安裝時該測試直接失敗，不會略過。任務不會自動安裝從全域 mise 設定
 繼承的工具，因此首次使用須先執行上述安裝命令。
 
 也可分別執行：
@@ -232,6 +234,9 @@ rotter integration install grok       # 寫入 Grok Build 的 hooks/rotter.json
 rotter integration install copilot    # 寫入 GitHub Copilot CLI 的 hooks/rotter.json
 rotter integration install codex      # 實驗性：在 Codex 的 hooks.json 加入 Stop hook
 rotter integration install droid      # 實驗性：在 Factory Droid 的 hooks.json 加入 Stop hook
+rotter integration install pi         # 實驗性：寫入 Pi 的 extensions/rotter-review.ts
+rotter integration install letta      # 實驗性：寫入 Letta Code 的 mods/rotter-review.js
+rotter integration install opencode   # 實驗性：寫入 OpenCode 的 plugins/rotter-review.js
 rotter integration status             # 各宿主的狀態、相容性檢查與 binary 信任檢查
 rotter integration uninstall claude
 rotter integration uninstall grok
@@ -276,8 +281,35 @@ Copilot CLI：`$COPILOT_HOME/hooks/rotter.json`（預設 `~/.copilot`），rotte
 內容為 `{"version":1,"hooks":{"agentStop":[{"type":"command","bash":"…","timeoutSec":N}]}}`。
 Factory Droid（實驗性）：`~/.factory/hooks.json`（沒有目錄變數），合併方式同 Codex；`hooks.json`
 不存在而 `settings.json`／`settings.local.json` 仍宣告 `hooks` 時拒絕建立（Droid 只在沒有
-`hooks.json` 時才讀那些 hook）。mastracode、devin、cursor、antigravity-cli 目前不支援，`status`
-列出原因。各宿主的欄位、出處與不支援的理由見[宿主契約](docs/hosts.md)。
+`hooks.json` 時才讀那些 hook）。mastracode、devin、cursor、antigravity-cli 目前不支援，
+`status` 列出原因。各宿主的欄位、出處與不支援的理由見[宿主契約](docs/hosts.md)。
+
+Pi、Letta Code 與 OpenCode（實驗性，shim 宿主）：這三個宿主沒有指令型 hook，只載入程式碼，所以
+rotter 寫入一個自己擁有的小程式（shim）：Pi 為 `$PI_CODING_AGENT_DIR/extensions/rotter-review.ts`
+（預設 `~/.pi/agent`，相對路徑的變數被忽略），Letta 為 `~/.letta/mods/rotter-review.js`（Letta 的
+載入器不讀目錄變數），OpenCode 為 `$OPENCODE_CONFIG_DIR/plugins/rotter-review.js`（沒有絕對路徑的
+變數時為 `$XDG_CONFIG_HOME/opencode`，再其次 `~/.config/opencode`；OpenCode 兩個目錄都會載入）。
+宿主目錄須已存在，`extensions/`／`mods/`／`plugins/` 不存在時以 0700 建立，shim 權限恰為
+0600。shim 由內嵌的範本產生，只有兩個變數：binary 路徑（以 JSON 字串字面值放在一處，不可含控制
+字元、U+2028、U+2029、`$`、`` ` ``）與 timeout（`max(60, parse_timeout_seconds + 30)`；Pi 與 Letta
+會等待 handler，上限 120 秒，OpenCode 不等待，不設上限）。只有與 rotter 出過的某個範本版本的產生結果逐位元組相同的檔案才算
+rotter 的；其他內容是「foreign code at rotter's path」，install／uninstall 都以退出碼 2 結束並保留原檔。
+
+shim 在 Pi 的 `agent_before_settle`（只在執行 `completed` 時）、Letta 的 `turn_end`（只在
+`stopReason` 為 `end_turn` 時）或 OpenCode 的 `session.idle`（只處理沒有 `parentID` 的頂層 session）以 `child_process.spawn` 直接執行 `rotter hook <host> --timeout <n>`
+（不經 shell、不用 `exec`／`spawnSync`），stdin 只有 `session_id` 與 `cwd`，環境只有 PATH 與
+LANG（不傳 `process.env`），stdout 超過 64 KiB、非 JSON、`continue` 不是字串、逾時（殺掉整個
+process group）或任何錯誤都靜默結束，每個 session 最多連續兩次要求、同時只跑一次。rotter 回
+`{"continue":"…"}`，shim 把它加成 Pi 的 `custom_message`（並要求一次續跑）、Letta 的續跑訊息，或
+以 OpenCode 的 `client.session.promptAsync` 送出一則**看得見的新使用者訊息**（內容只有固定文字、
+數量、cwd 與引用過的 binary 路徑，沒有報告內容或檔名；送出前已放開「同時只跑一次」旗標，所以
+注入的那一輪結束時照常計數）。rotter 端這三個宿主的 HOME 取自密碼資料庫，XDG_*、ROTTER_*、TMPDIR 一律忽略（見
+[宿主契約](docs/hosts.md) 的 env-injectable 一節），`--timeout` 只會縮短執行時間。
+
+信任：shim 在宿主每次啟動時自動載入並在宿主程序內執行，宿主不會詢問；能改寫它的人本來就能改寫
+使用者的宿主設定與其他 extension／mod／plugin，因此不另外防護。OpenCode 的 project plugin
+（`.opencode/plugins/`）本來就在同一個程序內執行任意程式碼。Pi 的 release binary（Bun 編譯）會讀取工作目錄
+的 `.env`，可以改變 Pi 程序與 shim 看到的 PATH；PATH 仍受 git 選擇規則約束，其他變數不會傳給 rotter。
 
 相容性：Grok 預設（`[compat.claude] hooks = true`）也會執行 `~/.claude/settings.json`（固定路徑）
 中的 hooks。`status` 以唯讀方式檢查 `$HOME/.claude/settings.json`：含 rotter 項目時顯示
