@@ -1,13 +1,16 @@
+use crate::config::{Untrusted, lstat, resolve_trusted, user};
+use crate::grammar::{create_private, open_regular};
 use crate::json::Json;
 use crate::{
     Change, Detected, Grammar, Languages, ParseError, error_lines, full_units, parse_with_deadline,
     units,
 };
+use std::cell::Cell;
 use std::ffi::OsStr;
 use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -65,23 +68,28 @@ pub struct Report {
 }
 
 fn git(dir: &Path, args: &[&OsStr], input: Option<&[u8]>, ok: &[i32]) -> Result<Vec<u8>, String> {
-    git_in(dir, args, input, ok, None)
+    git_in(dir, args, input, ok, None, None)
 }
 
-/// Runs git; `index` points it at a private copy so index refreshes never touch the repository.
+/// Runs git, resolved from the absolute PATH entries only; `index` points it at a private copy so
+/// index refreshes never touch the repository, and `ceiling` stops repository discovery.
 fn git_in(
     dir: &Path,
     args: &[&OsStr],
     input: Option<&[u8]>,
     ok: &[i32],
     index: Option<&Path>,
+    ceiling: Option<&Path>,
 ) -> Result<Vec<u8>, String> {
-    let mut command = Command::new("git");
+    let mut command = Command::new(crate::install::git_program()?);
     if let Some(index) = index {
         // An unsplit private index keeps git from writing sharedindex files into $GIT_DIR.
         command
             .env("GIT_INDEX_FILE", index)
             .args(["-c", "core.splitIndex=false"]);
+    }
+    if let Some(ceiling) = ceiling {
+        command.env("GIT_CEILING_DIRECTORIES", ceiling);
     }
     let mut child = command
         .arg("-C")
@@ -133,45 +141,116 @@ pub fn toplevel(dir: &Path) -> Result<PathBuf, String> {
     git_text(dir, &["rev-parse", "--show-toplevel"]).map(PathBuf::from)
 }
 
-/// Private scratch directory for diff inputs; removed on drop.
-struct Scratch(PathBuf);
+/// Private scratch directory under the trusted temp root for the index copy and diff inputs;
+/// removed on drop.
+struct Scratch {
+    dir: PathBuf,
+    /// `resolve_trusted(temp_dir())`: the ceiling for `git diff --no-index`.
+    root: PathBuf,
+    /// Numbers the per-diff `diff-<n>` subdirectories.
+    diffs: Cell<usize>,
+}
+
+/// The temp root through [`resolve_trusted`]; refused when unsafe or not expressible as a
+/// `GIT_CEILING_DIRECTORIES` entry.
+fn temp_root(temp: &Path) -> Result<PathBuf, String> {
+    let root = match resolve_trusted(temp, user(), &lstat) {
+        Ok(root) => root,
+        Err(Untrusted::Missing) => {
+            return Err(format!(
+                "temporary directory {} (TMPDIR) does not exist",
+                temp.display()
+            ));
+        }
+        Err(Untrusted::Refused(why)) => {
+            return Err(format!(
+                "temporary directory {} (TMPDIR) refused: {why}; set TMPDIR to a directory only \
+                 you can write",
+                temp.display()
+            ));
+        }
+    };
+    if root.as_os_str().as_bytes().contains(&b':') {
+        return Err(format!(
+            "temporary directory {} (TMPDIR) resolves to {}, which contains ':'; set TMPDIR to a \
+             path without ':'",
+            temp.display(),
+            root.display()
+        ));
+    }
+    Ok(root)
+}
 
 impl Scratch {
     fn new() -> Result<Self, String> {
+        let root = temp_root(&std::env::temp_dir())?;
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |time| time.as_nanos());
         static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let path = std::env::temp_dir().join(format!(
+        let dir = root.join(format!(
             "rotter-{}-{nanos}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
-        fs::DirBuilder::new()
-            .mode(0o700)
-            .create(&path)
-            .map_err(|error| format!("cannot create {}: {error}", path.display()))?;
-        Ok(Self(path))
+        private_dir(&dir)?;
+        Ok(Self {
+            dir,
+            root,
+            diffs: Cell::new(0),
+        })
     }
 
-    fn write(&self, name: &str, content: &str) -> Result<PathBuf, String> {
-        let path = self.0.join(name);
-        fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&path)
-            .and_then(|mut file| file.write_all(content.as_bytes()))
-            .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
-        Ok(path)
+    /// A fresh `diff-<n>` subdirectory; one that already exists is an error.
+    fn diff_dir(&self) -> Result<PathBuf, String> {
+        let n = self.diffs.get();
+        self.diffs.set(n + 1);
+        let dir = self.dir.join(format!("diff-{n}"));
+        private_dir(&dir)?;
+        Ok(dir)
     }
 }
 
 impl Drop for Scratch {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
+        let _ = fs::remove_dir_all(&self.dir);
     }
+}
+
+/// Creates one directory (never its parents) with mode 0700; an existing entry is an error.
+fn private_dir(path: &Path) -> Result<(), String> {
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(path)
+        .map_err(|error| format!("cannot create {}: {error}", path.display()))
+}
+
+/// Writes `dir/name` once: a pre-existing entry or symlink is an error, never followed.
+fn write_new(dir: &Path, name: &str, content: &[u8]) -> Result<PathBuf, String> {
+    let path = dir.join(name);
+    create_private(&path)
+        .and_then(|mut file| file.write_all(content))
+        .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+    Ok(path)
+}
+
+/// Copies the repository index into the scratch directory; only a regular file is copied.
+fn copy_index(real: &Path, copy: &Path) -> Result<(), String> {
+    let Some(mut source) = open_regular(real)? else {
+        return Ok(());
+    };
+    let fail = |error: std::io::Error| format!("cannot copy {}: {error}", real.display());
+    let mut target = create_private(copy).map_err(fail)?;
+    std::io::copy(&mut source, &mut target).map_err(fail)?;
+    // Git treats entries as racily clean by comparing them with the index file's mtime; a fresh
+    // mtime would hide same-size edits made within the same timestamp granularity.
+    let modified = source
+        .metadata()
+        .and_then(|meta| meta.modified())
+        .map_err(fail)?;
+    target
+        .set_times(fs::FileTimes::new().set_modified(modified))
+        .map_err(fail)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -187,25 +266,11 @@ fn parse_range(text: &str) -> Option<(usize, usize)> {
 
 /// Line hunks between two texts, computed by Git from exactly these bytes.
 fn diff(scratch: &Scratch, before: &str, after: &str) -> Result<Vec<Hunk>, String> {
-    let old = scratch.write("before", before)?;
-    let new = scratch.write("after", after)?;
-    let args: Vec<&OsStr> = [
-        "diff",
-        "--no-index",
-        "--no-color",
-        "--no-ext-diff",
-        "--no-textconv",
-        "--text",
-        "-U0",
-        "--",
-    ]
-    .iter()
-    .map(OsStr::new)
-    .chain([old.as_os_str(), new.as_os_str()])
-    .collect();
-    let output = git(&scratch.0, &args, None, &[0, 1])?;
+    let dir = scratch.diff_dir()?;
+    let output = diff_in(&dir, &scratch.root, before, after);
+    let _ = fs::remove_dir_all(&dir);
     let mut hunks = Vec::new();
-    for line in String::from_utf8_lossy(&output).lines() {
+    for line in String::from_utf8_lossy(&output?).lines() {
         let Some(header) = line.strip_prefix("@@ -") else {
             continue;
         };
@@ -221,6 +286,28 @@ fn diff(scratch: &Scratch, before: &str, after: &str) -> Result<Vec<Hunk>, Strin
         }
     }
     Ok(hunks)
+}
+
+/// `git diff --no-index` of `before` and `after`, written once each into the private `dir`.
+fn diff_in(dir: &Path, ceiling: &Path, before: &str, after: &str) -> Result<Vec<u8>, String> {
+    let old = write_new(dir, "before", before.as_bytes())?;
+    let new = write_new(dir, "after", after.as_bytes())?;
+    let args: Vec<&OsStr> = [
+        "diff",
+        "--no-index",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--text",
+        "-U0",
+        "--",
+    ]
+    .iter()
+    .map(OsStr::new)
+    .chain([old.as_os_str(), new.as_os_str()])
+    .collect();
+    // No repository discovery above the scratch directory.
+    git_in(dir, &args, None, &[0, 1], None, Some(ceiling))
 }
 
 fn changes(hunks: &[Hunk], after: bool) -> Vec<Change> {
@@ -659,12 +746,9 @@ pub fn extract(dir: &Path, options: &Options) -> Result<Report, String> {
     // `git diff <tree>` refreshes stat data and rewrites the index even with
     // GIT_OPTIONAL_LOCKS=0, so every index read goes through a private copy.
     let scratch = Scratch::new()?;
-    let index = scratch.0.join("index");
+    let index = scratch.dir.join("index");
     let real_index = top.join(git_text(&top, &["rev-parse", "--git-path", "index"])?);
-    if real_index.exists() {
-        fs::copy(&real_index, &index)
-            .map_err(|error| format!("cannot copy {}: {error}", real_index.display()))?;
-    }
+    copy_index(&real_index, &index)?;
     let index = Some(index.as_path());
     let mut args = vec!["diff"];
     if matches!(options.mode, Mode::Staged) {
@@ -687,6 +771,7 @@ pub fn extract(dir: &Path, options: &Options) -> Result<Report, String> {
             None,
             &[0],
             index,
+            None,
         )?;
         let mut entries: Vec<Entry> = Vec::new();
         for record in listed
@@ -715,12 +800,19 @@ pub fn extract(dir: &Path, options: &Options) -> Result<Report, String> {
         }
         entries
     } else {
-        parse_raw(&git_in(dir, &args_with(&args, &specs), None, &[0], index)?)?
+        parse_raw(&git_in(
+            dir,
+            &args_with(&args, &specs),
+            None,
+            &[0],
+            index,
+            None,
+        )?)?
     };
 
     // HEAD→disk diffs report conflicted paths as plain modifications; keep them visible.
     let unmerged_args = with_specs(&["ls-files", "--unmerged", "-z", "--full-name"]);
-    let mut unmerged: Vec<Vec<u8>> = git_in(dir, &unmerged_args, None, &[0], index)?
+    let mut unmerged: Vec<Vec<u8>> = git_in(dir, &unmerged_args, None, &[0], index, None)?
         .split(|byte| *byte == 0)
         .filter_map(|record| {
             let tab = record.iter().position(|byte| *byte == b'\t')?;
@@ -753,7 +845,7 @@ pub fn extract(dir: &Path, options: &Options) -> Result<Report, String> {
         "-z",
         "--full-name",
     ]);
-    let untracked: Vec<Vec<u8>> = git_in(dir, &untracked_args, None, &[0], index)?
+    let untracked: Vec<Vec<u8>> = git_in(dir, &untracked_args, None, &[0], index, None)?
         .split(|byte| *byte == 0)
         .filter(|path| !path.is_empty())
         .map(<[u8]>::to_vec)
@@ -833,7 +925,70 @@ pub fn extract(dir: &Path, options: &Options) -> Result<Report, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Change, Hunk, changes, parse_raw};
+    use super::{Change, Hunk, Scratch, changes, diff, parse_raw, temp_root, write_new};
+    use std::fs;
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::path::PathBuf;
+
+    fn temp(name: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!("rotter-git-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::canonicalize(path).unwrap()
+    }
+
+    #[test]
+    fn write_helper_never_follows_a_planted_symlink() {
+        let root = temp("planted");
+        let canary = root.join("canary");
+        fs::write(&canary, "canary").unwrap();
+        let dir = root.join("diff-0");
+        fs::create_dir(&dir).unwrap();
+        symlink(&canary, dir.join("before")).unwrap();
+        let error = write_new(&dir, "before", b"payload").unwrap_err();
+        assert!(error.contains("exists"), "{error}");
+        assert_eq!(fs::read_to_string(&canary).unwrap(), "canary");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn each_diff_uses_a_fresh_subdirectory_removed_afterwards() {
+        let scratch = Scratch::new().unwrap();
+        let hunks = diff(&scratch, "a\n", "b\n").unwrap();
+        assert_eq!(hunks.len(), 1);
+        assert_eq!(
+            fs::read_dir(&scratch.dir).unwrap().count(),
+            0,
+            "diff-0 removed"
+        );
+        fs::create_dir(scratch.dir.join("diff-1")).unwrap();
+        let error = diff(&scratch, "a\n", "b\n").unwrap_err();
+        assert!(error.contains("diff-1"), "{error}");
+        assert_eq!(diff(&scratch, "a\n", "a\nb\n").unwrap().len(), 1, "diff-2");
+    }
+
+    #[test]
+    fn unsafe_or_colon_temp_roots_are_refused() {
+        let root = temp("roots");
+        assert_eq!(temp_root(&root).unwrap(), root);
+        let shared = root.join("shared");
+        fs::create_dir(&shared).unwrap();
+        fs::set_permissions(&shared, fs::Permissions::from_mode(0o770)).unwrap();
+        let error = temp_root(&shared).unwrap_err();
+        assert!(
+            error.contains("TMPDIR") && error.contains("refused"),
+            "{error}"
+        );
+        let colon = root.join("a:b");
+        fs::create_dir(&colon).unwrap();
+        let error = temp_root(&colon).unwrap_err();
+        assert!(error.contains("TMPDIR") && error.contains("':'"), "{error}");
+        // A link without ':' whose target has one is refused too: the resolved path counts.
+        symlink(&colon, root.join("plain")).unwrap();
+        assert!(temp_root(&root.join("plain")).unwrap_err().contains("':'"));
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn raw_records_keep_both_rename_paths() {

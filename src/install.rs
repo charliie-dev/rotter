@@ -105,6 +105,11 @@ fn find_tool(tool: Tool) -> Result<PathBuf, String> {
         })
 }
 
+/// `git` from the absolute PATH entries only, for every git call rotter makes.
+pub(crate) fn git_program() -> Result<PathBuf, String> {
+    find_tool(Tool::Git)
+}
+
 /// The complete environment of a git or cc child: nothing else is inherited.
 fn child_env(tool: Tool, staging: &Path) -> Vec<(OsString, OsString)> {
     let mut env: Vec<(OsString, OsString)> = Vec::new();

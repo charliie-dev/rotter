@@ -1038,3 +1038,187 @@ fn language_overrides_cover_helpers_without_a_shebang() {
         ("leading", false, None)
     );
 }
+
+/// Runs the CLI in `repo.0` with TMPDIR = `tmp` and every user directory pinned under `home`.
+fn cli_with_tmp(repo: &Repo, home: &Path, tmp: &Path, args: &[&str]) -> std::process::Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rotter"))
+        .args(args)
+        .current_dir(&repo.0)
+        .env("HOME", home)
+        .env("XDG_CONFIG_HOME", home.join("config"))
+        .env("XDG_CACHE_HOME", home.join("cache"))
+        .env("XDG_STATE_HOME", home.join("state"))
+        .env("CLAUDE_CONFIG_DIR", home.join("claude"))
+        .env("ROTTER_STATE_DIR", home.join("rotter-state"))
+        .env("TMPDIR", tmp)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let started = std::time::Instant::now();
+    while child.try_wait().unwrap().is_none() {
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(30),
+            "rotter hangs"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    child.wait_with_output().unwrap()
+}
+
+/// A fresh 0700 directory next to the test repositories.
+fn private_temp(name: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = std::env::temp_dir().join(format!(
+        "rotter-test-{name}-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = fs::remove_dir_all(&path);
+    fs::create_dir_all(&path).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::canonicalize(path).unwrap()
+}
+
+#[test]
+fn multi_file_worktree_and_staged_diffs_clean_up_their_scratch() {
+    let repo = Repo::new();
+    let names = ["a.go", "b.go", "c.go"];
+    let body = |name: &str, value: u32| {
+        format!(
+            "package p\n\n// F{name} returns a value.\nfunc F{}() int {{ return {value} }}\n",
+            &name[..1]
+        )
+    };
+    for name in names {
+        repo.write(name, &body(name, 1));
+    }
+    repo.commit();
+    for name in names {
+        repo.write(name, &body(name, 2));
+    }
+    repo.git(&["add", "-A"]);
+    let home = private_temp("scratch-home");
+    let tmp = private_temp("scratch-tmp");
+    for mode in ["--worktree", "--staged"] {
+        let output = cli_with_tmp(&repo, &home, &tmp, &["extract", mode]);
+        assert_eq!(output.status.code(), Some(0), "{mode}: {output:?}");
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let files = report["files"].as_array().unwrap();
+        assert_eq!(files.len(), 3, "{mode}: {report}");
+        for file in files {
+            assert_eq!(file["hunks"].as_array().unwrap().len(), 1, "{file}");
+            assert_eq!(
+                file["after"]["units"].as_array().unwrap().len(),
+                1,
+                "{file}"
+            );
+        }
+        assert_eq!(
+            fs::read_dir(&tmp).unwrap().count(),
+            0,
+            "{mode}: scratch and every diff-<n> removed"
+        );
+    }
+    fs::remove_dir_all(home).unwrap();
+    fs::remove_dir_all(tmp).unwrap();
+}
+
+#[test]
+fn unsafe_temp_root_is_refused_before_any_write() {
+    use std::os::unix::fs::PermissionsExt;
+    let repo = Repo::new();
+    repo.write("a.go", "package p\n\n// F.\nfunc F() int { return 1 }\n");
+    repo.commit();
+    repo.write("a.go", "package p\n\n// F.\nfunc F() int { return 2 }\n");
+    let home = private_temp("unsafe-home");
+    let outside = private_temp("unsafe-outside");
+    let canary = outside.join("canary");
+    fs::write(&canary, "canary").unwrap();
+    let shared = outside.join("shared");
+    fs::create_dir(&shared).unwrap();
+    fs::set_permissions(&shared, fs::Permissions::from_mode(0o770)).unwrap();
+    let index = fs::read(repo.0.join(".git/index")).unwrap();
+
+    let output = cli_with_tmp(&repo, &home, &shared, &["extract", "--worktree"]);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("TMPDIR") && stderr.contains("refused"),
+        "{stderr}"
+    );
+    assert_eq!(fs::read_dir(&shared).unwrap().count(), 0, "nothing created");
+    assert_eq!(fs::read_to_string(&canary).unwrap(), "canary");
+    assert_eq!(fs::read(repo.0.join(".git/index")).unwrap(), index);
+
+    // The hook reports it as one systemMessage and does not block.
+    let mut hook = Command::new(env!("CARGO_BIN_EXE_rotter"))
+        .args(["hook", "claude-stop"])
+        .current_dir(&home)
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join("config"))
+        .env("XDG_CACHE_HOME", home.join("cache"))
+        .env("CLAUDE_CONFIG_DIR", home.join("claude"))
+        .env("ROTTER_STATE_DIR", home.join("rotter-state"))
+        .env("TMPDIR", &shared)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        use std::io::Write;
+        let input = format!(r#"{{"session_id": "s", "cwd": "{}"}}"#, repo.0.display());
+        hook.stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+    }
+    let hook = hook.wait_with_output().unwrap();
+    assert!(hook.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&hook.stdout).unwrap();
+    assert!(value.get("decision").is_none(), "{value}");
+    assert!(
+        value["systemMessage"].as_str().unwrap().contains("TMPDIR"),
+        "{value}"
+    );
+    assert_eq!(fs::read_dir(&shared).unwrap().count(), 0);
+    assert_eq!(fs::read_to_string(&canary).unwrap(), "canary");
+
+    // A temp root whose resolved path contains ':' cannot be a ceiling directory.
+    let colon = outside.join("a:b");
+    fs::create_dir(&colon).unwrap();
+    let output = cli_with_tmp(&repo, &home, &colon, &["extract", "--worktree"]);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("':'"));
+    fs::remove_dir_all(home).unwrap();
+    fs::remove_dir_all(outside).unwrap();
+}
+
+#[test]
+fn fifo_index_fails_fast() {
+    let repo = Repo::new();
+    repo.write("a.go", "package p\n");
+    repo.commit();
+    let index = repo.0.join(".git/index");
+    fs::remove_file(&index).unwrap();
+    assert!(
+        Command::new("mkfifo")
+            .arg(&index)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let home = private_temp("fifo-home");
+    let tmp = private_temp("fifo-tmp");
+    let output = cli_with_tmp(&repo, &home, &tmp, &["extract", "--worktree"]);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("not a regular file"),
+        "{output:?}"
+    );
+    assert_eq!(fs::read_dir(&tmp).unwrap().count(), 0);
+    fs::remove_file(&index).unwrap();
+    fs::remove_dir_all(home).unwrap();
+    fs::remove_dir_all(tmp).unwrap();
+}

@@ -1,11 +1,13 @@
 use crate::config::{self, Config, absolute_var, home};
+use crate::grammar::{create_private, open_regular};
 use crate::json::Json;
 use crate::{Mode, Options, extract, toplevel};
 use serde_json::{Value, json};
 use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::io::{Read, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{Duration, Instant};
 
 /// Marks the settings entry this binary owns; everything else in settings.json is left alone.
@@ -58,9 +60,8 @@ fn run_budget(computed: u64, installed: u64) -> Duration {
 fn settings_timeout(command: &str) -> u64 {
     claude_settings()
         .ok()
-        .filter(|path| fs::symlink_metadata(path).is_ok_and(|meta| meta.is_file()))
         .and_then(|path| read_settings(&path).ok())
-        .map_or(DEFAULT_HOOK_TIMEOUT, |settings| {
+        .map_or(DEFAULT_HOOK_TIMEOUT, |(settings, _)| {
             installed_timeout(&settings, command)
         })
 }
@@ -101,18 +102,12 @@ pub fn claude_stop(input: &str) -> Option<String> {
         .as_str()
         .map(PathBuf::from)
         .or_else(|| std::env::current_dir().ok())?;
-    let inside = Command::new("git")
-        .arg("-C")
-        .arg(&cwd)
-        .args(["rev-parse", "--is-inside-work-tree"])
-        .output()
-        .is_ok_and(|output| output.status.success());
-    if !inside {
-        return None;
-    }
-    // Config problems never block: they become one systemMessage and builtins are used.
+    // Outside a work tree (or without git on the absolute PATH entries) there is nothing to do.
+    let top = toplevel(&cwd).ok()?;
+    // Config problems never block: they become one systemMessage per session and builtins are
+    // used.
     let mut notes = Vec::new();
-    let config = match config::load(toplevel(&cwd).ok().as_deref()) {
+    let config = match config::load(Some(&top)) {
         Ok(loaded) => {
             notes.extend(loaded.note);
             loaded.config
@@ -124,16 +119,36 @@ pub fn claude_stop(input: &str) -> Option<String> {
             Config::default()
         }
     };
+    let session: String = input["session_id"]
+        .as_str()
+        .or(input["sessionId"].as_str())
+        .unwrap_or("unknown")
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || "._-".contains(character) {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let state = state_dir();
+    if !notes.is_empty()
+        && let Some(dir) = &state
+        && !first_time(&dir.join("claude-stop-notes"), &session, &notes.join("\n"))
+    {
+        notes.clear();
+    }
     let message = |mut notes: Vec<String>, text: Option<String>| {
         notes.extend(text);
         (!notes.is_empty()).then(|| {
             json!({ "systemMessage": format!("rotter: {}", notes.join("; ")) }).to_string()
         })
     };
-    let rotter = exe();
+    let rotter = shell_quote(&exe());
     let command = format!(
         "{rotter} extract --worktree --include-untracked -C {}",
-        cwd.display()
+        shell_quote(&cwd.display().to_string())
     );
     let budget = run_budget(
         hook_timeout(config.parse_timeout_seconds),
@@ -155,31 +170,15 @@ pub fn claude_stop(input: &str) -> Option<String> {
     }
 
     let text = report.json.to_string();
-    let mut hasher = DefaultHasher::new();
-    (cwd.display().to_string(), &text).hash(&mut hasher);
-    let fingerprint = format!("{:016x}", hasher.finish());
-    let session: String = input["session_id"]
-        .as_str()
-        .or(input["sessionId"].as_str())
-        .unwrap_or("unknown")
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || "._-".contains(character) {
-                character
-            } else {
-                '_'
-            }
-        })
-        .collect();
     // Incomplete reports without units are recorded too, so each is announced once.
-    if let Some(dir) = state_dir().map(|dir| dir.join("claude-stop")) {
-        let state = dir.join(session);
-        if fs::read_to_string(&state).is_ok_and(|seen| seen.trim() == fingerprint) {
-            return message(notes, None);
-        }
-        // Failing to record state only means the same report may be requested again.
-        let _ =
-            fs::create_dir_all(&dir).and_then(|()| fs::write(&state, format!("{fingerprint}\n")));
+    if let Some(dir) = &state
+        && !first_time(
+            &dir.join("claude-stop"),
+            &session,
+            &format!("{}\0{text}", cwd.display()),
+        )
+    {
+        return message(notes, None);
     }
     if found == 0 {
         return message(
@@ -205,6 +204,20 @@ pub fn claude_stop(input: &str) -> Option<String> {
     Some(output.to_string())
 }
 
+/// Records `content`'s fingerprint as the latest seen in `dir/session`; false when it already was.
+/// Failing to record state only means the same content may be announced again.
+fn first_time(dir: &Path, session: &str, content: &str) -> bool {
+    let mut hasher = DefaultHasher::new();
+    content.hash(&mut hasher);
+    let fingerprint = format!("{:016x}", hasher.finish());
+    let state = dir.join(session);
+    if fs::read_to_string(&state).is_ok_and(|seen| seen.trim() == fingerprint) {
+        return false;
+    }
+    let _ = fs::create_dir_all(dir).and_then(|()| fs::write(&state, format!("{fingerprint}\n")));
+    true
+}
+
 fn shell_quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', r"'\''"))
 }
@@ -215,39 +228,76 @@ fn is_ours(entry: &Value) -> bool {
         .is_some_and(|command| command.ends_with(HOOK_ARGS) && command.contains("rotter"))
 }
 
-fn read_settings(path: &Path) -> Result<Value, String> {
-    match fs::read_to_string(path) {
-        Ok(text) => {
-            let value: Value = serde_json::from_str(&text)
-                .map_err(|error| format!("cannot parse {}: {error}", path.display()))?;
-            if value.is_object() {
-                Ok(value)
-            } else {
-                Err(format!("{} is not a JSON object", path.display()))
-            }
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(json!({})),
-        Err(error) => Err(format!("cannot read {}: {error}", path.display())),
+/// settings.json and its text; only a regular file is read (lstat first, so a FIFO or device
+/// fails instead of blocking). A missing file is an empty object with no text.
+fn read_settings(path: &Path) -> Result<(Value, Option<String>), String> {
+    let Some(mut file) = open_regular(path)? else {
+        return Ok((json!({}), None));
+    };
+    let mut text = String::new();
+    file.read_to_string(&mut text)
+        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    let value: Value = serde_json::from_str(&text)
+        .map_err(|error| format!("cannot parse {}: {error}", path.display()))?;
+    if value.is_object() {
+        Ok((value, Some(text)))
+    } else {
+        Err(format!("{} is not a JSON object", path.display()))
     }
 }
 
-/// Writes through a temporary file so a failure never leaves a truncated settings.json.
+/// Removes a stale regular file at `path`; any other type is an error and is left alone.
+fn remove_stale(path: &Path) -> Result<(), String> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_file() => fs::remove_file(path)
+            .map_err(|error| format!("cannot remove {}: {error}", path.display())),
+        Ok(_) => Err(format!(
+            "{} exists and is not a regular file; remove it yourself",
+            path.display()
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("{}: {error}", path.display())),
+    }
+}
+
+fn backup_path(path: &Path) -> PathBuf {
+    path.with_extension("json.rotter-bak")
+}
+
+/// Writes `settings.json.rotter-bak` (0600) from the bytes already read.
+fn write_backup(path: &Path, text: &str) -> Result<(), String> {
+    let backup = backup_path(path);
+    remove_stale(&backup)?;
+    create_private(&backup)
+        .and_then(|mut file| file.write_all(text.as_bytes()))
+        .map_err(|error| format!("cannot write {}: {error}", backup.display()))
+}
+
+/// Writes through a temporary file so a failure never leaves a truncated settings.json. The
+/// temporary is created 0600 without following symlinks and gets the original's permission bits
+/// through its descriptor before the rename.
 fn write_settings(path: &Path, value: &Value) -> Result<(), String> {
     let text = serde_json::to_string_pretty(value).map_err(|error| error.to_string())? + "\n";
-    let fail = |error: std::io::Error| format!("cannot write {}: {error}", path.display());
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(fail)?;
-    }
-    let old = fs::metadata(path).ok();
-    if old.is_some() {
-        fs::copy(path, path.with_extension("json.rotter-bak")).map_err(fail)?;
-    }
     let temporary = path.with_extension("json.rotter-tmp");
-    fs::write(&temporary, text).map_err(fail)?;
-    if let Some(old) = old {
-        fs::set_permissions(&temporary, old.permissions()).map_err(fail)?;
+    let fail = |error: std::io::Error| format!("cannot write {}: {error}", temporary.display());
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
     }
-    fs::rename(&temporary, path).map_err(fail)
+    let mode = fs::symlink_metadata(path)
+        .ok()
+        .filter(fs::Metadata::is_file)
+        .map(|meta| meta.permissions().mode() & 0o777);
+    remove_stale(&temporary)?;
+    let mut file = create_private(&temporary).map_err(fail)?;
+    file.write_all(text.as_bytes()).map_err(fail)?;
+    if let Some(mode) = mode {
+        file.set_permissions(fs::Permissions::from_mode(mode))
+            .map_err(fail)?;
+    }
+    drop(file);
+    fs::rename(&temporary, path)
+        .map_err(|error| format!("cannot replace {}: {error}", path.display()))
 }
 
 /// Removes our Stop entries and returns how many were removed.
@@ -298,7 +348,7 @@ fn our_entries(settings: &Value) -> impl Iterator<Item = &Value> {
 pub fn install(name: &str, parse_timeout_seconds: u64) -> Result<String, String> {
     target(name)?;
     let path = claude_settings()?;
-    let mut settings = read_settings(&path)?;
+    let (mut settings, original) = read_settings(&path)?;
     let command = hook_command();
     let timeout = hook_timeout(parse_timeout_seconds);
     // Current only when both command and timeout match; otherwise it is replaced.
@@ -322,6 +372,9 @@ pub fn install(name: &str, parse_timeout_seconds: u64) -> Result<String, String>
         .as_array_mut()
         .expect("Stop is an array")
         .push(json!({ "hooks": [{ "type": "command", "command": command, "timeout": timeout }] }));
+    if let Some(original) = &original {
+        write_backup(&path, original)?;
+    }
     write_settings(&path, &settings)?;
     let verb = if replaced > 0 { "updated" } else { "installed" };
     Ok(format!("claude: {verb} Stop hook in {}", path.display()))
@@ -330,30 +383,55 @@ pub fn install(name: &str, parse_timeout_seconds: u64) -> Result<String, String>
 pub fn uninstall(name: &str) -> Result<String, String> {
     target(name)?;
     let path = claude_settings()?;
-    let mut settings = read_settings(&path)?;
-    if remove_ours(&mut settings) == 0 {
-        return Ok(format!("claude: not installed ({})", path.display()));
+    // An unreadable or unparseable settings.json stops here and keeps any backup.
+    let (mut settings, _) = read_settings(&path)?;
+    let mut lines = vec![if remove_ours(&mut settings) == 0 {
+        format!("claude: not installed ({})", path.display())
+    } else {
+        write_settings(&path, &settings)?;
+        format!("claude: removed Stop hook from {}", path.display())
+    }];
+    // unlink never follows a symlink, and only a regular file is removed at all.
+    let backup = backup_path(&path);
+    match fs::symlink_metadata(&backup) {
+        Ok(meta) if meta.is_file() => {
+            fs::remove_file(&backup)
+                .map_err(|error| format!("cannot remove {}: {error}", backup.display()))?;
+            lines.push(format!("claude: removed {}", backup.display()));
+        }
+        Ok(_) => lines.push(format!(
+            "claude: left {} alone: it is not a regular file",
+            backup.display()
+        )),
+        Err(_) => {}
     }
-    write_settings(&path, &settings)?;
-    Ok(format!("claude: removed Stop hook from {}", path.display()))
+    Ok(lines.join("\n"))
 }
 
 /// Reports the hook state; `parse_timeout_seconds` gives the expected timeout.
 pub fn status(parse_timeout_seconds: u64) -> Result<String, String> {
     let path = claude_settings()?;
-    let settings = read_settings(&path)?;
+    let (settings, _) = read_settings(&path)?;
     let command = hook_command();
     let expected = hook_timeout(parse_timeout_seconds);
     let ours: Vec<&Value> = our_entries(&settings).collect();
     let state = match ours.as_slice() {
         [] => "not installed".to_owned(),
         [only] if only["command"].as_str() == Some(command.as_str()) => {
-            if only["timeout"].as_u64() == Some(expected) {
+            let timeout = &only["timeout"];
+            if timeout.as_u64() == Some(expected) {
                 "installed (current)".to_owned()
             } else {
+                let timeout = match timeout {
+                    Value::Null => "no timeout".to_owned(),
+                    value if value.is_u64() => format!("timeout {value}"),
+                    Value::Number(value) => {
+                        format!("timeout {value} (not a positive whole number of seconds)")
+                    }
+                    value => format!("timeout {value} (not a number)"),
+                };
                 format!(
-                    "installed (timeout {}, expected {expected}); run `rotter integration install claude`",
-                    only["timeout"]
+                    "installed ({timeout}, expected {expected}); run `rotter integration install claude`"
                 )
             }
         }

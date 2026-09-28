@@ -157,6 +157,15 @@ impl Grammar {
         let file = library_file(&self.name, &key(source, symbol)?);
         let parsers = parsers_dir(self.repo.as_deref())?;
         let path = parsers.join(file);
+        if let Some(repo) = &self.repo
+            && path.starts_with(repo)
+        {
+            return Err(format!(
+                "library {} is inside the repository {}",
+                path.display(),
+                repo.display()
+            ));
+        }
         let meta = lstat(&path).map_err(|error| format!("{}: {error}", path.display()))?;
         if meta.kind != Kind::File || meta.uid != user() || meta.mode & 0o022 != 0 {
             return Err(format!(
@@ -296,11 +305,16 @@ fn parsers_dir(repo: Option<&Path>) -> Result<PathBuf, String> {
 }
 
 #[cfg(target_os = "macos")]
-const OPEN_FLAGS: i32 = 0x0100 | 0x0004; // O_NOFOLLOW | O_NONBLOCK
+pub(crate) const O_NOFOLLOW: i32 = 0x0100;
+#[cfg(target_os = "macos")]
+const O_NONBLOCK: i32 = 0x0004;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-const OPEN_FLAGS: i32 = 0o400000 | 0o4000;
+pub(crate) const O_NOFOLLOW: i32 = 0o400000;
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-const OPEN_FLAGS: i32 = 0o100000 | 0o4000;
+pub(crate) const O_NOFOLLOW: i32 = 0o100000;
+#[cfg(target_os = "linux")]
+const O_NONBLOCK: i32 = 0o4000;
+const OPEN_FLAGS: i32 = O_NOFOLLOW | O_NONBLOCK;
 // ponytail: flag values per target without a libc dependency; add a target's values to port.
 #[cfg(not(any(
     target_os = "macos",
@@ -310,6 +324,45 @@ const OPEN_FLAGS: i32 = 0o100000 | 0o4000;
     )
 )))]
 compile_error!("O_NOFOLLOW/O_NONBLOCK values are not known for this target");
+
+/// Opens `path` for reading only if lstat shows a regular file; the open never follows a final
+/// symlink or blocks on a FIFO, and the descriptor is checked again. None when it is missing.
+pub(crate) fn open_regular(path: &Path) -> Result<Option<fs::File>, String> {
+    let fail = |error: std::io::Error| format!("cannot read {}: {error}", path.display());
+    let not_regular = || format!("{} is not a regular file", path.display());
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(fail(error)),
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err(format!(
+                "{} is a symbolic link; rotter does not read or write through links (edit the \
+                 link's target yourself, or replace the link with a regular file)",
+                path.display()
+            ));
+        }
+        Ok(meta) if !meta.is_file() => return Err(not_regular()),
+        Ok(_) => {}
+    }
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(OPEN_FLAGS)
+        .open(path)
+        .map_err(fail)?;
+    if !file.metadata().map_err(fail)?.is_file() {
+        return Err(not_regular());
+    }
+    Ok(Some(file))
+}
+
+/// Creates `path` with mode 0600; an existing entry, including a symlink, is an error.
+pub(crate) fn create_private(path: &Path) -> std::io::Result<fs::File> {
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(O_NOFOLLOW)
+        .open(path)
+}
 
 /// A compile input may be used when it is a regular file owned by the user or root that others
 /// cannot write.

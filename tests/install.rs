@@ -454,6 +454,38 @@ fn cache_inside_the_analysed_repository_is_not_loaded() {
 }
 
 #[test]
+fn library_inside_the_analysed_repository_is_not_loaded() {
+    let world = World::new("repolib");
+    let src = world.root.join("lua-src");
+    copy_lua(&src);
+    world.write_config(&lua2(&src));
+    ok(&world.install(&["lua2"]));
+    // The cache base is outside, but the repository is `<cache>/rotter`, holding parsers/.
+    let rotter = world.parsers().parent().unwrap().to_owned();
+    fs::write(rotter.join("a.lua2"), LUA_FILE).unwrap();
+    git(&rotter, &["init", "-q", "-b", "main"]);
+    git(&rotter, &["add", "a.lua2"]);
+    git(&rotter, &["commit", "-q", "-m", "c"]);
+    let side = world.side(&rotter, "a.lua2", &[]);
+    assert_eq!(side["status"], "parser_not_installed", "{side}");
+    assert!(
+        side["detail"]
+            .as_str()
+            .unwrap()
+            .contains("inside the repository"),
+        "{side}"
+    );
+    // Same for a repository rooted at parsers/ itself.
+    let parsers = world.parsers();
+    fs::remove_dir_all(rotter.join(".git")).unwrap();
+    fs::rename(rotter.join("a.lua2"), parsers.join("a.lua2")).unwrap();
+    git(&parsers, &["init", "-q", "-b", "main"]);
+    git(&parsers, &["add", "a.lua2"]);
+    git(&parsers, &["commit", "-q", "-m", "c"]);
+    assert_eq!(world.status(&parsers, "a.lua2"), "parser_not_installed");
+}
+
+#[test]
 fn changed_header_symbol_or_location_needs_a_reinstall() {
     let world = World::new("key");
     let src = world.root.join("lua-src");

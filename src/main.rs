@@ -19,8 +19,9 @@ const USAGE: &str = "usage: rotter --skill
 
 --skill prints the comment review skill for coding agents (it matches this binary's version).
 integration install claude registers `rotter hook claude-stop` as a Claude Code Stop hook in
-$CLAUDE_CONFIG_DIR/settings.json (default ~/.claude), keeping a .rotter-bak copy. Its timeout is
-max(60, parse_timeout_seconds + 30); re-run it after changing parse_timeout_seconds.
+$CLAUDE_CONFIG_DIR/settings.json (default ~/.claude), keeping a .rotter-bak copy that uninstall
+removes. Its timeout is max(60, parse_timeout_seconds + 30); re-run it after changing
+parse_timeout_seconds.
 
 parser install fetches each enabled external grammar at its pinned commit (or copies its local
 path), compiles it with cc and caches it under $XDG_CACHE_HOME/rotter/parsers (default
