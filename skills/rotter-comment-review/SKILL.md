@@ -61,6 +61,9 @@ note to the user; do not edit their config or environment yourself.
   - `parse_timeout`: parsing took longer than `parse_timeout_seconds` (rotter config, default
     60), or the hook's time budget ran out before or during this file. Report the file as not
     checked; you may rerun `rotter extract` limited to it with `-- <path>`.
+  - `non_utf8_path`: the path is not valid UTF-8, so `path` shows replacement characters and
+    may read the same as another file; `detail` gives the exact bytes, escaped. Report the file
+    as not checked and name it by that escaped form.
   - `partial` is covered above: usable, with care around syntax errors.
 - `units[]`: a changed declaration, function, binding, or config key.
   `changed_lines` are lines changed on that side; `gaps_between_lines` marks where lines

@@ -933,6 +933,53 @@ fn omitted_reference_units_are_counted_once_each() {
 }
 
 #[test]
+fn non_utf8_paths_are_reported_by_their_bytes_and_not_analysed() {
+    use std::io::Write;
+    let repo = Repo::new();
+    repo.write("seed.go", "package a\n\n// F runs.\nfunc F() {}\n");
+    let oid = repo
+        .git(&["hash-object", "-w", "seed.go"])
+        .trim()
+        .to_owned();
+    // macOS rejects such names on disk, so they live only in the index.
+    let mut entries = Vec::new();
+    for byte in [0x80u8, 0x81] {
+        entries.extend_from_slice(format!("100644 {oid}\t").as_bytes());
+        entries.extend_from_slice(&[b'a', byte, b'.', b'g', b'o', 0]);
+    }
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(&repo.0)
+        .args(["update-index", "-z", "--index-info"])
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(&entries).unwrap();
+    assert!(child.wait().unwrap().success());
+    let report = repo.extract(Mode::Staged, false);
+    assert!(!report.complete);
+    let details: Vec<&str> = report
+        .json
+        .get("files")
+        .as_arr()
+        .iter()
+        .filter(|file| file.get("new_path").as_str() == Some("a\u{fffd}.go"))
+        .map(|file| {
+            let after = file.get("after");
+            assert_eq!(
+                after.get("status").as_str(),
+                Some("non_utf8_path"),
+                "{after}"
+            );
+            after.get("detail").as_str().unwrap()
+        })
+        .collect();
+    assert_eq!(details, ["path bytes: a\\x80.go", "path bytes: a\\x81.go"]);
+}
+
+#[test]
 fn long_names_still_pull_in_their_users() {
     let repo = Repo::new();
     let long = format!("maxAttempts{}", "X".repeat(80));

@@ -53,7 +53,7 @@ sh（以 Bash grammar 解析）、yaml、toml、rust，以及設定檔中已啟�
 內建副檔名／shebang → 外部語言的 `filenames` → 外部語言的 `extensions`。
 
 必須明確選一種模式，不會自動猜基準。退出碼：`0` 完整、`1` 已輸出 JSON 但有檔案未能完整分析
-（語法錯誤、非 UTF-8、含 NUL、zsh／ksh 腳本、衝突中的路徑等）、`2` 參數或 Git 錯誤。
+（語法錯誤、非 UTF-8 內容或路徑、含 NUL、zsh／ksh 腳本、衝突中的路徑等）、`2` 參數或 Git 錯誤。
 有語法錯誤時狀態為 `partial`：仍輸出能解析的單元，與錯誤重疊者標 `overlaps_syntax_error`。
 
 `--full` 以「每則註解」為起點，列出它所屬或說明的單元，每則註解只出現一次；沒有 before 側，
@@ -158,7 +158,9 @@ rotter integration status --pretty --color=never
 不另外處理）。`--pretty` 的每個值都經過同一個清理函式：所有控制字元（C0、DEL、C1）、bidi 控制字元
 （U+202A–U+202E、U+2066–U+2069、U+200E、U+200F、U+061C）與零寬字元（U+200B–U+200D、U+2060、
 U+FEFF）顯示為 `\u{…}`；單行欄位的換行與 tab 也跳脫，程式碼保留 tab、CRLF 的 CR 不顯示、其他 CR
-跳脫。stderr 的 `rotter: <訊息>` 也經過同樣處理。非 UTF-8 路徑以替代字元顯示，可能與其他路徑看起來相同。
+跳脫。stderr 的 `rotter: <訊息>` 也經過同樣處理。非 UTF-8 路徑在 `path` 中以替代字元顯示，
+可能與其他路徑看起來相同；這種檔案不分析，狀態為 `non_utf8_path`，`detail` 以跳脫形式列出原始
+bytes（如 `a\x80.go`）。
 
 ## 設定檔與外部 parser（opt-in）
 
