@@ -8,6 +8,7 @@ use crate::config::{self, Config, Kind, Untrusted, absolute_var, lstat, resolve_
 use crate::grammar::{
     Grammar, git_key, inputs_key, library_file, private_dir, read_inputs, trusted_cache_base,
 };
+use crate::json::Json;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::Write;
@@ -495,8 +496,50 @@ fn install_one(grammar: &Grammar) -> Result<PathBuf, String> {
     Ok(target)
 }
 
+/// One grammar of `rotter parser install`: `installed`, `failed` or `skipped`.
+#[derive(Debug)]
+pub struct ParserResult {
+    pub name: String,
+    pub result: &'static str,
+    pub path: Option<String>,
+    pub detail: Option<String>,
+}
+
+/// `rotter parser install` (`rotter.parser_install/1`). Installing stops at the first failure,
+/// which is `error` (the later grammars are `skipped`); the document is printed either way.
+#[derive(Debug)]
+pub struct ParserInstall {
+    pub parsers: Vec<ParserResult>,
+    /// The code-execution notice, whenever anything was installed.
+    pub notes: Vec<String>,
+    pub error: Option<String>,
+}
+
+impl ParserInstall {
+    pub fn json(&self) -> Json {
+        let parsers = self
+            .parsers
+            .iter()
+            .map(|parser| {
+                Json::Obj(vec![
+                    ("name", parser.name.as_str().into()),
+                    ("result", parser.result.into()),
+                    ("path", parser.path.clone().into()),
+                    ("detail", parser.detail.clone().into()),
+                ])
+            })
+            .collect();
+        Json::Obj(vec![
+            ("tool", "rotter".into()),
+            ("schema", "rotter.parser_install/1".into()),
+            ("parsers", Json::Arr(parsers)),
+            ("notes", self.notes.clone().into()),
+        ])
+    }
+}
+
 /// `rotter parser install [<name>...]`: every enabled external grammar, or the named ones.
-pub fn install(config: &Config, names: &[String]) -> Result<String, String> {
+pub fn install(config: &Config, names: &[String]) -> Result<ParserInstall, String> {
     let chosen: Vec<&Arc<Grammar>> = if names.is_empty() {
         config.externals.iter().collect()
     } else {
@@ -520,27 +563,97 @@ pub fn install(config: &Config, names: &[String]) -> Result<String, String> {
     if chosen.is_empty() {
         return Err("no external languages are enabled in config.toml".to_owned());
     }
+    let mut done = ParserInstall {
+        parsers: Vec::new(),
+        notes: Vec::new(),
+        error: None,
+    };
     for grammar in chosen {
-        let path = install_one(grammar).map_err(|error| format!("{}: {error}", grammar.name()))?;
-        println!("{}: installed {}", grammar.name(), path.display());
+        let name = grammar.name().to_owned();
+        let (result, path, detail) = if done.error.is_some() {
+            ("skipped", None, None)
+        } else {
+            match install_one(grammar) {
+                Ok(path) => ("installed", Some(path.display().to_string()), None),
+                Err(error) => {
+                    done.error = Some(format!("{name}: {error}"));
+                    ("failed", None, Some(error))
+                }
+            }
+        };
+        done.parsers.push(ParserResult {
+            name,
+            result,
+            path,
+            detail,
+        });
     }
-    Ok(TRUST.to_owned())
+    if done
+        .parsers
+        .iter()
+        .any(|parser| parser.result == "installed")
+    {
+        done.notes.push(TRUST.to_owned());
+    }
+    Ok(done)
+}
+
+/// One grammar of `rotter parser list`: an enabled one, or a registry entry not enabled.
+#[derive(Debug)]
+pub struct ParserEntry {
+    pub name: String,
+    pub enabled: bool,
+    pub installed: bool,
+    pub path: Option<String>,
+    pub source: Option<String>,
+    pub detail: Option<String>,
+}
+
+/// `rotter.parsers/1`.
+pub fn list_json(parsers: &[ParserEntry]) -> Json {
+    let parsers = parsers
+        .iter()
+        .map(|parser| {
+            Json::Obj(vec![
+                ("name", parser.name.as_str().into()),
+                ("enabled", parser.enabled.into()),
+                ("installed", parser.installed.into()),
+                ("path", parser.path.clone().into()),
+                ("source", parser.source.clone().into()),
+                ("detail", parser.detail.clone().into()),
+            ])
+        })
+        .collect();
+    Json::Obj(vec![
+        ("tool", "rotter".into()),
+        ("schema", "rotter.parsers/1".into()),
+        ("parsers", Json::Arr(parsers)),
+    ])
 }
 
 /// `rotter parser list`: enabled grammars with their state, then registry entries not enabled.
-pub fn list(config: &Config) -> String {
-    let mut lines = Vec::new();
+pub fn list(config: &Config) -> Vec<ParserEntry> {
+    let mut parsers = Vec::new();
     for grammar in &config.externals {
         let source = match grammar.external_source() {
-            Some((ExternalSource::Git { url, revision, .. }, _)) => format!("{url} {revision}"),
-            Some((ExternalSource::Path(path), _)) => path.display().to_string(),
-            None => String::new(),
+            Some((ExternalSource::Git { url, revision, .. }, _)) => {
+                Some(format!("{url} {revision}"))
+            }
+            Some((ExternalSource::Path(path), _)) => Some(path.display().to_string()),
+            None => None,
         };
-        let state = match grammar.library() {
-            Ok(path) => format!("installed\t{}", path.display()),
-            Err(why) => format!("not installed\t{why}"),
+        let (path, detail) = match grammar.library() {
+            Ok(path) => (Some(path.display().to_string()), None),
+            Err(why) => (None, Some(why.to_string())),
         };
-        lines.push(format!("{}\t{state}\t{source}", grammar.name()));
+        parsers.push(ParserEntry {
+            name: grammar.name().to_owned(),
+            enabled: true,
+            installed: path.is_some(),
+            path,
+            source,
+            detail,
+        });
     }
     for name in config::registry_names() {
         if !config
@@ -548,12 +661,17 @@ pub fn list(config: &Config) -> String {
             .iter()
             .any(|grammar| grammar.name() == name)
         {
-            lines.push(format!(
-                "{name}\tavailable\tadd {name:?} to languages in config.toml"
-            ));
+            parsers.push(ParserEntry {
+                name: name.to_string(),
+                enabled: false,
+                installed: false,
+                path: None,
+                source: None,
+                detail: Some(format!("add {name:?} to languages in config.toml")),
+            });
         }
     }
-    lines.join("\n")
+    parsers
 }
 
 #[cfg(test)]

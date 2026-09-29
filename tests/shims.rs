@@ -6,7 +6,7 @@
 
 mod common;
 
-use common::{rotter, set_mode, stdout, temp};
+use common::{document, result, rotter, set_mode, status_host, stdout, temp};
 use rotter::integration::render_shim;
 use serde_json::Value;
 use std::fs;
@@ -58,12 +58,15 @@ fn paths(root: &Path, host: &str) -> (PathBuf, PathBuf) {
     }
 }
 
-fn status_line(root: &Path, host: &str) -> String {
+/// The host's `(state, detail)` in `status`.
+fn status_of(root: &Path, host: &str) -> (String, String) {
     let (_, text) = integration(root, &["status"]);
-    text.lines()
-        .find(|line| line.starts_with(&format!("{host}: ")))
-        .unwrap()
-        .to_owned()
+    let found = status_host(&text, host);
+    assert_eq!(found["support"], "experimental", "{text}");
+    (
+        found["state"].as_str().unwrap().to_owned(),
+        found["detail"].as_str().unwrap().to_owned(),
+    )
 }
 
 #[test]
@@ -78,7 +81,22 @@ fn shims_install_exactly_their_render_and_leave_foreign_code_alone() {
         set_mode(&dir, 0o700);
         let (code, text) = integration(&root, &["install", host]);
         assert_eq!(code, 0, "{text}");
-        assert!(text.contains(&shim.display().to_string()), "{text}");
+        let done = document(&text, "rotter.integration/1");
+        assert_eq!(done["result"], "installed", "{text}");
+        assert!(
+            done["path"]
+                .as_str()
+                .unwrap()
+                .ends_with(&shim.display().to_string()),
+            "{text}"
+        );
+        assert!(
+            done["notes"][0]
+                .as_str()
+                .unwrap()
+                .ends_with("loads it at its next start"),
+            "{text}"
+        );
         // The default parse timeout (60) gives 90 seconds.
         let rendered = render_shim(host, EXE, 90).unwrap();
         assert_eq!(fs::read_to_string(&shim).unwrap(), rendered);
@@ -86,27 +104,28 @@ fn shims_install_exactly_their_render_and_leave_foreign_code_alone() {
         assert_eq!(mode(shim.parent().unwrap()), 0o700);
         let (code, text) = integration(&root, &["install", host]);
         assert_eq!(
-            (code, text.contains("already installed")),
-            (0, true),
+            (code, result(&text).as_str()),
+            (0, "already_installed"),
             "{text}"
         );
-        let line = status_line(&root, host);
-        assert!(line.contains("installed (current)"), "{line}");
-        assert!(line.ends_with("[experimental]"), "{line}");
+        let (state, detail) = status_of(&root, host);
+        assert_eq!(
+            (state.as_str(), detail.as_str()),
+            ("installed", "installed (current)")
+        );
         // Another rotter binary's shim: named by status, replaced by install.
         fs::write(&shim, render_shim(host, "/else/rotter", 90).unwrap()).unwrap();
-        let line = status_line(&root, host);
-        assert!(
-            line.contains("installed for another binary: /else/rotter"),
-            "{line}"
-        );
+        let (state, detail) = status_of(&root, host);
+        assert_eq!(state, "other_binary");
+        assert_eq!(detail, "installed for another binary: /else/rotter");
         let (code, text) = integration(&root, &["install", host]);
-        assert_eq!((code, text.contains("updated")), (0, true), "{text}");
+        assert_eq!((code, result(&text).as_str()), (0, "updated"), "{text}");
         assert_eq!(fs::read_to_string(&shim).unwrap(), rendered);
         // A different timeout is a mismatch.
         fs::write(&shim, render_shim(host, EXE, 61).unwrap()).unwrap();
-        let line = status_line(&root, host);
-        assert!(line.contains("timeout 61, expected 90"), "{line}");
+        let (state, detail) = status_of(&root, host);
+        assert_eq!(state, "mismatch");
+        assert!(detail.contains("timeout 61, expected 90"), "{detail}");
         // Foreign code at rotter's path: never rewritten or removed.
         let foreign = rendered.replace("MAX_REQUESTS = 2", "MAX_REQUESTS = 9");
         fs::write(&shim, &foreign).unwrap();
@@ -116,10 +135,11 @@ fn shims_install_exactly_their_render_and_leave_foreign_code_alone() {
             assert!(text.contains("foreign code at rotter's path"), "{text}");
             assert_eq!(fs::read_to_string(&shim).unwrap(), foreign);
         }
-        let line = status_line(&root, host);
+        let (state, detail) = status_of(&root, host);
+        assert_eq!(state, "foreign");
         assert!(
-            line.contains("foreign code at rotter's path, auto-loaded by"),
-            "{line}"
+            detail.starts_with("foreign code at rotter's path, auto-loaded by"),
+            "{detail}"
         );
         // Unsafe permissions and a symlink are refused and left as they are.
         fs::write(&shim, &rendered).unwrap();
@@ -153,10 +173,14 @@ fn shims_install_exactly_their_render_and_leave_foreign_code_alone() {
             .collect();
         assert_eq!(names.len(), 1, "{names:?}");
         let (code, text) = integration(&root, &["uninstall", host]);
-        assert_eq!((code, text.contains("removed")), (0, true), "{text}");
+        assert_eq!((code, result(&text).as_str()), (0, "removed"), "{text}");
         assert!(!shim.exists());
         let (code, text) = integration(&root, &["uninstall", host]);
-        assert_eq!((code, text.contains("not installed")), (0, true), "{text}");
+        assert_eq!(
+            (code, result(&text).as_str()),
+            (0, "not_installed"),
+            "{text}"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 }

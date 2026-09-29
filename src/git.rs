@@ -353,12 +353,13 @@ impl Git {
         Self::new(&walk, Scratch::new(&sources.temp)?, &sources, false)
     }
 
-    /// `<resolved path> (<git version>)`, or why that git is not used, for `status`.
-    pub(crate) fn summary(&self) -> String {
-        match self.class() {
-            Ok((_, version)) => format!("{} ({version})", self.program.display()),
-            Err(why) => format!("{}: {why}", self.program.display()),
-        }
+    /// The resolved path and its `git version` text, or why that git is not used, for `status`.
+    pub(crate) fn summary(&self) -> (String, String) {
+        let detail = match self.class() {
+            Ok((_, version)) => version.to_owned(),
+            Err(why) => why,
+        };
+        (self.program.display().to_string(), detail)
     }
 
     /// The class and `git version` text; below the minimum (or unrecognised) is an error.

@@ -1,4 +1,5 @@
 use rotter::config::{self, Config, Sources};
+use rotter::json::Json;
 use rotter::{Git, Mode, Options, extract_with, hosts, install, integration, toplevel};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -50,7 +51,12 @@ first matching --lang wins.
 Config: $XDG_CONFIG_HOME/rotter/config.toml (default ~/.config) sets parse_timeout_seconds
 (default 60), languages = [..] registry grammars to enable, [language.<name>] external grammars
 and [overrides] <glob> = <language>.
-Exit status: 0 complete, 1 printed but incomplete (unreadable, unparsed or unsupported files), 2 error.";
+Exit status: 0 complete, 1 printed but incomplete (unreadable, unparsed or unsupported files), 2 error.
+
+Output is one indented JSON document on stdout (extract: rotter.extract.poc/0; integration
+status: rotter.status/1; install and uninstall: rotter.integration/1; parser list:
+rotter.parsers/1; parser install: rotter.parser_install/1). Errors are `rotter: <message>` on
+stderr with nothing on stdout, except that a failed parser install still prints its document.";
 
 /// `--lang` values, resolved once the config says which external languages exist.
 type LangArgs = Vec<(String, String)>;
@@ -152,7 +158,8 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         };
     };
-    let result = match args
+    let show = |json: &Json| format!("{json}\n");
+    let result: Option<Result<(String, Option<String>), String>> = match args
         .iter()
         .map(String::as_str)
         .collect::<Vec<_>>()
@@ -189,7 +196,11 @@ fn main() -> ExitCode {
         }
         ["integration", "install", name] => Some(
             cli_config(None)
-                .and_then(|config| integration::install(name, config.parse_timeout_seconds)),
+                .and_then(|config| integration::install(name, config.parse_timeout_seconds))
+                .map(|done| {
+                    let text = show(&done.json());
+                    (text, None)
+                }),
         ),
         ["parser", "install", names @ ..] => {
             Some(config::load(None, &Sources::from_env()).and_then(|loaded| {
@@ -198,26 +209,45 @@ fn main() -> ExitCode {
                     return Err(note);
                 }
                 let names: Vec<String> = names.iter().map(|name| (*name).to_owned()).collect();
-                install::install(&loaded.config, &names)
+                let done = install::install(&loaded.config, &names)?;
+                // A failure after the first grammar keeps the document of what was done.
+                let text = show(&done.json());
+                Ok((text, done.error))
             }))
         }
-        ["parser", "list"] => Some(cli_config(None).map(|config| install::list(&config))),
-        ["integration", "uninstall", name] => Some(integration::uninstall(name)),
+        ["parser", "list"] => Some(cli_config(None).map(|config| {
+            let parsers = install::list(&config);
+            let text = show(&install::list_json(&parsers));
+            (text, None)
+        })),
+        ["integration", "uninstall", name] => Some(integration::uninstall(name).map(|done| {
+            let text = show(&done.json());
+            (text, None)
+        })),
         ["integration", "status"] => Some(
-            cli_config(None).and_then(|config| integration::status(config.parse_timeout_seconds)),
+            cli_config(None)
+                .and_then(|config| integration::status(config.parse_timeout_seconds))
+                .map(|status| {
+                    let text = show(&status.json());
+                    (text, None)
+                }),
         ),
         _ => None,
     };
     if let Some(result) = result {
-        return match result {
-            Ok(message) => {
-                println!("{message}");
-                ExitCode::SUCCESS
+        let error = match result {
+            Ok((text, error)) => {
+                print!("{text}");
+                error
             }
-            Err(error) => {
+            Err(error) => Some(error),
+        };
+        return match error {
+            Some(error) => {
                 eprintln!("rotter: {error}");
                 ExitCode::from(2)
             }
+            None => ExitCode::SUCCESS,
         };
     }
     if args.iter().any(|arg| arg == "-h" || arg == "--help") {
@@ -244,14 +274,14 @@ fn main() -> ExitCode {
     }
     match extract_with(&git, &dir, &options) {
         Ok(report) => {
-            let text = report.json.to_string();
+            let text = show(&report.json);
             if text.len() > 5 << 20 {
                 eprintln!(
                     "rotter: report is {} MiB; consider limiting it with -- <pathspec>",
                     text.len() >> 20
                 );
             }
-            println!("{text}");
+            print!("{text}");
             ExitCode::from(if report.complete { 0 } else { 1 })
         }
         Err(error) => {

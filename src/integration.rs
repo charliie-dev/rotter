@@ -1219,18 +1219,18 @@ fn owned_handler<'a>(host: &Host, document: &'a Value) -> Option<&'a Value> {
 /// The handler of an installed owned file; None when there is none. It must be a regular file
 /// (never followed, no FIFO block) owned by the user that group and others cannot write, holding
 /// a rotter-generated document; anything else is an error and the file is left alone.
-fn owned_installed(host: &Host, path: &Path) -> Result<Option<Value>, String> {
+fn owned_installed(host: &Host, path: &Path) -> Result<Option<Value>, Refusal> {
     let Some(mut file) = open_regular(path)? else {
         return Ok(None);
     };
     let fail = |error: io::Error| format!("cannot read {}: {error}", path.display());
     let meta = file.metadata().map_err(fail)?;
     if meta.uid() != user() || meta.mode() & 0o022 != 0 {
-        return Err(format!(
+        return Err(Refusal::Error(format!(
             "{} has unsafe permissions (it must be yours and not writable by group or others); \
              left alone",
             path.display()
-        ));
+        )));
     }
     let mut text = String::new();
     file.read_to_string(&mut text).map_err(fail)?;
@@ -1239,11 +1239,71 @@ fn owned_installed(host: &Host, path: &Path) -> Result<Option<Value>, String> {
         .as_ref()
         .and_then(|document| owned_handler(host, document))
         .map(|handler| Some(handler.clone()))
-        .ok_or_else(|| format!("{} is not managed by rotter; left alone", path.display()))
+        .ok_or_else(|| {
+            Refusal::Foreign(format!(
+                "{} is not managed by rotter; left alone",
+                path.display()
+            ))
+        })
+}
+
+/// Why an owned file or shim is left alone: `Foreign` when it is not rotter's at all.
+enum Refusal {
+    Foreign(String),
+    Error(String),
+}
+
+impl From<String> for Refusal {
+    fn from(why: String) -> Self {
+        Refusal::Error(why)
+    }
+}
+
+impl From<Refusal> for String {
+    fn from(refusal: Refusal) -> Self {
+        match refusal {
+            Refusal::Foreign(why) | Refusal::Error(why) => why,
+        }
+    }
+}
+
+/// What `integration install` or `uninstall` did to one host (`rotter.integration/1`).
+#[derive(Debug)]
+pub struct IntegrationResult {
+    pub host: &'static str,
+    pub action: &'static str,
+    /// `installed`, `already_installed`, `updated`, `removed` or `not_installed`.
+    pub result: &'static str,
+    pub path: String,
+    pub notes: Vec<String>,
+}
+
+impl IntegrationResult {
+    fn new(host: &Host, action: &'static str, result: &'static str, path: &Path) -> Self {
+        Self {
+            host: host.id,
+            action,
+            result,
+            path: path.display().to_string(),
+            notes: Vec::new(),
+        }
+    }
+
+    pub fn json(&self) -> Json {
+        Json::Obj(vec![
+            ("tool", "rotter".into()),
+            ("schema", "rotter.integration/1".into()),
+            ("host", self.host.into()),
+            ("action", self.action.into()),
+            ("result", self.result.into()),
+            ("path", self.path.as_str().into()),
+            ("notes", self.notes.clone().into()),
+        ])
+    }
 }
 
 /// Installs the host's hook with `timeout` sized for `parse_timeout_seconds`.
-pub fn install(name: &str, parse_timeout_seconds: u64) -> Result<String, String> {
+pub fn install(name: &str, parse_timeout_seconds: u64) -> Result<IntegrationResult, String> {
     let host = target(name)?;
     let sources = Sources::from_env();
     // Checked before anything is written: the host runs this path on every Stop.
@@ -1273,7 +1333,7 @@ struct Shim {
 /// FIFO block) owned by the user that group and others cannot write, byte-equal to a render of
 /// one of the templates rotter has shipped; anything else is foreign code the host loads, an
 /// error, and left alone.
-fn shim_installed(host: &Host, path: &Path) -> Result<Option<Shim>, String> {
+fn shim_installed(host: &Host, path: &Path) -> Result<Option<Shim>, Refusal> {
     let Install::OwnedShim { templates, .. } = host.install else {
         unreachable!("a shim host");
     };
@@ -1283,18 +1343,18 @@ fn shim_installed(host: &Host, path: &Path) -> Result<Option<Shim>, String> {
     let fail = |error: io::Error| format!("cannot read {}: {error}", path.display());
     let meta = file.metadata().map_err(fail)?;
     if meta.uid() != user() || meta.mode() & 0o022 != 0 {
-        return Err(format!(
+        return Err(Refusal::Error(format!(
             "{} has unsafe permissions (it must be yours and not writable by group or others); \
              left alone",
             path.display()
-        ));
+        )));
     }
     let mut text = String::new();
     match file.read_to_string(&mut text) {
         // Not UTF-8 is not rotter's either.
         Ok(_) => {}
         Err(error) if error.kind() == io::ErrorKind::InvalidData => {}
-        Err(error) => return Err(fail(error)),
+        Err(error) => return Err(fail(error).into()),
     }
     templates
         .iter()
@@ -1309,16 +1369,21 @@ fn shim_installed(host: &Host, path: &Path) -> Result<Option<Shim>, String> {
         })
         .map(Some)
         .ok_or_else(|| {
-            format!(
+            Refusal::Foreign(format!(
                 "foreign code at rotter's path, auto-loaded by {}: {}; left alone",
                 host.label,
                 path.display()
-            )
+            ))
         })
 }
 
 /// Writes the host's shim, which rotter owns entirely (no backup).
-fn install_shim(host: &Host, sources: &Sources, exe: &str, timeout: u64) -> Result<String, String> {
+fn install_shim(
+    host: &Host,
+    sources: &Sources,
+    exe: &str,
+    timeout: u64,
+) -> Result<IntegrationResult, String> {
     let Install::OwnedShim { templates, .. } = host.install else {
         unreachable!("a shim host");
     };
@@ -1331,25 +1396,23 @@ fn install_shim(host: &Host, sources: &Sources, exe: &str, timeout: u64) -> Resu
         .as_ref()
         .is_some_and(|shim| shim.version == 0 && shim.exe == exe && shim.timeout == timeout)
     {
-        return Ok(format!(
-            "{}: already installed ({})",
-            host.id,
-            path.display()
+        return Ok(IntegrationResult::new(
+            host,
+            "install",
+            "already_installed",
+            &path,
         ));
     }
     replace_file(&path, &text, Some(0o600), None)?;
-    let verb = if installed.is_some() {
+    let result = if installed.is_some() {
         "updated"
     } else {
         "installed"
     };
-    Ok(format!(
-        "{}: {verb} {} shim in {}; {} loads it at its next start",
-        host.id,
-        host.event,
-        path.display(),
-        host.label
-    ))
+    let mut done = IntegrationResult::new(host, "install", result, &path);
+    done.notes
+        .push(format!("{} loads it at its next start", host.label));
+    Ok(done)
 }
 
 /// The shim's path when its directory exists under a trusted host dir.
@@ -1363,40 +1426,61 @@ fn shim_path(host: &Host, sources: &Sources) -> Result<(Option<PathBuf>, PathBuf
 }
 
 /// Unlinks the shim only when [`shim_installed`] accepts it.
-fn uninstall_shim(host: &Host, sources: &Sources) -> Result<String, String> {
+fn uninstall_shim(host: &Host, sources: &Sources) -> Result<IntegrationResult, String> {
     let (path, shown) = shim_path(host, sources)?;
     let Some(path) = path else {
-        return Ok(format!("{}: not installed ({})", host.id, shown.display()));
+        return Ok(IntegrationResult::new(
+            host,
+            "uninstall",
+            "not_installed",
+            &shown,
+        ));
     };
     if shim_installed(host, &path)?.is_none() {
-        return Ok(format!("{}: not installed ({})", host.id, path.display()));
+        return Ok(IntegrationResult::new(
+            host,
+            "uninstall",
+            "not_installed",
+            &path,
+        ));
     }
     fs::remove_file(&path).map_err(|error| format!("cannot remove {}: {error}", path.display()))?;
-    Ok(format!(
-        "{}: removed {} shim {}",
-        host.id,
-        host.event,
-        path.display()
-    ))
+    Ok(IntegrationResult::new(host, "uninstall", "removed", &path))
 }
 
-fn shim_status(host: &Host, sources: &Sources, exe: &str, expected: u64) -> Result<String, String> {
+/// One host's state for `status`: the state, today's wording of it and the file it is about.
+type HostState = (&'static str, String, PathBuf);
+
+fn shim_status(
+    host: &Host,
+    sources: &Sources,
+    exe: &str,
+    expected: u64,
+) -> Result<HostState, Refusal> {
     let (path, shown) = shim_path(host, sources)?;
     let Some(path) = path else {
-        return Ok(format!("not installed ({})", shown.display()));
+        return Ok(("not_installed", "not installed".to_owned(), shown));
     };
     let install = format!("run `rotter integration install {}`", host.id);
-    let state = match shim_installed(host, &path)? {
-        None => "not installed".to_owned(),
-        Some(shim) if shim.exe != exe => format!("installed for another binary: {}", shim.exe),
-        Some(shim) if shim.version > 0 => format!("installed (older shim); {install}"),
-        Some(shim) if shim.timeout != expected => format!(
-            "installed (timeout {}, expected {expected}); {install}",
-            shim.timeout
+    let (state, detail) = match shim_installed(host, &path)? {
+        None => ("not_installed", "not installed".to_owned()),
+        Some(shim) if shim.exe != exe => (
+            "other_binary",
+            format!("installed for another binary: {}", shim.exe),
         ),
-        Some(_) => "installed (current)".to_owned(),
+        Some(shim) if shim.version > 0 => {
+            ("mismatch", format!("installed (older shim); {install}"))
+        }
+        Some(shim) if shim.timeout != expected => (
+            "mismatch",
+            format!(
+                "installed (timeout {}, expected {expected}); {install}",
+                shim.timeout
+            ),
+        ),
+        Some(_) => ("installed", "installed (current)".to_owned()),
     };
-    Ok(format!("{state} ({})", path.display()))
+    Ok((state, detail, path))
 }
 
 /// Merges one entry into the host's shared file, keeping a `.rotter-bak` of the bytes read.
@@ -1405,7 +1489,7 @@ fn install_merged(
     sources: &Sources,
     exe: &str,
     timeout: u64,
-) -> Result<String, String> {
+) -> Result<IntegrationResult, String> {
     let configured = host_dir(host, sources)?;
     let display = hook_file(host, &configured);
     let dir = existing_home(host, &configured)?;
@@ -1425,10 +1509,11 @@ fn install_merged(
         })
         .collect::<Vec<_>>();
     if current == [true] {
-        return Ok(format!(
-            "{}: already installed ({})",
-            host.id,
-            display.display()
+        return Ok(IntegrationResult::new(
+            host,
+            "install",
+            "already_installed",
+            &display,
         ));
     }
     let mut entry = serde_json::Map::new();
@@ -1468,13 +1553,8 @@ fn install_merged(
         write_backup(&path, original)?;
     }
     write_merged(&path, &settings, original.as_deref())?;
-    let verb = if replaced > 0 { "updated" } else { "installed" };
-    Ok(format!(
-        "{}: {verb} {} hook in {}",
-        host.id,
-        host.event,
-        display.display()
-    ))
+    let result = if replaced > 0 { "updated" } else { "installed" };
+    Ok(IntegrationResult::new(host, "install", result, &display))
 }
 
 /// Refuses to create the host's hook file while a file it shadows declares hooks: the host
@@ -1513,7 +1593,7 @@ fn install_owned(
     sources: &Sources,
     exe: &str,
     timeout: u64,
-) -> Result<String, String> {
+) -> Result<IntegrationResult, String> {
     let home = existing_home(host, &host_dir(host, sources)?)?;
     outside_work_tree(host, &home, sources)?;
     let path = owned_file(host, &home, true)?.ok_or("the hooks directory vanished")?;
@@ -1523,30 +1603,26 @@ fn install_owned(
         && handler[host.command_key] == command
         && handler[host.timeout_key] == timeout
     {
-        return Ok(format!(
-            "{}: already installed ({})",
-            host.id,
-            path.display()
+        return Ok(IntegrationResult::new(
+            host,
+            "install",
+            "already_installed",
+            &path,
         ));
     }
     let document = owned_document(host, &command, timeout);
     let text = serde_json::to_string_pretty(&document).map_err(|error| error.to_string())? + "\n";
     // Exactly 0600 whatever the umask; nothing is copied from the old file.
     replace_file(&path, &text, Some(0o600), None)?;
-    let verb = if installed.is_some() {
+    let result = if installed.is_some() {
         "updated"
     } else {
         "installed"
     };
-    Ok(format!(
-        "{}: {verb} {} hook in {}",
-        host.id,
-        host.event,
-        path.display()
-    ))
+    Ok(IntegrationResult::new(host, "install", result, &path))
 }
 
-pub fn uninstall(name: &str) -> Result<String, String> {
+pub fn uninstall(name: &str) -> Result<IntegrationResult, String> {
     let host = target(name)?;
     let sources = Sources::from_env();
     match host.install {
@@ -1556,30 +1632,27 @@ pub fn uninstall(name: &str) -> Result<String, String> {
     }
 }
 
-fn uninstall_merged(host: &Host, sources: &Sources) -> Result<String, String> {
+fn uninstall_merged(host: &Host, sources: &Sources) -> Result<IntegrationResult, String> {
     let configured = host_dir(host, sources)?;
     let display = hook_file(host, &configured);
     let Some(dir) = trusted_home(host, &configured, user(), &lstat)? else {
-        return Ok(format!(
-            "{}: not installed ({})",
-            host.id,
-            display.display()
+        return Ok(IntegrationResult::new(
+            host,
+            "uninstall",
+            "not_installed",
+            &display,
         ));
     };
     let path = hook_file(host, &dir);
     // An unreadable or unparseable file stops here and keeps any backup.
     let (mut settings, original) = read_merged(&path)?;
-    let mut lines = vec![if remove_ours(host, &mut settings, &exe()) == 0 {
-        format!("{}: not installed ({})", host.id, display.display())
+    let result = if remove_ours(host, &mut settings, &exe()) == 0 {
+        "not_installed"
     } else {
         write_merged(&path, &settings, original.as_deref())?;
-        format!(
-            "{}: removed {} hook from {}",
-            host.id,
-            host.event,
-            display.display()
-        )
-    }];
+        "removed"
+    };
+    let mut done = IntegrationResult::new(host, "uninstall", result, &display);
     // unlink never follows a symlink, and only a regular file is removed at all.
     let backup = backup_path(&path);
     let shown = backup_path(&display);
@@ -1587,53 +1660,53 @@ fn uninstall_merged(host: &Host, sources: &Sources) -> Result<String, String> {
         Ok(meta) if meta.is_file() => {
             fs::remove_file(&backup)
                 .map_err(|error| format!("cannot remove {}: {error}", shown.display()))?;
-            lines.push(format!("{}: removed {}", host.id, shown.display()));
+            done.notes.push(format!("removed {}", shown.display()));
         }
-        Ok(_) => lines.push(format!(
-            "{}: left {} alone: it is not a regular file",
-            host.id,
+        Ok(_) => done.notes.push(format!(
+            "left {} alone: it is not a regular file",
             shown.display()
         )),
         Err(_) => {}
     }
-    Ok(lines.join("\n"))
+    Ok(done)
 }
 
 /// Unlinks the owned file only when [`owned_installed`] accepts it.
-fn uninstall_owned(host: &Host, sources: &Sources) -> Result<String, String> {
+fn uninstall_owned(host: &Host, sources: &Sources) -> Result<IntegrationResult, String> {
     let configured = host_dir(host, sources)?;
     let path = match trusted_home(host, &configured, user(), &lstat)? {
         Some(home) => owned_file(host, &home, false)?,
         None => None,
     };
     let Some(path) = path else {
-        return Ok(format!(
-            "{}: not installed ({})",
-            host.id,
-            hook_file(host, &configured).display()
+        return Ok(IntegrationResult::new(
+            host,
+            "uninstall",
+            "not_installed",
+            &hook_file(host, &configured),
         ));
     };
     if owned_installed(host, &path)?.is_none() {
-        return Ok(format!("{}: not installed ({})", host.id, path.display()));
+        return Ok(IntegrationResult::new(
+            host,
+            "uninstall",
+            "not_installed",
+            &path,
+        ));
     }
     fs::remove_file(&path).map_err(|error| format!("cannot remove {}: {error}", path.display()))?;
-    Ok(format!(
-        "{}: removed {} hook {}",
-        host.id,
-        host.event,
-        path.display()
-    ))
+    Ok(IntegrationResult::new(host, "uninstall", "removed", &path))
 }
 
-/// One host's state from its rotter entries.
-fn describe(host: &Host, ours: &[(Ours, &Value)], expected: u64) -> String {
+/// One host's state from its rotter entries, with today's wording of it.
+fn describe(host: &Host, ours: &[(Ours, &Value)], expected: u64) -> (&'static str, String) {
     let install = format!("run `rotter integration install {}`", host.id);
     match ours {
-        [] => "not installed".to_owned(),
+        [] => ("not_installed", "not installed".to_owned()),
         [(Ours::Current, only)] => {
             let timeout = &only[host.timeout_key];
             if timeout.as_u64() == Some(expected) {
-                return "installed (current)".to_owned();
+                return ("installed", "installed (current)".to_owned());
             }
             let timeout = match timeout {
                 Value::Null => "no timeout".to_owned(),
@@ -1643,17 +1716,24 @@ fn describe(host: &Host, ours: &[(Ours, &Value)], expected: u64) -> String {
                 }
                 value => format!("timeout {value} (not a number)"),
             };
-            format!("installed ({timeout}, expected {expected}); {install}")
+            (
+                "mismatch",
+                format!("installed ({timeout}, expected {expected}); {install}"),
+            )
         }
-        [(Ours::Legacy, _)] => {
-            format!("installed (older command without `|| true`); {install}")
-        }
-        _ => format!(
-            "installed for another binary: {}",
-            ours.iter()
-                .filter_map(|(_, entry)| entry[host.command_key].as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
+        [(Ours::Legacy, _)] => (
+            "mismatch",
+            format!("installed (older command without `|| true`); {install}"),
+        ),
+        _ => (
+            "other_binary",
+            format!(
+                "installed for another binary: {}",
+                ours.iter()
+                    .filter_map(|(_, entry)| entry[host.command_key].as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
         ),
     }
 }
@@ -1663,11 +1743,11 @@ fn merged_status(
     sources: &Sources,
     exe: &str,
     expected: u64,
-) -> Result<String, String> {
+) -> Result<HostState, String> {
     let path = hook_file(host, &host_dir(host, sources)?);
     let (settings, _) = read_settings(&path)?;
-    let state = describe(host, &our_entries(host, &settings, exe), expected);
-    Ok(format!("{}: {state} ({})", host.id, path.display()))
+    let (state, detail) = describe(host, &our_entries(host, &settings, exe), expected);
+    Ok((state, detail, path))
 }
 
 fn owned_status(
@@ -1675,16 +1755,17 @@ fn owned_status(
     sources: &Sources,
     exe: &str,
     expected: u64,
-) -> Result<String, String> {
+) -> Result<HostState, Refusal> {
     let configured = host_dir(host, sources)?;
     let path = match trusted_home(host, &configured, user(), &lstat)? {
         Some(home) => owned_file(host, &home, false)?,
         None => None,
     };
     let Some(path) = path else {
-        return Ok(format!(
-            "not installed ({})",
-            hook_file(host, &configured).display()
+        return Ok((
+            "not_installed",
+            "not installed".to_owned(),
+            hook_file(host, &configured),
         ));
     };
     let handler = owned_installed(host, &path)?;
@@ -1699,30 +1780,36 @@ fn owned_status(
             (how, handler)
         })
         .collect();
-    Ok(format!(
-        "{} ({})",
-        describe(host, &ours, expected),
-        path.display()
-    ))
+    let (state, detail) = describe(host, &ours, expected);
+    Ok((state, detail, path))
 }
 
 /// Whether Grok's Claude compatibility, which reads the literal `$HOME/.claude/settings.json`,
-/// can pick up a rotter entry. Read-only and error-tolerant: anything unusual is "unknown".
-/// Whether compat is enabled (`[compat.claude]`, `GROK_CLAUDE_HOOKS_ENABLED`) is not evaluated.
-fn compat_status(sources: &Sources, exe: &str) -> Option<String> {
+/// can pick up a rotter entry: `found`, `not_found` or `unknown`, with the detail. Read-only and
+/// error-tolerant: anything unusual is "unknown". Whether compat is enabled (`[compat.claude]`,
+/// `GROK_CLAUDE_HOOKS_ENABLED`) is not evaluated.
+fn compat_status(sources: &Sources, exe: &str) -> (&'static str, Option<String>) {
     let Some(home) = &sources.home else {
-        return Some("grok: Claude compatibility entry unknown: HOME is not set".to_owned());
+        return (
+            "unknown",
+            Some("Claude compatibility entry unknown: HOME is not set".to_owned()),
+        );
     };
     let path = home.join(".claude/settings.json");
     match read_settings(&path) {
-        Ok((settings, _)) => (!our_entries(&CLAUDE, &settings, exe).is_empty()).then(|| {
-            format!(
-                "grok: found a Claude entry that Grok's Claude compatibility can pick up (whether \
+        Ok((settings, _)) if !our_entries(&CLAUDE, &settings, exe).is_empty() => (
+            "found",
+            Some(format!(
+                "found a Claude entry that Grok's Claude compatibility can pick up (whether \
                  compat is enabled was not checked) ({})",
                 path.display()
-            )
-        }),
-        Err(why) => Some(format!("grok: Claude compatibility entry unknown: {why}")),
+            )),
+        ),
+        Ok(_) => ("not_found", None),
+        Err(why) => (
+            "unknown",
+            Some(format!("Claude compatibility entry unknown: {why}")),
+        ),
     }
 }
 
@@ -1759,70 +1846,172 @@ fn codex_status(dir: &Path) -> String {
         Err(why) => format!("unknown: {why}"),
     };
     format!(
-        "codex: hooks feature {feature}; Codex runs a new or changed hook only after you trust \
-         it in /hooks (not checked)"
+        "hooks feature {feature}; Codex runs a new or changed hook only after you trust it in \
+         /hooks (not checked)"
     )
 }
 
+/// One host in `rotter integration status`; `state` is None for an unsupported host.
+#[derive(Debug)]
+pub struct HostStatus {
+    pub id: &'static str,
+    /// `stable`, `experimental` or `unsupported`.
+    pub support: &'static str,
+    /// `installed`, `not_installed`, `mismatch`, `other_binary`, `foreign` or `error`.
+    pub state: Option<&'static str>,
+    pub path: Option<String>,
+    pub detail: Option<String>,
+    pub notes: Vec<String>,
+}
+
+/// `rotter integration status` (`rotter.status/1`).
+#[derive(Debug)]
+pub struct Status {
+    pub hosts: Vec<HostStatus>,
+    /// `found`, `not_found` or `unknown`: see [`compat_status`].
+    pub compat_state: &'static str,
+    pub compat_detail: Option<String>,
+    /// The git a run in this directory would use, or why none is (hooks then stay silent).
+    pub git_path: Option<String>,
+    pub git_detail: String,
+    pub exe_path: Option<String>,
+    pub exe_trusted: bool,
+    pub exe_detail: String,
+}
+
+impl Status {
+    pub fn json(&self) -> Json {
+        let hosts = self
+            .hosts
+            .iter()
+            .map(|host| {
+                Json::Obj(vec![
+                    ("id", host.id.into()),
+                    ("support", host.support.into()),
+                    ("state", host.state.into()),
+                    ("path", host.path.clone().into()),
+                    ("detail", host.detail.clone().into()),
+                    ("notes", host.notes.clone().into()),
+                ])
+            })
+            .collect();
+        Json::Obj(vec![
+            ("tool", "rotter".into()),
+            ("schema", "rotter.status/1".into()),
+            ("hosts", Json::Arr(hosts)),
+            (
+                "compat",
+                Json::Obj(vec![
+                    ("state", self.compat_state.into()),
+                    ("detail", self.compat_detail.clone().into()),
+                ]),
+            ),
+            (
+                "git",
+                Json::Obj(vec![
+                    ("path", self.git_path.clone().into()),
+                    ("detail", self.git_detail.as_str().into()),
+                ]),
+            ),
+            (
+                "executable",
+                Json::Obj(vec![
+                    ("path", self.exe_path.clone().into()),
+                    ("trusted", self.exe_trusted.into()),
+                    ("detail", self.exe_detail.as_str().into()),
+                ]),
+            ),
+        ])
+    }
+}
+
 /// Reports each host's hook state; `parse_timeout_seconds` gives the expected timeout.
-pub fn status(parse_timeout_seconds: u64) -> Result<String, String> {
+pub fn status(parse_timeout_seconds: u64) -> Result<Status, String> {
     let sources = Sources::from_env();
     let exe = exe();
     let expected = hook_timeout(parse_timeout_seconds);
-    let mut lines = Vec::new();
+    let mut hosts = Vec::new();
     for host in hosts::HOSTS {
-        let line = match host.install {
+        let found = match host.install {
             // Claude's shared file's errors (e.g. a FIFO) fail status, as before; the other
-            // hosts' are reported on their line.
+            // hosts' are reported as their state.
             Install::MergeJson { .. } => match merged_status(host, &sources, &exe, expected) {
-                Err(why) if host.id != CLAUDE.id => format!("{}: {why}", host.id),
-                line => line?,
+                Err(why) if host.id == CLAUDE.id => return Err(why),
+                found => found.map_err(Refusal::Error),
             },
-            Install::OwnedJson { .. } => format!(
-                "{}: {}",
-                host.id,
-                owned_status(host, &sources, &exe, expected).unwrap_or_else(|why| why)
-            ),
-            Install::OwnedShim { .. } => format!(
-                "{}: {}",
-                host.id,
-                shim_status(
-                    host,
-                    &sources,
-                    &exe,
-                    shim_timeout(host, parse_timeout_seconds)
-                )
-                .unwrap_or_else(|why| why)
+            Install::OwnedJson { .. } => owned_status(host, &sources, &exe, expected),
+            Install::OwnedShim { .. } => shim_status(
+                host,
+                &sources,
+                &exe,
+                shim_timeout(host, parse_timeout_seconds),
             ),
         };
-        lines.push(if host.experimental {
-            format!("{line} [experimental]")
-        } else {
-            line
-        });
+        let (state, detail, path) = match found {
+            Ok((state, detail, path)) => (state, detail, Some(path.display().to_string())),
+            Err(Refusal::Foreign(why)) => ("foreign", why, None),
+            Err(Refusal::Error(why)) => ("error", why, None),
+        };
+        let mut notes = Vec::new();
         if host.id == hosts::CODEX.id
             && let Ok(dir) = host_dir(host, &sources)
         {
-            lines.push(codex_status(&dir));
+            notes.push(codex_status(&dir));
         }
+        hosts.push(HostStatus {
+            id: host.id,
+            support: if host.experimental {
+                "experimental"
+            } else {
+                "stable"
+            },
+            state: Some(state),
+            path,
+            detail: Some(detail),
+            notes,
+        });
     }
-    lines.extend(compat_status(&sources, &exe));
     for (id, why) in hosts::UNSUPPORTED {
-        lines.push(format!("{id}: unsupported: {why}"));
+        hosts.push(HostStatus {
+            id,
+            support: "unsupported",
+            state: None,
+            path: None,
+            detail: Some(why.to_owned()),
+            notes: Vec::new(),
+        });
     }
-    // The git a run in this directory would use, or why none is (hooks then stay silent).
-    lines.push(format!(
-        "git: {}",
-        std::env::current_dir()
-            .map_err(|error| error.to_string())
-            .and_then(|dir| Git::cli(&dir))
-            .map_or_else(|why| why, |git| git.summary())
-    ));
-    lines.push(match trusted_exe() {
-        Ok(path) => format!("executable: {path} (safe to register)"),
-        Err(why) => format!("executable: {why}"),
-    });
-    Ok(lines.join("\n"))
+    let (compat_state, compat_detail) = compat_status(&sources, &exe);
+    let (git_path, git_detail) = match std::env::current_dir()
+        .map_err(|error| error.to_string())
+        .and_then(|dir| Git::cli(&dir))
+    {
+        Ok(git) => {
+            let (path, detail) = git.summary();
+            (Some(path), detail)
+        }
+        Err(why) => (None, why),
+    };
+    let (exe_path, exe_trusted, exe_detail) = match trusted_exe() {
+        Ok(path) => (Some(path), true, "safe to register".to_owned()),
+        Err(why) => (
+            std::env::current_exe()
+                .ok()
+                .map(|path| path.display().to_string()),
+            false,
+            why,
+        ),
+    };
+    Ok(Status {
+        hosts,
+        compat_state,
+        compat_detail,
+        git_path,
+        git_detail,
+        exe_path,
+        exe_trusted,
+        exe_detail,
+    })
 }
 
 #[cfg(test)]

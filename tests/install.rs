@@ -259,6 +259,25 @@ impl Drop for World {
     }
 }
 
+/// The one JSON document on stdout, checked to be rotter's with `schema`.
+fn document(output: &Output, schema: &str) -> Value {
+    let value: Value = serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|error| panic!("{error}: {output:?}"));
+    assert_eq!(value["tool"], "rotter", "{value}");
+    assert_eq!(value["schema"], schema, "{value}");
+    value
+}
+
+/// Grammar `name` in a `rotter parser list` document.
+fn listed<'a>(list: &'a Value, name: &str) -> &'a Value {
+    list["parsers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|parser| parser["name"] == name)
+        .unwrap_or_else(|| panic!("no {name} in {list}"))
+}
+
 fn ok(output: &Output) -> String {
     assert!(
         output.status.success(),
@@ -331,8 +350,14 @@ fn offline_lua2_install_then_extract() {
 
     world.set("TMPDIR", readonly.clone());
     let output = world.install_with_umask("002", &["lua2"]);
-    let stdout = ok(&output);
-    assert!(stdout.contains("in-process"), "trust statement: {stdout}");
+    ok(&output);
+    let installed = document(&output, "rotter.parser_install/1");
+    let notes = installed["notes"].as_array().unwrap();
+    assert_eq!(notes.len(), 1, "{installed}");
+    assert!(
+        notes[0].as_str().unwrap().contains("in-process"),
+        "trust statement: {installed}"
+    );
     world.set("TMPDIR", std::env::temp_dir());
     let fresh = world.root.join("fresh");
     for dir in [
@@ -358,9 +383,26 @@ fn offline_lua2_install_then_extract() {
     assert_eq!(unit["comments"][0]["text"], "-- Adds one.");
     let side = world.side(&repo, "b.txt", &["--lang", "b.txt=lua2"]);
     assert_eq!(side["units"][0]["comments"][0]["text"], "-- B.", "{side}");
-    let list = ok(&world.run(&["parser", "list"]));
-    assert!(list.contains("lua2\tinstalled\t"), "{list}");
-    assert!(list.contains("python\tavailable"), "{list}");
+    assert_eq!(
+        installed["parsers"],
+        serde_json::json!([{ "name": "lua2", "result": "installed",
+            "path": world.parsers().join(&libraries[0]).display().to_string(),
+            "detail": null }])
+    );
+    let output = world.run(&["parser", "list"]);
+    ok(&output);
+    let list = document(&output, "rotter.parsers/1");
+    assert_eq!(
+        *listed(&list, "lua2"),
+        serde_json::json!({ "name": "lua2", "enabled": true, "installed": true,
+            "path": world.parsers().join(&libraries[0]).display().to_string(),
+            "source": src.display().to_string(), "detail": null })
+    );
+    let python = listed(&list, "python");
+    assert_eq!(
+        (&python["enabled"], &python["installed"]),
+        (&false.into(), &false.into())
+    );
 }
 
 #[test]
@@ -968,9 +1010,33 @@ fn registry_dockerfile_detection_by_file_name() {
     }
     assert_eq!(world.side(&repo, "script", &[])["language"], "bash");
     assert_eq!(world.side(&repo, "a.py", &[])["language"], "python");
-    let list = ok(&world.run(&["parser", "list"]));
-    assert!(list.contains("dockerfile\tnot installed"), "{list}");
-    assert!(list.contains("hcl\tavailable"), "{list}");
+    let output = world.run(&["parser", "list"]);
+    ok(&output);
+    let list = document(&output, "rotter.parsers/1");
+    let dockerfile = listed(&list, "dockerfile");
+    assert_eq!(
+        (
+            &dockerfile["enabled"],
+            &dockerfile["installed"],
+            &dockerfile["path"]
+        ),
+        (&true.into(), &false.into(), &Value::Null),
+        "{list}"
+    );
+    assert!(
+        dockerfile["source"]
+            .as_str()
+            .unwrap()
+            .contains("tree-sitter-dockerfile"),
+        "{list}"
+    );
+    assert!(dockerfile["detail"].is_string(), "{list}");
+    let hcl = listed(&list, "hcl");
+    assert_eq!(
+        (&hcl["enabled"], &hcl["installed"]),
+        (&false.into(), &false.into()),
+        "{list}"
+    );
     let output = world.install(&["hcl"]);
     assert_eq!(output.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&output.stderr).contains("not enabled"));

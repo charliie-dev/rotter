@@ -1,5 +1,6 @@
 mod common;
 
+use common::{document, result, status_host};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -231,13 +232,14 @@ fn integration_install_keeps_other_settings_and_is_idempotent() {
             .collect()
     };
 
-    assert!(
-        integration(&config, &["status"])
-            .1
-            .contains("not installed")
+    let claude = status_host(&integration(&config, &["status"]).1, "claude");
+    assert_eq!(
+        (&claude["state"], &claude["detail"]),
+        (&"not_installed".into(), &"not installed".into())
     );
     let (code, text) = integration(&config, &["install", "claude"]);
     assert_eq!(code, 0, "{text}");
+    assert_eq!(result(&text), "installed");
     let installed = read();
     assert_eq!(ours(&installed).len(), 1);
     assert!(ours(&installed)[0].contains(env!("CARGO_BIN_EXE_rotter")));
@@ -250,22 +252,30 @@ fn integration_install_keeps_other_settings_and_is_idempotent() {
         fs::read_to_string(config.join("settings.json.rotter-bak")).unwrap(),
         original
     );
-    assert!(
-        integration(&config, &["status"])
-            .1
-            .contains("installed (current)")
+    let claude = status_host(&integration(&config, &["status"]).1, "claude");
+    assert_eq!(
+        (&claude["state"], &claude["detail"]),
+        (&"installed".into(), &"installed (current)".into())
     );
 
-    assert!(
-        integration(&config, &["install", "claude"])
-            .1
-            .contains("already installed")
+    assert_eq!(
+        result(&integration(&config, &["install", "claude"]).1),
+        "already_installed"
     );
     assert_eq!(ours(&read()).len(), 1);
 
     let (code, text) = integration(&config, &["uninstall", "claude"]);
     assert_eq!(code, 0, "{text}");
-    assert!(text.contains("settings.json.rotter-bak"), "{text}");
+    let removed = document(&text, "rotter.integration/1");
+    assert_eq!(removed["result"], "removed", "{text}");
+    assert_eq!(
+        removed["notes"],
+        serde_json::json!([format!(
+            "removed {}",
+            config.join("settings.json.rotter-bak").display()
+        )]),
+        "{text}"
+    );
     assert!(
         !config.join("settings.json.rotter-bak").exists(),
         "backup removed"
@@ -437,24 +447,26 @@ fn install_sizes_the_timeout_from_the_config() {
         assert_eq!(entries[0]["timeout"], timeout);
     };
 
+    let detail = |text: &str| -> String {
+        let claude = status_host(text, "claude");
+        format!("{} {}", claude["state"], claude["detail"].as_str().unwrap())
+    };
     let (_, text) = integration(&config, &["status"]);
     assert!(
-        text.contains("installed (timeout 60, expected 90)"),
+        detail(&text).starts_with("\"mismatch\" installed (timeout 60, expected 90)"),
         "{text}"
     );
     assert_eq!(integration(&config, &["install", "claude"]).0, 0);
     expect(90);
-    assert!(
-        integration(&config, &["status"])
-            .1
-            .contains("installed (current)")
+    assert_eq!(
+        detail(&integration(&config, &["status"]).1),
+        "\"installed\" installed (current)"
     );
 
     let path = write_config(&xdg, "parse_timeout_seconds = 300\n");
     assert!(
-        integration(&config, &["status"])
-            .1
-            .contains("installed (timeout 90, expected 330)")
+        detail(&integration(&config, &["status"]).1)
+            .starts_with("\"mismatch\" installed (timeout 90, expected 330)")
     );
     assert_eq!(integration(&config, &["install", "claude"]).0, 0);
     expect(330);
@@ -468,7 +480,7 @@ fn install_sizes_the_timeout_from_the_config() {
     fs::set_permissions(&path, fs::Permissions::from_mode(0o664)).unwrap();
     let (_, text) = integration(&config, &["status"]);
     assert!(
-        text.contains("expected 90") && text.contains("refused"),
+        detail(&text).contains("expected 90") && text.contains("refused"),
         "{text}"
     );
     let (code, text) = integration(&config, &["install", "claude"]);
@@ -574,8 +586,12 @@ fn symlinked_backup_or_temporary_is_never_followed() {
     symlink(&canary, &backup).unwrap();
     let (code, text) = integration(&config, &["uninstall", "claude"]);
     assert_eq!(code, 0, "{text}");
-    assert!(
-        text.contains("left") && text.contains("rotter-bak"),
+    assert_eq!(
+        document(&text, "rotter.integration/1")["notes"],
+        serde_json::json!([format!(
+            "left {} alone: it is not a regular file",
+            backup.display()
+        )]),
         "{text}"
     );
     assert!(
@@ -613,9 +629,11 @@ fn uninstall_backup_cleanup_follows_a_successful_read() {
     fs::write(&settings, "{}").unwrap();
     let (code, text) = integration(&config, &["uninstall", "claude"]);
     assert_eq!(code, 0, "{text}");
-    assert!(text.contains("not installed"), "{text}");
-    assert!(
-        text.contains(&format!("removed {}", backup.display())),
+    let done = document(&text, "rotter.integration/1");
+    assert_eq!(done["result"], "not_installed", "{text}");
+    assert_eq!(
+        done["notes"],
+        serde_json::json!([format!("removed {}", backup.display())]),
         "{text}"
     );
     assert!(!backup.exists());
@@ -670,8 +688,13 @@ fn status_prints_a_non_integer_timeout_readably() {
     let config = temp("strtimeout");
     seed_settings(&config, serde_json::json!("60"));
     let (_, text) = integration(&config, &["status"]);
+    let claude = status_host(&text, "claude");
+    assert_eq!(claude["state"], "mismatch", "{text}");
     assert!(
-        text.contains(r#"installed (timeout "60" (not a number), expected 90)"#),
+        claude["detail"]
+            .as_str()
+            .unwrap()
+            .starts_with(r#"installed (timeout "60" (not a number), expected 90)"#),
         "{text}"
     );
     fs::remove_dir_all(&config).unwrap();
@@ -792,14 +815,18 @@ fn grok_install_writes_one_private_file_and_uninstall_removes_it() {
     fs::create_dir(root.join("grok")).unwrap();
     let (code, text) = integration_umask(&root, "000", &["install", "grok"]);
     assert_eq!(code, 0, "{text}");
-    assert!(text.contains("grok: installed"), "{text}");
+    assert_eq!(result(&text), "installed", "{text}");
+    assert_eq!(
+        document(&text, "rotter.integration/1")["path"],
+        file.display().to_string()
+    );
     assert_eq!(mode(&hooks), 0o700, "missing hooks/ is created private");
     assert_eq!(mode(&file), 0o600, "0600 even under umask 000");
     assert_eq!(read_json(&file), grok_document(&grok_command(), 90));
     let (code, text) = integration(&root, &["install", "grok"]);
     assert_eq!(
-        (code, text.contains("already installed")),
-        (0, true),
+        (code, result(&text).as_str()),
+        (0, "already_installed"),
         "{text}"
     );
 
@@ -809,7 +836,7 @@ fn grok_install_writes_one_private_file_and_uninstall_removes_it() {
     write_config(&xdg, "parse_timeout_seconds = 300\n");
     let (code, text) = integration_umask(&root, "000", &["install", "grok"]);
     assert_eq!(code, 0, "{text}");
-    assert!(text.contains("updated"), "{text}");
+    assert_eq!(result(&text), "updated", "{text}");
     assert_eq!(read_json(&file), grok_document(&grok_command(), 330));
     assert_eq!(mode(&file), 0o600);
 
@@ -841,10 +868,14 @@ fn grok_install_writes_one_private_file_and_uninstall_removes_it() {
 
     let (code, text) = integration(&root, &["uninstall", "grok"]);
     assert_eq!(code, 0, "{text}");
-    assert!(text.contains("removed"), "{text}");
+    assert_eq!(result(&text), "removed", "{text}");
     assert!(listing(&hooks).is_empty(), "{:?}", listing(&hooks));
     let (code, text) = integration(&root, &["uninstall", "grok"]);
-    assert_eq!((code, text.contains("not installed")), (0, true), "{text}");
+    assert_eq!(
+        (code, result(&text).as_str()),
+        (0, "not_installed"),
+        "{text}"
+    );
     fs::remove_dir_all(&root).unwrap();
 }
 
@@ -932,6 +963,12 @@ fn foreign_or_unsafe_rotter_json_is_left_alone() {
         }
         let (code, text) = integration(&root, &["status"]);
         assert_eq!(code, 0, "{name}: {text}");
+        let state = if matches!(name, "0666" | "symlink") {
+            "error"
+        } else {
+            "foreign"
+        };
+        assert_eq!(status_host(&text, "grok")["state"], state, "{name}: {text}");
         if name == "symlink" {
             assert!(fs::symlink_metadata(&file).unwrap().is_symlink());
             assert_eq!(fs::read_to_string(&canary).unwrap(), ours.to_string());
@@ -945,11 +982,19 @@ fn foreign_or_unsafe_rotter_json_is_left_alone() {
     fs::remove_dir_all(&root).unwrap();
 }
 
-/// The `status` line starting with `prefix`.
-fn line<'a>(text: &'a str, prefix: &str) -> &'a str {
-    text.lines()
-        .find(|line| line.starts_with(prefix))
-        .unwrap_or_else(|| panic!("no {prefix:?} line in {text}"))
+/// Host `id` of a status document as `(state, detail, path)`.
+fn host_state(text: &str, id: &str) -> (String, String, String) {
+    let host = status_host(text, id);
+    let field = |key: &str| host[key].as_str().unwrap_or("null").to_owned();
+    (field("state"), field("detail"), field("path"))
+}
+
+fn owned(state: &str, detail: &str, path: &Path) -> (String, String, String) {
+    (
+        state.to_owned(),
+        detail.to_owned(),
+        path.display().to_string(),
+    )
 }
 
 #[test]
@@ -965,32 +1010,31 @@ fn status_reports_each_host_with_its_path() {
     };
     let text = status();
     assert_eq!(
-        line(&text, "claude:"),
-        format!("claude: not installed ({})", settings.display())
+        host_state(&text, "claude"),
+        owned("not_installed", "not installed", &settings)
     );
     assert_eq!(
-        line(&text, "grok:"),
-        format!("grok: not installed ({})", file.display())
+        host_state(&text, "grok"),
+        owned("not_installed", "not installed", &file)
     );
-    assert!(!text.contains("compatibility"), "{text}");
+    let status_document = document(&text, "rotter.status/1");
+    assert_eq!(status_document["compat"]["state"], "not_found", "{text}");
     assert_eq!(
-        line(&text, "executable:"),
-        format!(
-            "executable: {} (safe to register)",
-            env!("CARGO_BIN_EXE_rotter")
-        )
+        status_document["executable"],
+        serde_json::json!({ "path": env!("CARGO_BIN_EXE_rotter"), "trusted": true,
+            "detail": "safe to register" })
     );
 
     assert_eq!(integration(&root, &["install", "claude"]).0, 0);
     assert_eq!(integration(&root, &["install", "grok"]).0, 0);
     let text = status();
     assert_eq!(
-        line(&text, "claude:"),
-        format!("claude: installed (current) ({})", settings.display())
+        host_state(&text, "claude"),
+        owned("installed", "installed (current)", &settings)
     );
     assert_eq!(
-        line(&text, "grok:"),
-        format!("grok: installed (current) ({})", file.display())
+        host_state(&text, "grok"),
+        owned("installed", "installed (current)", &file)
     );
 
     // Edited timeouts.
@@ -1003,17 +1047,19 @@ fn status_reports_each_host_with_its_path() {
     edit(&file, "timeout", 5.into());
     let text = status();
     assert_eq!(
-        line(&text, "claude:"),
-        format!(
-            "claude: installed (timeout 5, expected 90); run `rotter integration install claude` ({})",
-            settings.display()
+        host_state(&text, "claude"),
+        owned(
+            "mismatch",
+            "installed (timeout 5, expected 90); run `rotter integration install claude`",
+            &settings
         )
     );
     assert_eq!(
-        line(&text, "grok:"),
-        format!(
-            "grok: installed (timeout 5, expected 90); run `rotter integration install grok` ({})",
-            file.display()
+        host_state(&text, "grok"),
+        owned(
+            "mismatch",
+            "installed (timeout 5, expected 90); run `rotter integration install grok`",
+            &file
         )
     );
     // Edited commands.
@@ -1028,15 +1074,15 @@ fn status_reports_each_host_with_its_path() {
         "'/else/rotter' hook grok-stop || true".into(),
     );
     let text = status();
-    assert!(
-        line(&text, "claude:").starts_with("claude: installed for another binary: '/else/rotter'"),
-        "{text}"
-    );
-    assert!(
-        line(&text, "grok:").starts_with("grok: installed for another binary: '/else/rotter'"),
-        "{text}"
-    );
-    assert!(line(&text, "grok:").ends_with(&format!("({})", file.display())));
+    for (id, path) in [("claude", &settings), ("grok", &file)] {
+        let (state, detail, shown) = host_state(&text, id);
+        assert_eq!(state, "other_binary", "{text}");
+        assert!(
+            detail.starts_with("installed for another binary: '/else/rotter'"),
+            "{text}"
+        );
+        assert_eq!(shown, path.display().to_string());
+    }
     fs::remove_dir_all(&root).unwrap();
 }
 
@@ -1046,6 +1092,13 @@ fn status_compat_check_is_read_only_and_tolerant() {
     let dot_claude = root.join("home/.claude");
     fs::create_dir_all(&dot_claude).unwrap();
     let literal = dot_claude.join("settings.json");
+    let compat = |text: &str| {
+        let compat = &document(text, "rotter.status/1")["compat"];
+        (
+            compat["state"].as_str().unwrap().to_owned(),
+            compat["detail"].as_str().unwrap_or("null").to_owned(),
+        )
+    };
     // (i) $HOME/.claude/settings.json is the Claude settings file and holds the rotter entry.
     let same = dot_claude.display().to_string();
     let same = [("CLAUDE_CONFIG_DIR", Some(same.as_str()))];
@@ -1053,11 +1106,14 @@ fn status_compat_check_is_read_only_and_tolerant() {
     let (code, text) = integration_env(&root, &["status"], &same);
     assert_eq!(code, 0, "{text}");
     assert_eq!(
-        line(&text, "grok: found"),
-        format!(
-            "grok: found a Claude entry that Grok's Claude compatibility can pick up (whether \
-             compat is enabled was not checked) ({})",
-            literal.display()
+        compat(&text),
+        (
+            "found".to_owned(),
+            format!(
+                "found a Claude entry that Grok's Claude compatibility can pick up (whether \
+                 compat is enabled was not checked) ({})",
+                literal.display()
+            )
         )
     );
     let before = fs::read(&literal).unwrap();
@@ -1067,8 +1123,18 @@ fn status_compat_check_is_read_only_and_tolerant() {
     set_mode(&literal, 0o000);
     let (code, text) = integration(&root, &["status"]);
     assert_eq!(code, 0, "{text}");
-    assert!(line(&text, "grok: Claude compatibility entry unknown").contains("cannot read"));
-    assert!(line(&text, "claude:").contains("not installed"), "{text}");
+    let (state, detail) = compat(&text);
+    assert_eq!(state, "unknown", "{text}");
+    assert!(
+        detail.starts_with("Claude compatibility entry unknown: ")
+            && detail.contains("cannot read"),
+        "{text}"
+    );
+    assert_eq!(
+        status_host(&text, "claude")["state"],
+        "not_installed",
+        "{text}"
+    );
     set_mode(&literal, 0o600);
     assert_eq!(fs::read(&literal).unwrap(), before, "never written");
     fs::remove_file(&literal).unwrap();
@@ -1081,7 +1147,13 @@ fn status_compat_check_is_read_only_and_tolerant() {
     );
     let (code, text) = integration(&root, &["status"]);
     assert_eq!(code, 0, "{text}");
-    assert!(line(&text, "grok: Claude compatibility entry unknown").contains("not a regular file"));
+    let (state, detail) = compat(&text);
+    assert_eq!(state, "unknown", "{text}");
+    assert!(
+        detail.starts_with("Claude compatibility entry unknown: ")
+            && detail.contains("not a regular file"),
+        "{text}"
+    );
     // (iii) A FIFO primary keeps the exit-2 contract (see fifo_settings_fail_promptly).
     fs::remove_dir_all(&root).unwrap();
 }
@@ -1110,8 +1182,14 @@ fn untrusted_executable_is_never_registered() {
         assert!(listing(&work.join("grok")).is_empty(), "nothing written");
         let (code, text) = run(&["status"]);
         assert_eq!(code, 0, "{text}");
+        let executable = &document(&text, "rotter.status/1")["executable"];
+        assert_eq!(executable["trusted"], false, "{text}");
+        assert_eq!(executable["path"], exe.display().to_string(), "{text}");
         assert!(
-            line(&text, "executable:").contains("refusing to register"),
+            executable["detail"]
+                .as_str()
+                .unwrap()
+                .starts_with("refusing to register"),
             "{text}"
         );
         set_mode(&dir, 0o700);
@@ -1190,18 +1268,20 @@ fn install_claude_migrates_the_old_command_form() {
             .collect()
     };
     seed();
+    let (state, detail, _) = host_state(&integration(&config, &["status"]).1, "claude");
+    assert_eq!(state, "mismatch");
     assert!(
-        line(&integration(&config, &["status"]).1, "claude:").contains("older command"),
+        detail.contains("older command"),
         "status names the old form"
     );
     let (code, text) = integration(&config, &["install", "claude"]);
     assert_eq!(code, 0, "{text}");
-    assert!(text.contains("updated"), "{text}");
+    assert_eq!(result(&text), "updated", "{text}");
     assert_eq!(commands(), ["other".to_owned(), command()]);
-    assert!(
-        integration(&config, &["status"])
-            .1
-            .contains("installed (current)")
+    let (state, detail, _) = host_state(&integration(&config, &["status"]).1, "claude");
+    assert_eq!(
+        (state.as_str(), detail.as_str()),
+        ("installed", "installed (current)")
     );
     seed();
     assert_eq!(integration(&config, &["uninstall", "claude"]).0, 0);

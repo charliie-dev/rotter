@@ -240,3 +240,35 @@ pub fn is_block(output: &std::process::Output) -> bool {
 pub fn set_mode(path: &Path, mode: u32) {
     fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
 }
+
+/// The JSON document rotter printed at the start of `text` (its stdout, possibly followed by its
+/// stderr), checked to be rotter's with `schema`.
+pub fn document(text: &str, schema: &str) -> serde_json::Value {
+    let value: serde_json::Value = serde_json::Deserializer::from_str(text)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| panic!("no document in {text}"))
+        .unwrap_or_else(|error| panic!("{error}: {text}"));
+    assert_eq!(value["tool"], "rotter", "{text}");
+    assert_eq!(value["schema"], schema, "{text}");
+    value
+}
+
+/// Host `id` in the `rotter integration status` document at the start of `text`.
+pub fn status_host(text: &str, id: &str) -> serde_json::Value {
+    document(text, "rotter.status/1")["hosts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|host| host["id"] == id)
+        .unwrap_or_else(|| panic!("no host {id} in {text}"))
+        .clone()
+}
+
+/// The `result` of the `rotter integration install|uninstall` document at the start of `text`.
+pub fn result(text: &str) -> String {
+    document(text, "rotter.integration/1")["result"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}

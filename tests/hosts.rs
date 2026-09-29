@@ -4,8 +4,9 @@
 mod common;
 
 use common::{
-    changed_repo, claude_input, codex_input, copilot_input, droid_input, git, go, grok_input,
-    is_block, native_git, real_git, rotter, set_mode, stdout, temp,
+    changed_repo, claude_input, codex_input, copilot_input, document, droid_input, git, go,
+    grok_input, is_block, native_git, real_git, result, rotter, set_mode, status_host, stdout,
+    temp,
 };
 use serde_json::{Value, json};
 use std::ffi::OsStr;
@@ -259,8 +260,9 @@ fn claude_falls_back_to_home_when_its_variable_is_unset_or_relative() {
         let env = [("CLAUDE_CONFIG_DIR", value)];
         let (code, text) = integration(&root, &["install", "claude"], &env);
         assert_eq!(code, 0, "{value:?}: {text}");
-        assert!(
-            text.contains(&dot.join("settings.json").display().to_string()),
+        assert_eq!(
+            document(&text, "rotter.integration/1")["path"],
+            dot.join("settings.json").display().to_string(),
             "{text}"
         );
         assert!(
@@ -270,7 +272,7 @@ fn claude_falls_back_to_home_when_its_variable_is_unset_or_relative() {
         );
         assert!(!root.join("rel-claude").exists());
         let (code, text) = integration(&root, &["uninstall", "claude"], &env);
-        assert_eq!((code, text.contains("removed")), (0, true), "{text}");
+        assert_eq!((code, result(&text).as_str()), (0, "removed"), "{text}");
     }
     fs::remove_dir_all(root).unwrap();
 }
@@ -321,13 +323,19 @@ fn s0_installations_and_state_carry_over() {
     );
     let (code, text) = integration(&root, &["status"], &[]);
     assert_eq!(code, 0, "{text}");
-    assert!(text.contains("claude: installed (current)"), "{text}");
-    assert!(text.contains("grok: installed (current)"), "{text}");
+    for host in ["claude", "grok"] {
+        let found = status_host(&text, host);
+        assert_eq!(
+            (&found["state"], &found["detail"]),
+            (&"installed".into(), &"installed (current)".into()),
+            "{text}"
+        );
+    }
     for host in ["claude", "grok"] {
         let (code, text) = integration(&root, &["install", host], &[]);
         assert_eq!(
-            (code, text.contains("already installed")),
-            (0, true),
+            (code, result(&text).as_str()),
+            (0, "already_installed"),
             "{text}"
         );
     }
@@ -338,7 +346,7 @@ fn s0_installations_and_state_carry_over() {
     assert!(after == before, "install rewrote an S0 file");
     for host in ["claude", "grok"] {
         let (code, text) = integration(&root, &["uninstall", host], &[]);
-        assert_eq!((code, text.contains("removed")), (0, true), "{text}");
+        assert_eq!((code, result(&text).as_str()), (0, "removed"), "{text}");
     }
     assert_eq!(
         fs::read_to_string(&settings).unwrap(),
@@ -355,15 +363,14 @@ fn s0_installations_and_state_carry_over() {
     );
     let env = [("CLAUDE_CONFIG_DIR", Some(merged.as_os_str()))];
     let before = fs::read(merged.join("settings.json")).unwrap();
-    assert!(
-        integration(&root, &["status"], &env)
-            .1
-            .contains("claude: installed (current)")
+    let claude = status_host(&integration(&root, &["status"], &env).1, "claude");
+    assert_eq!(
+        (&claude["state"], &claude["detail"]),
+        (&"installed".into(), &"installed (current)".into())
     );
-    assert!(
-        integration(&root, &["install", "claude"], &env)
-            .1
-            .contains("already installed")
+    assert_eq!(
+        result(&integration(&root, &["install", "claude"], &env).1),
+        "already_installed"
     );
     assert_eq!(fs::read(merged.join("settings.json")).unwrap(), before);
     let (code, text) = integration(&root, &["uninstall", "claude"], &env);
@@ -453,7 +460,7 @@ fn merged_settings_keep_every_other_tools_entry() {
     ] } });
     fs::write(&settings, serde_json::to_string_pretty(&seed).unwrap()).unwrap();
     let (code, text) = integration(&root, &["install", "claude"], &[]);
-    assert_eq!((code, text.contains("updated")), (0, true), "{text}");
+    assert_eq!((code, result(&text).as_str()), (0, "updated"), "{text}");
     // Another rotter binary's entry is replaced by one entry of this one; the rest stays.
     assert_eq!(commands(&settings), [foreign[0], foreign[1], ours.as_str()]);
     let groups = read_json(&settings)["hooks"]["Stop"].clone();
@@ -619,13 +626,23 @@ fn owned_file_status_names_other_binaries() {
     set_mode(&file, 0o600);
     let (code, text) = integration(&root, &["status"], &[]);
     assert_eq!(code, 0, "{text}");
+    let grok = status_host(&text, "grok");
+    assert_eq!(grok["state"], "other_binary", "{text}");
     assert!(
-        text.contains("grok: installed for another binary"),
+        grok["detail"]
+            .as_str()
+            .unwrap()
+            .starts_with("installed for another binary"),
         "{text}"
     );
     let git = fs::canonicalize(real_git()).unwrap();
+    let found = &common::document(&text, "rotter.status/1")["git"];
+    assert_eq!(found["path"], git.display().to_string(), "{text}");
     assert!(
-        text.contains(&format!("git: {} (git version ", git.display())),
+        found["detail"]
+            .as_str()
+            .unwrap()
+            .starts_with("git version "),
         "{text}"
     );
     // A dispatcher alone on PATH (outside the status run's directory, whose tree is excluded):
@@ -636,14 +653,16 @@ fn owned_file_status_names_other_binaries() {
     let env = [("PATH", Some(shims.as_os_str()))];
     let (code, text) = integration(&root, &["status"], &env);
     assert_eq!(code, 0, "{text}");
-    let line = text.lines().find(|line| line.starts_with("git: ")).unwrap();
+    let found = &common::document(&text, "rotter.status/1")["git"];
+    assert_eq!(found["path"], Value::Null, "{text}");
+    let detail = found["detail"].as_str().unwrap();
     assert!(
-        line.contains("skipped") && line.contains("not a native executable"),
-        "{line}"
+        detail.contains("skipped") && detail.contains("not a native executable"),
+        "{detail}"
     );
     fs::remove_dir_all(shims).unwrap();
     let (code, text) = integration(&root, &["install", "grok"], &[]);
-    assert_eq!((code, text.contains("updated")), (0, true), "{text}");
+    assert_eq!((code, result(&text).as_str()), (0, "updated"), "{text}");
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -733,26 +752,37 @@ fn new_hosts_install_exactly_their_entry_where_their_variable_points() {
             let (code, text) = integration(&root, &["install", host.id], &env);
             let file = dir.join(host.file);
             assert_eq!(code, 0, "{}: {text}", host.id);
-            assert!(text.contains(&file.display().to_string()), "{text}");
+            let done = document(&text, "rotter.integration/1");
+            assert_eq!(done["result"], "installed", "{text}");
+            // Owned files are named by their resolved path (the temp dir may be a symlink).
+            let named = |path: &Value| {
+                path.as_str()
+                    .unwrap()
+                    .ends_with(&file.display().to_string())
+            };
+            assert!(named(&done["path"]), "{text}");
             assert_eq!(read_json(&file), (host.document)(&command), "{}", host.id);
             assert!(!listing(&root).contains(&format!("rel-{}", host.id)));
             let (code, text) = integration(&root, &["install", host.id], &env);
             assert_eq!(
-                (code, text.contains("already installed")),
-                (0, true),
+                (code, result(&text).as_str()),
+                (0, "already_installed"),
                 "{text}"
             );
             let (_, text) = integration(&root, &["status"], &env);
-            let line = text
-                .lines()
-                .find(|line| line.starts_with(&format!("{}: ", host.id)))
-                .unwrap();
-            assert!(line.contains("installed (current)"), "{line}");
+            let found = status_host(&text, host.id);
             assert_eq!(
-                line.ends_with("[experimental]"),
-                host.id != "copilot",
-                "{line}"
+                (&found["state"], &found["detail"]),
+                (&"installed".into(), &"installed (current)".into()),
+                "{text}"
             );
+            assert!(named(&found["path"]), "{text}");
+            let support = if host.id == "copilot" {
+                "stable"
+            } else {
+                "experimental"
+            };
+            assert_eq!(found["support"], support, "{text}");
             // Every installed command exits 0 even when the binary it names exits 2.
             let stub = root.join("stub");
             fs::write(&stub, "#!/bin/sh\nexit 2\n").unwrap();
@@ -764,7 +794,7 @@ fn new_hosts_install_exactly_their_entry_where_their_variable_points() {
                 .unwrap();
             assert_eq!(status.code(), Some(0));
             let (code, text) = integration(&root, &["uninstall", host.id], &env);
-            assert_eq!((code, text.contains("removed")), (0, true), "{text}");
+            assert_eq!((code, result(&text).as_str()), (0, "removed"), "{text}");
             if host.id == "copilot" {
                 assert!(!file.exists());
                 assert_eq!(mode(&dir.join("hooks")), 0o700);
@@ -777,7 +807,11 @@ fn new_hosts_install_exactly_their_entry_where_their_variable_points() {
                 assert_eq!(read_json(&file), empty);
             }
             let (code, text) = integration(&root, &["uninstall", host.id], &env);
-            assert_eq!((code, text.contains("not installed")), (0, true), "{text}");
+            assert_eq!(
+                (code, result(&text).as_str()),
+                (0, "not_installed"),
+                "{text}"
+            );
             fs::remove_dir_all(&dir).unwrap();
         }
         fs::remove_dir_all(root).unwrap();
@@ -919,16 +953,22 @@ fn codex_entries_keep_their_positions_and_status_names_the_trust_step() {
     ] }, "PreToolUse": [] });
     fs::write(&file, serde_json::to_string_pretty(&seed).unwrap()).unwrap();
     let (_, text) = integration(&root, &["status"], &[]);
+    let codex = status_host(&text, "codex");
+    assert_eq!(codex["state"], "other_binary", "{text}");
     assert!(
-        text.contains("codex: installed for another binary"),
+        codex["detail"]
+            .as_str()
+            .unwrap()
+            .starts_with("installed for another binary"),
         "{text}"
     );
     assert!(
-        text.contains("codex: hooks feature on (default); Codex runs a new or changed hook only after you trust it in /hooks"),
+        codex["notes"][0].as_str().unwrap().starts_with("hooks feature on (default); Codex runs a new or changed hook only after you trust it in /hooks"),
         "{text}"
     );
+    assert_eq!(codex["notes"].as_array().unwrap().len(), 1, "{text}");
     let (code, text) = integration(&root, &["install", "codex"], &[]);
-    assert_eq!((code, text.contains("updated")), (0, true), "{text}");
+    assert_eq!((code, result(&text).as_str()), (0, "updated"), "{text}");
     let ours = format!("'{EXE}' hook codex || true");
     assert_eq!(
         commands_of("codex", &file),
@@ -953,7 +993,10 @@ fn codex_entries_keep_their_positions_and_status_names_the_trust_step() {
         let (code, text) = integration(&root, &["status"], &[]);
         assert_eq!(code, 0, "{text}");
         assert!(
-            text.contains(&format!("codex: {feature}")),
+            status_host(&text, "codex")["notes"][0]
+                .as_str()
+                .unwrap()
+                .starts_with(feature),
             "{config}: {text}"
         );
     }
@@ -991,8 +1034,8 @@ fn droid_never_hides_hooks_declared_in_its_settings() {
     .unwrap();
     let (code, text) = integration(&root, &["install", "droid"], &[]);
     assert_eq!(
-        (code, text.contains("already installed")),
-        (0, true),
+        (code, result(&text).as_str()),
+        (0, "already_installed"),
         "{text}"
     );
     fs::remove_dir_all(root).unwrap();
@@ -1133,14 +1176,18 @@ fn unsupported_hosts_are_named_and_refused() {
             text.contains(&format!("{host} is not supported: ")),
             "{text}"
         );
-        assert!(
-            status.contains(&format!("\n{host}: unsupported: ")),
+        let found = status_host(&status, host);
+        assert_eq!(
+            (&found["support"], &found["state"]),
+            (&"unsupported".into(), &Value::Null),
             "{status}"
         );
+        assert!(!found["detail"].as_str().unwrap().is_empty(), "{status}");
     }
     for host in ["omp", "kilo", "hermes"] {
-        assert!(
-            status.contains(&format!("{host}: unsupported: not supported yet (TODO)")),
+        assert_eq!(
+            status_host(&status, host)["detail"],
+            "not supported yet (TODO)",
             "{status}"
         );
     }
@@ -1173,14 +1220,16 @@ fn status_names_every_in_scope_host_exactly_once() {
     let root = temp("all-hosts");
     let (code, status) = integration(&root, &["status"], &[]);
     assert_eq!(code, 0, "{status}");
+    let hosts = document(&status, "rotter.status/1")["hosts"].clone();
+    let ids: Vec<&str> = hosts
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|host| host["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids.len(), IN_SCOPE.len(), "{status}");
     for host in IN_SCOPE {
-        // Codex also prints a second, `hooks feature` line about its own trust step.
-        let occurrences = status
-            .lines()
-            .filter(|line| {
-                line.starts_with(&format!("{host}: ")) && !line.contains("hooks feature")
-            })
-            .count();
+        let occurrences = ids.iter().filter(|id| **id == host).count();
         assert_eq!(occurrences, 1, "{host}: {status}");
     }
     for excluded in ["kimi", "qwen", "qodercli"] {
