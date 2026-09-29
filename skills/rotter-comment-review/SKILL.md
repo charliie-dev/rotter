@@ -81,7 +81,8 @@ note to the user; do not edit their config or environment yourself.
 - `directive` is set for tool instructions (`go_directive`, `lua_annotation`,
   `shellcheck_directive`, `shebang`, `yaml_language_server`, `toml_schema`). Check that they
   still apply; never treat them as prose.
-- Every `text` equals the snapshot bytes at `range.bytes` (UTF-8 offsets, end exclusive);
+- Every `text` equals the snapshot bytes at `range.bytes` (UTF-8 offsets, end exclusive),
+  except when `text_truncated` is true: then `text` is only the first 80 lines of that range.
   `range.lines` is 1-based and inclusive. Quote from `text`, not from memory.
 
 ## 3. Judge each comment
