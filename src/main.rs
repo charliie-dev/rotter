@@ -2,7 +2,7 @@ use rotter::config::{self, Config, Sources};
 use rotter::json::Json;
 use rotter::render::{self, Color, clean};
 use rotter::{Git, Mode, Options, extract_with, hosts, install, integration, toplevel};
-use std::io::{IsTerminal, Read};
+use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -189,6 +189,24 @@ fn configure(
     Ok(())
 }
 
+/// Writes `text` to stdout. A reader that closed the pipe early (`rotter extract | head`) is not an
+/// error, so the run keeps the exit status it earned; any other write failure is reported and
+/// becomes exit 2.
+fn emit(text: &str, earned: ExitCode) -> ExitCode {
+    let mut stdout = std::io::stdout().lock();
+    match stdout
+        .write_all(text.as_bytes())
+        .and_then(|()| stdout.flush())
+    {
+        Ok(()) => earned,
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => earned,
+        Err(error) => {
+            eprintln!("rotter: cannot write output: {}", clean(&error.to_string()));
+            ExitCode::from(2)
+        }
+    }
+}
+
 fn main() -> ExitCode {
     let args: Result<Vec<String>, _> = std::env::args_os()
         .skip(1)
@@ -230,8 +248,7 @@ fn main() -> ExitCode {
         .as_slice()
     {
         ["--skill"] => {
-            print!("{SKILL}");
-            return ExitCode::SUCCESS;
+            return emit(SKILL, ExitCode::SUCCESS);
         }
         ["hook", rest @ ..] => {
             // A hook must never fail the host's turn: every `rotter hook …` exits 0, even on a
@@ -303,7 +320,10 @@ fn main() -> ExitCode {
     if let Some(result) = result {
         let error = match result {
             Ok((text, error)) => {
-                print!("{text}");
+                let written = emit(&text, ExitCode::SUCCESS);
+                if written != ExitCode::SUCCESS {
+                    return written;
+                }
                 error
             }
             Err(error) => Some(error),
@@ -322,8 +342,7 @@ fn main() -> ExitCode {
         .take_while(|arg| *arg != "--")
         .any(|arg| arg == "-h" || arg == "--help")
     {
-        println!("{USAGE}");
-        return ExitCode::SUCCESS;
+        return emit(&format!("{USAGE}\n"), ExitCode::SUCCESS);
     }
     let (dir, mut options, languages) = match parse_args(&args) {
         Ok(parsed) => parsed,
@@ -352,8 +371,7 @@ fn main() -> ExitCode {
                     text.len() >> 20
                 );
             }
-            print!("{text}");
-            ExitCode::from(if report.complete { 0 } else { 1 })
+            emit(&text, ExitCode::from(if report.complete { 0 } else { 1 }))
         }
         Err(error) => {
             eprintln!("rotter: {}", clean(&error));

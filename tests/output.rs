@@ -763,3 +763,21 @@ fn integration_and_parser_list_documents() {
     assert!(text.contains("\npython      available  -\n"), "{text}");
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn a_closed_stdout_keeps_the_earned_exit_status() {
+    // The reader is gone before rotter writes: the write fails with EPIPE, which must not panic
+    // (exit 101) or turn into an error.
+    for (args, code) in [(&["--skill"][..], 0), (&["--help"], 0)] {
+        let (reader, writer) = std::io::pipe().unwrap();
+        drop(reader);
+        let output = Command::new(env!("CARGO_BIN_EXE_rotter"))
+            .args(args)
+            .stdout(writer)
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(code), "{args:?}: {output:?}");
+        assert!(output.stderr.is_empty(), "{args:?}: {output:?}");
+    }
+}
