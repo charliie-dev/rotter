@@ -6,6 +6,7 @@ pub mod hosts;
 pub mod install;
 pub mod integration;
 pub mod json;
+pub mod render;
 
 pub use comments::{Change, error_lines, full_units, units};
 pub use git::{Git, Mode, Options, Report, extract, extract_with, toplevel};

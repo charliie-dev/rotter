@@ -1,7 +1,8 @@
 use rotter::config::{self, Config, Sources};
 use rotter::json::Json;
+use rotter::render::{self, Color, clean};
 use rotter::{Git, Mode, Options, extract_with, hosts, install, integration, toplevel};
-use std::io::Read;
+use std::io::{IsTerminal, Read};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -19,6 +20,7 @@ const USAGE: &str = "usage: rotter --skill
        rotter extract (--staged | --worktree | --base <rev> | --full)
                       [--include-untracked] [--lang <glob>=<language>]... [-C <dir>]
                       [-- <pathspec>...]
+Every command but --skill and hook takes [--pretty [--color=(auto | always | never)]].
 
 --skill prints the comment review skill for coding agents (it matches this binary's version).
 integration install claude registers `'<rotter>' hook claude-stop || true` as a Claude Code Stop
@@ -55,8 +57,13 @@ Exit status: 0 complete, 1 printed but incomplete (unreadable, unparsed or unsup
 
 Output is one indented JSON document on stdout (extract: rotter.extract.poc/0; integration
 status: rotter.status/1; install and uninstall: rotter.integration/1; parser list:
-rotter.parsers/1; parser install: rotter.parser_install/1). Errors are `rotter: <message>` on
-stderr with nothing on stdout, except that a failed parser install still prints its document.";
+rotter.parsers/1; parser install: rotter.parser_install/1). JSON strings escape only characters
+below U+0020, `\"` and `\\`: DEL and C1 characters pass through raw, so render values safely.
+--pretty prints an aligned, human-readable rendering instead, with control, bidi and zero-width
+characters shown as \\u{..}; only the flag selects it. --color (auto by default) colours it when
+auto finds stdout a terminal, NO_COLOR unset or empty and TERM not dumb; always and never force
+it. For extract these flags go before --. Errors are `rotter: <message>` on stderr with nothing
+on stdout, except that a failed parser install still prints its document.";
 
 /// `--lang` values, resolved once the config says which external languages exist.
 type LangArgs = Vec<(String, String)>;
@@ -111,11 +118,50 @@ fn parse_args(args: &[String]) -> Result<(PathBuf, Options, LangArgs), String> {
     Ok((dir, options, languages))
 }
 
+/// Takes `--pretty` and `--color=<when>` out of `args` for the commands that print a document:
+/// only after the subcommand words and, for extract, before `--`; `hook`, `--skill` and anything
+/// else keep their arguments. Returns the colour choice when `--pretty` was given.
+fn output_flags(args: &mut Vec<String>) -> Result<Option<Color>, String> {
+    let start = match args.first().map(String::as_str) {
+        Some("extract") => 1,
+        Some("integration" | "parser") => 2,
+        _ => return Ok(None),
+    };
+    let (mut pretty, mut color) = (false, None);
+    let mut index = start;
+    while index < args.len() && args[index] != "--" {
+        match args[index].as_str() {
+            "--pretty" => pretty = true,
+            "--color" => {
+                return Err("--color takes its value as --color=<auto|always|never>".into());
+            }
+            arg => match arg.strip_prefix("--color=") {
+                Some(value) => {
+                    color = Some(
+                        Color::parse(value)
+                            .ok_or_else(|| format!("unknown --color value: {value}"))?,
+                    );
+                }
+                None => {
+                    index += 1;
+                    continue;
+                }
+            },
+        }
+        args.remove(index);
+    }
+    match (pretty, color) {
+        (false, Some(_)) => Err("--color applies only with --pretty".into()),
+        (false, None) => Ok(None),
+        (true, color) => Ok(Some(color.unwrap_or(Color::Auto))),
+    }
+}
+
 /// Loads the config for a CLI command; an untrusted config is reported and ignored.
 fn cli_config(repo: Option<&Path>) -> Result<Config, String> {
     let loaded = config::load(repo, &Sources::from_env())?;
     if let Some(note) = loaded.note {
-        eprintln!("rotter: {note}");
+        eprintln!("rotter: {}", clean(&note));
     }
     Ok(loaded.config)
 }
@@ -148,7 +194,7 @@ fn main() -> ExitCode {
         .skip(1)
         .map(|arg| arg.into_string())
         .collect();
-    let Ok(args) = args else {
+    let Ok(mut args) = args else {
         eprintln!("rotter: arguments must be UTF-8");
         // Even a malformed `rotter hook …` must not fail the host's turn.
         let hook = std::env::args_os().nth(1).is_some_and(|arg| arg == "hook");
@@ -158,7 +204,25 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         };
     };
-    let show = |json: &Json| format!("{json}\n");
+    let pretty = match output_flags(&mut args) {
+        Ok(choice) => choice.map(|choice| {
+            render::color_on(
+                choice,
+                std::io::stdout().is_terminal(),
+                std::env::var_os("NO_COLOR").as_deref(),
+                std::env::var_os("TERM").as_deref(),
+            )
+        }),
+        Err(error) => {
+            eprintln!("rotter: {}\n{USAGE}", clean(&error));
+            return ExitCode::from(2);
+        }
+    };
+    // The document, or with --pretty its rendering (Some(colour)).
+    let show = |json: &Json, rendered: &dyn Fn(bool) -> String| match pretty {
+        Some(color) => rendered(color),
+        None => format!("{json}\n"),
+    };
     let result: Option<Result<(String, Option<String>), String>> = match args
         .iter()
         .map(String::as_str)
@@ -198,7 +262,7 @@ fn main() -> ExitCode {
             cli_config(None)
                 .and_then(|config| integration::install(name, config.parse_timeout_seconds))
                 .map(|done| {
-                    let text = show(&done.json());
+                    let text = show(&done.json(), &|color| render::integration(&done, color));
                     (text, None)
                 }),
         ),
@@ -211,24 +275,26 @@ fn main() -> ExitCode {
                 let names: Vec<String> = names.iter().map(|name| (*name).to_owned()).collect();
                 let done = install::install(&loaded.config, &names)?;
                 // A failure after the first grammar keeps the document of what was done.
-                let text = show(&done.json());
+                let text = show(&done.json(), &|color| render::parser_install(&done, color));
                 Ok((text, done.error))
             }))
         }
         ["parser", "list"] => Some(cli_config(None).map(|config| {
             let parsers = install::list(&config);
-            let text = show(&install::list_json(&parsers));
+            let text = show(&install::list_json(&parsers), &|color| {
+                render::parsers(&parsers, color)
+            });
             (text, None)
         })),
         ["integration", "uninstall", name] => Some(integration::uninstall(name).map(|done| {
-            let text = show(&done.json());
+            let text = show(&done.json(), &|color| render::integration(&done, color));
             (text, None)
         })),
         ["integration", "status"] => Some(
             cli_config(None)
                 .and_then(|config| integration::status(config.parse_timeout_seconds))
                 .map(|status| {
-                    let text = show(&status.json());
+                    let text = show(&status.json(), &|color| render::status(&status, color));
                     (text, None)
                 }),
         ),
@@ -244,37 +310,42 @@ fn main() -> ExitCode {
         };
         return match error {
             Some(error) => {
-                eprintln!("rotter: {error}");
+                eprintln!("rotter: {}", clean(&error));
                 ExitCode::from(2)
             }
             None => ExitCode::SUCCESS,
         };
     }
-    if args.iter().any(|arg| arg == "-h" || arg == "--help") {
+    // Arguments after `--` are pathspecs, never options.
+    if args
+        .iter()
+        .take_while(|arg| *arg != "--")
+        .any(|arg| arg == "-h" || arg == "--help")
+    {
         println!("{USAGE}");
         return ExitCode::SUCCESS;
     }
     let (dir, mut options, languages) = match parse_args(&args) {
         Ok(parsed) => parsed,
         Err(error) => {
-            eprintln!("rotter: {error}\n{USAGE}");
+            eprintln!("rotter: {}\n{USAGE}", clean(&error));
             return ExitCode::from(2);
         }
     };
     let git = match Git::cli(&dir) {
         Ok(git) => git,
         Err(error) => {
-            eprintln!("rotter: {error}");
+            eprintln!("rotter: {}", clean(&error));
             return ExitCode::from(2);
         }
     };
     if let Err(error) = configure(&git, &dir, &mut options, languages) {
-        eprintln!("rotter: {error}");
+        eprintln!("rotter: {}", clean(&error));
         return ExitCode::from(2);
     }
     match extract_with(&git, &dir, &options) {
         Ok(report) => {
-            let text = show(&report.json);
+            let text = show(&report.json, &|color| render::extract(&report.json, color));
             if text.len() > 5 << 20 {
                 eprintln!(
                     "rotter: report is {} MiB; consider limiting it with -- <pathspec>",
@@ -285,7 +356,7 @@ fn main() -> ExitCode {
             ExitCode::from(if report.complete { 0 } else { 1 })
         }
         Err(error) => {
-            eprintln!("rotter: {error}");
+            eprintln!("rotter: {}", clean(&error));
             ExitCode::from(2)
         }
     }

@@ -406,6 +406,75 @@ fn offline_lua2_install_then_extract() {
 }
 
 #[test]
+fn partial_install_prints_what_was_installed_and_fails() {
+    let world = World::new("partial");
+    let src = world.root.join("lua-src");
+    copy_lua(&src);
+    // The second grammar's local path does not exist, and its name carries an ESC.
+    let gone = world.root.join("gone\u{1b}]52;c;aGk=\u{7}");
+    world.write_config(&format!(
+        "{}{}",
+        lua2(&src),
+        lua2(&gone)
+            .replace("lua2", "lua3")
+            .replace("\u{1b}", "\\u001b")
+            .replace('\u{7}', "\\u0007")
+    ));
+    let output = world.install(&["lua2", "lua3"]);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let done = document(&output, "rotter.parser_install/1");
+    let parsers = done["parsers"].as_array().unwrap();
+    assert_eq!(parsers.len(), 2, "{done}");
+    assert_eq!(
+        (&parsers[0]["name"], &parsers[0]["result"]),
+        (&"lua2".into(), &"installed".into())
+    );
+    assert!(
+        parsers[0]["path"].as_str().unwrap().ends_with(EXT),
+        "{done}"
+    );
+    assert_eq!(parsers[0]["detail"], Value::Null);
+    assert_eq!(
+        (
+            &parsers[1]["name"],
+            &parsers[1]["result"],
+            &parsers[1]["path"]
+        ),
+        (&"lua3".into(), &"failed".into(), &Value::Null)
+    );
+    let detail = parsers[1]["detail"].as_str().unwrap();
+    assert!(detail.contains("gone\u{1b}]52"), "{done}");
+    assert!(
+        done["notes"][0].as_str().unwrap().contains("in-process"),
+        "{done}"
+    );
+    // The document is all of stdout; the error, with the ESC and BEL escaped, is on stderr.
+    assert!(output.stdout.ends_with(b"}\n"));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(stderr.lines().count(), 1, "{stderr}");
+    assert!(stderr.starts_with("rotter: lua3: "), "{stderr}");
+    assert!(stderr.contains("gone\\u{1b}]52;c;aGk=\\u{7}"), "{stderr}");
+    assert!(!stderr.contains(['\u{1b}', '\u{7}']), "{stderr:?}");
+    // The pretty form of the same run.
+    let text = String::from_utf8(
+        world
+            .run(&[
+                "parser",
+                "install",
+                "lua2",
+                "lua3",
+                "--pretty",
+                "--color=never",
+            ])
+            .stdout,
+    )
+    .unwrap();
+    assert!(text.starts_with("lua2  installed  /"), "{text}");
+    assert!(text.contains("\nlua3  failed     -\n  "), "{text}");
+    assert!(!text.contains(['\u{1b}', '\u{7}']), "{text:?}");
+}
+
+#[test]
 fn loader_refuses_unsafe_cache_layouts() {
     let mut world = World::new("loader");
     let src = world.root.join("lua-src");

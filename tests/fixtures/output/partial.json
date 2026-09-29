@@ -1,0 +1,133 @@
+{
+  "tool": "rotter",
+  "schema": "rotter.extract.poc/0",
+  "stage": "extraction",
+  "semantic_verification": "not_performed",
+  "mode": "base",
+  "repository": "@REPO@",
+  "before": {
+    "rev": "HEAD~1",
+    "commit": "a14f81cef437cce8eff699fc279ad2f453f0f122",
+    "empty_initial": false
+  },
+  "pathspec": [],
+  "after": "worktree",
+  "untracked": {
+    "included": false,
+    "not_covered": []
+  },
+  "complete": false,
+  "files": [
+    {
+      "change": "modified",
+      "similarity": null,
+      "old_path": "b.go",
+      "new_path": "b.go",
+      "complete": false,
+      "hunks": [
+        {
+          "before": [4, 1],
+          "after": [4, 3]
+        }
+      ],
+      "before": {
+        "path": "b.go",
+        "language": "go",
+        "dialect": "go",
+        "blob": "78cc4dacb4da8b9a42f0cb632218b7e31887b3b6",
+        "status": "ok",
+        "detail": null,
+        "units": [
+          {
+            "kind": "function_declaration",
+            "name": "G",
+            "range": {
+              "lines": [4, 4],
+              "bytes": [25, 50]
+            },
+            "selected_by": "change",
+            "referenced_name": null,
+            "omitted_reference_units": 0,
+            "changed_lines": [4],
+            "gaps_between_lines": [],
+            "enclosing": [],
+            "overlaps_syntax_error": false,
+            "text": "func G() int { return 1 }",
+            "text_truncated": false,
+            "comments": [
+              {
+                "relation": "leading",
+                "style": "line",
+                "directive": null,
+                "changed": false,
+                "range": {
+                  "lines": [3, 3],
+                  "bytes": [11, 24]
+                },
+                "text": "// G is fine."
+              }
+            ]
+          }
+        ]
+      },
+      "after": {
+        "path": "b.go",
+        "language": "go",
+        "dialect": "go",
+        "blob": "6e29eca86d2b7eb7884015c92d5927fd9bb53428",
+        "status": "partial",
+        "detail": "syntax errors near lines 6",
+        "units": [
+          {
+            "kind": "function_declaration",
+            "name": "G",
+            "range": {
+              "lines": [4, 4],
+              "bytes": [25, 50]
+            },
+            "selected_by": "change",
+            "referenced_name": null,
+            "omitted_reference_units": 0,
+            "changed_lines": [4],
+            "gaps_between_lines": [],
+            "enclosing": [],
+            "overlaps_syntax_error": false,
+            "text": "func G() int { return 2 }",
+            "text_truncated": false,
+            "comments": [
+              {
+                "relation": "leading",
+                "style": "line",
+                "directive": null,
+                "changed": false,
+                "range": {
+                  "lines": [3, 3],
+                  "bytes": [11, 24]
+                },
+                "text": "// G is fine."
+              }
+            ]
+          },
+          {
+            "kind": "ERROR",
+            "name": null,
+            "range": {
+              "lines": [6, 6],
+              "bytes": [52, 61]
+            },
+            "selected_by": "change",
+            "referenced_name": null,
+            "omitted_reference_units": 0,
+            "changed_lines": [6],
+            "gaps_between_lines": [],
+            "enclosing": [],
+            "overlaps_syntax_error": true,
+            "text": "func H( {",
+            "text_truncated": false,
+            "comments": []
+          }
+        ]
+      }
+    }
+  ]
+}
