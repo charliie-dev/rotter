@@ -208,7 +208,8 @@ pub fn units(grammar: &Grammar, source: &str, tree: &Tree, changes: &[Change]) -
             continue;
         }
         let mut added = 0;
-        let mut omitted = 0;
+        // Units past the cap, each counted once however often it uses the name.
+        let mut omitted: Vec<Node<'_>> = Vec::new();
         for identifier in &file.identifiers {
             if file.source[identifier.byte_range()] != name || overlaps(item.node, *identifier) {
                 continue;
@@ -222,13 +223,15 @@ pub fn units(grammar: &Grammar, source: &str, tree: &Tree, changes: &[Change]) -
                 continue;
             }
             if added == MAX_REFERENCES {
-                omitted += 1;
+                if !omitted.iter().any(|other| overlaps(*other, unit)) {
+                    omitted.push(unit);
+                }
                 continue;
             }
             added += 1;
             references.push(Selected::new(unit, Some(name.clone())));
         }
-        kept[index].omitted_references = omitted;
+        kept[index].omitted_references = omitted.len();
     }
     kept.extend(references);
     Json::Arr(kept.iter().map(|item| file.unit_json(item)).collect())

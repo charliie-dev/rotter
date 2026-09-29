@@ -774,6 +774,28 @@ fn changed_names_pull_in_same_file_users_with_a_cap() {
 }
 
 #[test]
+fn omitted_reference_units_are_counted_once_each() {
+    let repo = Repo::new();
+    // 20 users fill the cap; the 5 after it use the name three times each.
+    let users: String = (0..25)
+        .map(|index| {
+            let uses = if index < 20 { 1 } else { 3 };
+            let body = "_ = maxAttempts; ".repeat(uses);
+            format!("// U{index} runs.\nfunc U{index}() {{ {body}}}\n\n")
+        })
+        .collect();
+    let source = |value: u8| format!("package p\n\nconst maxAttempts = {value}\n\n{users}");
+    repo.write("a.go", &source(3));
+    repo.commit();
+    repo.write("a.go", &source(5));
+    let report = repo.extract(Mode::Worktree, false);
+    let after = file(&report.json, "a.go").get("after");
+    let changed = unit(after, "maxAttempts");
+    assert_eq!(changed.get("omitted_reference_units").as_u64(), Some(5));
+    assert_eq!(after.get("units").as_arr().len(), 21);
+}
+
+#[test]
 fn long_names_still_pull_in_their_users() {
     let repo = Repo::new();
     let long = format!("maxAttempts{}", "X".repeat(80));
