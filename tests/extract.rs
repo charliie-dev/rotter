@@ -774,6 +774,29 @@ fn changed_names_pull_in_same_file_users_with_a_cap() {
 }
 
 #[test]
+fn long_names_still_pull_in_their_users() {
+    let repo = Repo::new();
+    let long = format!("maxAttempts{}", "X".repeat(80));
+    let source = |value: u8| {
+        format!("package p\n\nconst {long} = {value}\n\n// U runs.\nfunc U() {{ _ = {long} }}\n")
+    };
+    repo.write("a.go", &source(3));
+    repo.commit();
+    repo.write("a.go", &source(5));
+    let report = repo.extract(Mode::Worktree, false);
+    let after = file(&report.json, "a.go").get("after");
+    let shown: String = long.chars().take(80).collect();
+    assert_eq!(
+        unit(after, &shown).get("selected_by").as_str(),
+        Some("change")
+    );
+    let user = unit(after, "U");
+    assert_eq!(user.get("selected_by").as_str(), Some("reference"));
+    // JSON names stay at 80 characters; matching used the full one.
+    assert_eq!(user.get("referenced_name").as_str(), Some(shown.as_str()));
+}
+
+#[test]
 fn function_values_are_units_and_keep_their_leading_comments() {
     let repo = Repo::new();
     repo.write(

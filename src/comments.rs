@@ -26,6 +26,12 @@ fn touches(error: &Range<usize>, unit: Range<usize>) -> bool {
     }
 }
 
+/// A name as reported in JSON: at most 80 characters, so one long identifier cannot bloat the
+/// report. Matching always uses the full name.
+fn shown(name: &str) -> String {
+    name.chars().take(80).collect()
+}
+
 /// Last row that holds text of `node`; Rust doc comments end at column 0 of the next row.
 fn last_row(node: Node<'_>) -> usize {
     let end = node.end_position();
@@ -500,7 +506,7 @@ impl<'t> File<'t> {
     }
 
     fn name(&self, node: Node<'_>) -> Json {
-        self.name_text(node).into()
+        self.name_text(node).map(|name| shown(&name)).into()
     }
 
     fn name_text(&self, node: Node<'_>) -> Option<String> {
@@ -515,15 +521,10 @@ impl<'t> File<'t> {
         if name.kind().ends_with("_spec") {
             return self.name_text(name);
         }
+        // The full first line: units() matches identifiers against it exactly, so only the
+        // JSON fields are shortened (shown).
         let text = &self.source[name.byte_range()];
-        Some(
-            text.lines()
-                .next()
-                .unwrap_or_default()
-                .chars()
-                .take(80)
-                .collect(),
-        )
+        Some(text.lines().next().unwrap_or_default().to_owned())
     }
 
     /// One JSON entry for a run of adjacent comments that share a relation and style.
@@ -643,7 +644,10 @@ impl<'t> File<'t> {
                 })
                 .into(),
             ),
-            ("referenced_name", item.reference.clone().into()),
+            (
+                "referenced_name",
+                item.reference.as_deref().map(shown).into(),
+            ),
             ("omitted_reference_units", item.omitted_references.into()),
             (
                 "changed_lines",
