@@ -159,8 +159,8 @@ rotter integration status --pretty --color=never
 （U+202A–U+202E、U+2066–U+2069、U+200E、U+200F、U+061C）與零寬字元（U+200B–U+200D、U+2060、
 U+FEFF）顯示為 `\u{…}`；單行欄位的換行與 tab 也跳脫，程式碼保留 tab、CRLF 的 CR 不顯示、其他 CR
 跳脫。stderr 的 `rotter: <訊息>` 也經過同樣處理。非 UTF-8 路徑在 `path` 中以替代字元顯示，
-可能與其他路徑看起來相同；這種檔案不分析，狀態為 `non_utf8_path`，`detail` 以跳脫形式列出原始
-bytes（如 `a\x80.go`）。
+可能與其他路徑看起來相同；在範圍內的這種檔案不分析，狀態為 `non_utf8_path`，`detail` 以跳脫形式
+列出原始 bytes（如 `a\x80.go`）。
 
 ## 設定檔與外部 parser（opt-in）
 
