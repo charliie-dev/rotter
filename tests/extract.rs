@@ -839,6 +839,34 @@ fn units_another_changed_unit_picks_up_are_not_counted_as_omitted() {
 }
 
 #[test]
+fn an_omitted_unit_stays_counted_when_only_a_nested_unit_is_selected() {
+    let repo = Repo::new();
+    // foo's 20 users fill its cap, so `outer` is omitted for foo; bar then selects only the
+    // `inner` function nested in it, which does not show outer's use of foo.
+    let users: String = (0..20)
+        .map(|index| format!("fn u{index}() -> u8 {{ foo() }}\n"))
+        .collect();
+    let source = |value: u8| {
+        format!(
+            "pub fn foo() -> u8 {{ {value} }}\npub fn bar() -> u8 {{ {value} }}\n{users}fn outer() -> u8 {{\n    let x = foo();\n    fn inner() -> u8 {{ bar() }}\n    x + inner()\n}}\n"
+        )
+    };
+    repo.write("a.rs", &source(1));
+    repo.commit();
+    repo.write("a.rs", &source(2));
+    let report = repo.extract(Mode::Worktree, false);
+    let after = file(&report.json, "a.rs").get("after");
+    assert_eq!(
+        unit(after, "foo").get("omitted_reference_units").as_u64(),
+        Some(1)
+    );
+    assert_eq!(
+        unit(after, "inner").get("selected_by").as_str(),
+        Some("reference")
+    );
+}
+
+#[test]
 fn omitted_reference_units_are_counted_once_each() {
     let repo = Repo::new();
     // 20 users fill the cap; the 5 after it use the name three times each.

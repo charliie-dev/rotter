@@ -200,7 +200,8 @@ pub fn units(grammar: &Grammar, source: &str, tree: &Tree, changes: &[Change]) -
     };
     let mut references: Vec<Selected<'_>> = Vec::new();
     // Per changed unit, the units past its cap; settled once every changed unit has picked its
-    // references, since a later unit with the same name may pick them after all.
+    // references, since another changed unit may select one of them, or a unit containing it,
+    // after all.
     let mut omitted_by: Vec<(usize, Vec<Node<'_>>)> = Vec::new();
     for index in 0..kept.len() {
         let item = &kept[index];
@@ -239,7 +240,14 @@ pub fn units(grammar: &Grammar, source: &str, tree: &Tree, changes: &[Change]) -
     for (index, omitted) in omitted_by {
         kept[index].omitted_references = omitted
             .iter()
-            .filter(|unit| !references.iter().any(|other| overlaps(other.node, **unit)))
+            // Only a selected reference that contains the unit shows its text; one nested inside
+            // it (an impl's method, a function's inner function) does not.
+            .filter(|unit| {
+                !references.iter().any(|other| {
+                    file.start_byte(other.node) <= file.start_byte(**unit)
+                        && unit.end_byte() <= other.node.end_byte()
+                })
+            })
             .count();
     }
     kept.extend(references);
