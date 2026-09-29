@@ -16,6 +16,24 @@ fn has(kinds: &[String], kind: &str) -> bool {
     kinds.iter().any(|known| known == kind)
 }
 
+/// Visits `root` and its descendants in document order; `visit` returns whether to go into the
+/// node's children. A tree cursor instead of recursion, so a deeply nested file cannot exhaust
+/// the stack (an overflow aborts, which no panic guard catches).
+fn preorder<'t>(root: Node<'t>, mut visit: impl FnMut(Node<'t>) -> bool) {
+    let mut cursor = root.walk();
+    loop {
+        if visit(cursor.node()) && cursor.goto_first_child() {
+            continue;
+        }
+        // The cursor never leaves `root`: at it, both moves below fail.
+        while !cursor.goto_next_sibling() {
+            if !cursor.goto_parent() {
+                return;
+            }
+        }
+    }
+}
+
 /// Whether a syntax-error byte range touches a unit's; both are end-exclusive. An ERROR must share
 /// a byte, while a zero-width MISSING node counts inside the unit or on either edge.
 fn touches(error: &Range<usize>, unit: Range<usize>) -> bool {
@@ -93,20 +111,14 @@ const FULL_TEXT_LINES: usize = 80;
 
 /// 1-based lines of syntax errors, for reporting a partial parse.
 pub fn error_lines(tree: &Tree) -> Vec<usize> {
-    fn walk(node: Node<'_>, rows: &mut BTreeSet<usize>) {
+    let mut rows = BTreeSet::new();
+    preorder(tree.root_node(), |node| {
         if node.is_error() || node.is_missing() {
             rows.insert(node.start_position().row + 1);
-            return;
+            return false;
         }
-        let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            if child.has_error() || child.is_missing() {
-                walk(child, rows);
-            }
-        }
-    }
-    let mut rows = BTreeSet::new();
-    walk(tree.root_node(), &mut rows);
+        node.has_error()
+    });
     rows.into_iter().collect()
 }
 
@@ -242,7 +254,7 @@ impl<'t> File<'t> {
             errors: Vec::new(),
             text_limit: None,
         };
-        file.scan(root);
+        preorder(root, |node| file.scan(node));
         for comment in file.comments.clone() {
             if file.standalone(comment) {
                 file.by_start_row
@@ -256,13 +268,14 @@ impl<'t> File<'t> {
         file
     }
 
-    fn scan(&mut self, node: Node<'t>) {
+    /// Records one node; returns whether its children are scanned (not a comment's).
+    fn scan(&mut self, node: Node<'t>) -> bool {
         if node.is_error() || node.is_missing() {
             self.errors.push(node.byte_range());
         }
         if has(&self.grammar.comment_kinds, node.kind()) {
             self.comments.push(node);
-            return;
+            return false;
         }
         let kind = node.kind();
         if self.grammar.references
@@ -275,10 +288,7 @@ impl<'t> File<'t> {
             self.attribute_rows
                 .extend(node.start_position().row..=last_row(node));
         }
-        let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            self.scan(child);
-        }
+        true
     }
 
     fn line(&self, row: usize) -> &'t str {
@@ -747,7 +757,34 @@ fn directive<'g>(grammar: &'g Grammar, text: &str) -> Option<&'g str> {
 
 #[cfg(test)]
 mod tests {
-    use super::touches;
+    use super::{Json, error_lines, full_units, touches};
+    use crate::{Grammar, Language, parse_partial};
+
+    #[test]
+    fn deeply_nested_files_do_not_exhaust_the_stack() {
+        // Test threads get a 2 MiB stack; a recursive walk overflows here and aborts the process.
+        let depth = 100_000;
+        let nested = format!(
+            "fn f() -> i32 {{ {}1{} }}\n",
+            "(".repeat(depth),
+            ")".repeat(depth)
+        );
+        let grammar = Grammar::builtin(Language::Rust);
+        let tree = parse_partial(Language::Rust, &nested).unwrap();
+        assert!(error_lines(&tree).is_empty());
+        // No comments, so no units are selected; the point is that the walk finishes.
+        assert!(
+            matches!(full_units(&grammar, &nested, &tree), Json::Arr(units) if units.is_empty())
+        );
+        // One parenthesis short: the error is found without recursing down the nesting.
+        let broken = format!(
+            "fn f() -> i32 {{ {}1{} }}\n",
+            "(".repeat(depth),
+            ")".repeat(depth - 1)
+        );
+        let tree = parse_partial(Language::Rust, &broken).unwrap();
+        assert_eq!(error_lines(&tree), [1]);
+    }
 
     #[test]
     fn errors_touch_a_unit_only_when_they_share_a_byte() {
