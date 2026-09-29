@@ -2563,7 +2563,7 @@ mod tests {
                     text.replace("\"/opt/rotter\"", "\"/opt/\\u0072otter\""),
                     text.replace("\"/opt/rotter\"", "\"rotter\""),
                     text.replace("\"/opt/rotter\"", "\"/opt/$x\""),
-                    text.replace("MAX_REQUESTS = 2", "MAX_REQUESTS = 3"),
+                    text.replace("MAX_STDOUT = 65536", "MAX_STDOUT = 65537"),
                     text.replacen("//", "// x", 1),
                     String::new(),
                 ];

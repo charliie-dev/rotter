@@ -7,7 +7,6 @@ const EXE = "/opt/it's \"q\"\\ dir/ünï/rotter";
 const TIMEOUT = 90;
 const HOST = "opencode";
 const MAX_STDOUT = 65536;
-const MAX_REQUESTS = 2;
 
 // Runs `rotter hook opencode --timeout <n>` with `input` on stdin and resolves to the review
 // request, or null for anything else. Never rejects; settles once, at the latest when the timeout
@@ -100,23 +99,15 @@ function ask(input) {
   });
 }
 
-// At most MAX_REQUESTS consecutive requests per session and one run at a time; a stop that asks
-// nothing, including the one the cap silences, starts the count again.
-const counts = new Map();
+// One run at a time. The per-session cap on consecutive requests lives in rotter itself, which
+// keeps it on disk and fails closed; a second count here would silence one more stop than it.
 let inFlight = false;
 
 async function review(session, cwd) {
   if (inFlight || typeof session !== "string" || typeof cwd !== "string") return null;
-  const count = counts.get(session) ?? 0;
-  if (count >= MAX_REQUESTS) {
-    counts.set(session, 0);
-    return null;
-  }
   inFlight = true;
   try {
-    const text = await ask({ session_id: session, cwd });
-    counts.set(session, text === null ? 0 : count + 1);
-    return text;
+    return await ask({ session_id: session, cwd });
   } finally {
     inFlight = false;
   }
@@ -125,7 +116,7 @@ async function review(session, cwd) {
 // OpenCode does not await event handlers, so this one never rejects. On `session.idle` of a
 // top-level session it asks rotter and re-prompts with rotter's request through `promptAsync`,
 // which returns at once: the in-flight flag is already released when the injected turn runs, and
-// its own idle counts towards the cap like any other stop.
+// its own idle reaches rotter like any other stop, so rotter's cap ends the chain.
 export const RotterReview = async (input) => {
   try {
     const client = input?.client;

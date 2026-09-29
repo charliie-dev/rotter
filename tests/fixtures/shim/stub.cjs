@@ -43,6 +43,19 @@ switch (mode) {
     record(fs.readFileSync(0, "utf8"));
     setTimeout(() => process.stdout.write(reply, () => process.exit(0)), 1000);
     break;
+  case "capped": {
+    // Rotter's own per-session cap: two consecutive requests, then one quiet answer that resets.
+    const stdin = fs.readFileSync(0, "utf8");
+    record(stdin);
+    const file = path.join(dir, "counts.json");
+    const counts = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : {};
+    const session = JSON.parse(stdin).session_id;
+    const count = counts[session] ?? 0;
+    counts[session] = count >= 2 ? 0 : count + 1;
+    fs.writeFileSync(file, JSON.stringify(counts));
+    process.stdout.write(count >= 2 ? "" : reply, () => process.exit(0));
+    break;
+  }
   default: {
     record(fs.readFileSync(0, "utf8"));
     const out = { reply, quiet: "", nonstring: '{"continue":5}', garbage: "not json {" }[mode];

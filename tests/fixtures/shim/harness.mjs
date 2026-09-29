@@ -126,7 +126,7 @@ const timed = async (promise) => {
 const answers = [];
 switch (scenario) {
   case "loop": {
-    // Three changing reports in one session: the third is suppressed, and it resets.
+    // Four stops in one session; with the capped stub the third is rotter's silent one.
     for (let turn = 0; turn < 4; turn += 1) answers.push(await timed(stop("s")));
     // One run at a time: a second stop while the first runs asks nothing.
     const [first, second] = await Promise.all([timed(stop("t")), timed(stop("t"))]);

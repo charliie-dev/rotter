@@ -321,8 +321,9 @@ pi、letta 與 opencode 沒有指令型 hook，只在自己的程序內載入程
   清除並 `unref`。只有 stdout 能解析成 JSON 且 `continue` 為字串時才採用。不使用 `exec`、`execSync`、
   `spawnSync`、`Bun.$`，也不把 `process.env` 傳給 rotter。
 - stdin 只有 `{"session_id":…,"cwd":…}`；rotter 的回覆為 `{"continue":<reason>}`，提示寫到 stderr
-  （shim 忽略）。shim 另有記憶體中的每 session 計數（同樣最多連續 2 次，被上限靜默的那次歸零）與
-  「同時只跑一次」旗標；rotter 端的計數、去重與 fail closed 規則與其他宿主相同。
+  （shim 忽略）。shim 只有「同時只跑一次」旗標，每次停下都交給 rotter；連續要求的上限只在 rotter 端
+  （計數存在磁碟上、fail closed），shim 不另外計數，否則會比 rotter 多靜默一次。rotter 端的計數、去重與
+  fail closed 規則與其他宿主相同。
 - `--timeout <n>`（正整數，其他值忽略）只會縮短 rotter 的軟性期限：`min(依設定計算, n) − 15 秒`，
   不會延長。
 - env-injectable：shim 只傳 PATH 與 LANG，而且 pi 的 release binary 會讀取工作目錄的 `.env`，所以
@@ -340,7 +341,7 @@ Bun 1.3.14 下各跑一次，letta 用 Node 24.21.0，opencode 用 Bun 1.3.14（
 含空白、引號與非 ASCII 的目錄）。驗證：直接執行（argv 恰為
 `hook <host> --timeout 1`）、環境只有 PATH 與 LANG（harness 設了 `LD_PRELOAD`、
 `DYLD_INSERT_LIBRARIES`、`DEVELOPER_DIR`、HOME、`GIT_DIR`、`ROTTER_STATE_DIR`）、stdin 內容、三次
-連續要求時第三次被壓下並歸零、同時兩次只跑一次、只有字串的 `continue` 被採用，以及 exe 不存在
+每次停下都交給 rotter（stub 模擬 rotter 的上限時，第三次由 rotter 靜默、第四次照常要求）、同時兩次只跑一次、只有字串的 `continue` 被採用，以及 exe 不存在
 （ENOENT）、不讀 stdin 就結束（EPIPE）、卡住（1 秒後殺掉整個 process group：孫程序原本會睡 300 秒，比 harness 活得久，
 測試結束時必須已不在；拿掉 timer 裡的 `kill()` 時此案例失敗）、
 輸出垃圾、輸出超過 64 KiB（卡住或結束）、恰在 timeout 時回覆、宿主 API 丟出例外、非 completed／
@@ -355,7 +356,7 @@ end_turn 的回合都靜默且不留下未處理的例外。
 | 載入 | `extensions/` 下直接的 `*.ts`／`*.js` 檔（或 symlink），以及子目錄的 `index.ts`／`index.js`／`package.json` 的 `pi.extensions`；以 jiti 載入（TypeScript 不需編譯）。`rotter-review.ts.rotter-tmp` 不以 `.ts`／`.js` 結尾，不會載入 |
 | 事件 | `agent_before_settle`：`{type, outcome: "completed"\|"aborted"\|"error", entries, continue, context}`，handler 為 `(event, ctx)`，依序 await（沒有 timeout），例外只回報為錯誤 |
 | session／cwd | `ctx.sessionManager.getSessionId()`、`ctx.cwd` |
-| 續跑判斷 | 沒有續跑旗標：只靠 rotter 的上限與 shim 的計數；shim 只處理 `outcome` 為 `completed` 的回合 |
+| 續跑判斷 | 沒有續跑旗標：只靠 rotter 的上限；shim 只處理 `outcome` 為 `completed` 的回合 |
 | 要求續跑 | 回傳 `{entries: [...event.entries, {type:"custom_message", customType:"rotter-review", content, display:true}], continue: true}`（「append entries and request one continuation」） |
 | 提示管道 | 預設 stderr（shim 忽略；沒有使用 `ctx.ui.notify`） |
 | 引擎 | npm 版：Node ≥ 22.19.0（`engines.node`、README），extension 由 jiti 載入；release binary：Bun 1.3.14 編譯（`build-binaries.yml`），extension 由內嵌的 `jiti/static`（jiti 2.7.0）以 `{moduleCache:false, tryNative:false}` 載入（`loader.ts`、`jiti-static-loader.ts`）。測試在 Node 24.21.0 與 Bun 1.3.14 下都執行；見下方「Bun 下沒有模擬的部分」 |
@@ -389,7 +390,7 @@ commit `fd889a2741891ee45116cb6131052d7fad220886`
 | 載入 | `mods/` 下直接的一般檔案（不跟隨 symlink、不以 `.` 開頭），副檔名為 `.js`、`.mjs`、`.ts`、`.tsx`；`rotter-review.js.rotter-tmp` 的副檔名是 `.rotter-tmp`，不會載入。模組須 default export 函式（或 `activate`） |
 | 事件 | `letta.events.on("turn_end", (event, ctx) => …)`：`{agentId, conversationId, stopReason, assistantMessage?}`，能力 `letta.capabilities.events.turns`；handler 被 await（沒有 timeout），例外被吞掉 |
 | session／cwd | `event.conversationId`，沒有時 `ctx.sessionId`；`ctx.cwd` |
-| 續跑判斷 | 沒有續跑旗標：只靠 rotter 的上限與 shim 的計數；shim 只處理 `stopReason` 為 `end_turn` 的回合 |
+| 續跑判斷 | 沒有續跑旗標：只靠 rotter 的上限；shim 只處理 `stopReason` 為 `end_turn` 的回合 |
 | 要求續跑 | 回傳 `{continue: "<訊息>"}`（非空字串），Letta 以它作為新的使用者訊息再跑一輪（受 `--max-turns` 約束） |
 | 提示管道 | 預設 stderr（shim 忽略） |
 | 引擎 | npm 版 `letta.js` 以 `Bun.build({target:"node"})` 打包並加上 `#!/usr/bin/env node`，`engines.node` ≥ 22.19.0（也列 `bun` ≥ 1.3.2）；測試以 Node 24.21.0 執行 |
@@ -413,8 +414,8 @@ commit `fd889a2741891ee45116cb6131052d7fad220886`
 | 事件 | `session.idle`，`properties` 為 `{sessionID}`，由 `SessionStatus.set` 在狀態變成 idle 時發出；plugin 的 `event` hook 收到 `{event: {id, type, properties}}`，以 `void hook["event"]?.(...)` 呼叫，**不被等待**（因此 handler 絕不 reject，否則成為 OpenCode 的 unhandled rejection） |
 | session／cwd | `event.properties.sessionID`；cwd 為 plugin 輸入的 `directory`（該 instance 的目錄；事件只送給 `location.directory` 相同的 instance） |
 | 子 session | 以 `client.session.get({path:{id}})` 取得 session，`parentID` 存在（subagent）或取不到時不做事 |
-| 續跑判斷 | 沒有續跑旗標：只靠 rotter 的上限與 shim 的計數；注入的提示是新的使用者訊息，shim 不把任何使用者訊息當成歸零的訊號 |
-| 要求續跑 | `client.session.promptAsync({path:{id}, body:{parts:[{type:"text", text}]}})`（`POST /session/{id}/prompt_async`，立即返回），在「同時只跑一次」旗標放開之後才呼叫，所以注入的那一輪結束時的 `session.idle` 照常經過計數；失敗被吞掉。這是使用者看得到的新訊息，內容是 rotter 的 `continue`：固定文字、數量、cwd（絕對路徑、無控制字元）與 shell 引用過的 binary 路徑，沒有報告內容或檔名 |
+| 續跑判斷 | 沒有續跑旗標：只靠 rotter 的上限；注入的提示是新的使用者訊息，shim 不把任何使用者訊息當成歸零的訊號 |
+| 要求續跑 | `client.session.promptAsync({path:{id}, body:{parts:[{type:"text", text}]}})`（`POST /session/{id}/prompt_async`，立即返回），在「同時只跑一次」旗標放開之後才呼叫，所以注入的那一輪結束時的 `session.idle` 照常交給 rotter 計數；失敗被吞掉。這是使用者看得到的新訊息，內容是 rotter 的 `continue`：固定文字、數量、cwd（絕對路徑、無控制字元）與 shell 引用過的 binary 路徑，沒有報告內容或檔名 |
 | 提示管道 | 預設 stderr（shim 忽略；沒有使用 `client.app.log`） |
 | timeout | shim 內的 timeout；OpenCode 不等待 handler，不設 120 秒上限 |
 | 引擎 | release binary 以 `Bun.build({compile})` 建置，macOS／Linux 用 Bun 1.3.14（根目錄 `package.json` 的 `packageManager: bun@1.3.14`）；測試以 Bun 1.3.14 執行 |
@@ -425,7 +426,7 @@ commit `fd889a2741891ee45116cb6131052d7fad220886`
 子 session 不執行 rotter；只有 rotter 要求審查時才呼叫 `promptAsync`（錯誤路徑全部靜默）；
 `promptAsync` reject 時被吞掉；stub `promptAsync` 在返回之前就先發出新的使用者訊息事件與下一個
 `session.idle` 時，第二個 idle 仍會詢問 rotter（旗標沒有被注入的那一輪佔住，改成佔住時此案例
-失敗），三個變動的報告中第三次被壓下（共 3 個 idle、2 次 rotter、2 次 `promptAsync`）。
+失敗），stub 模擬 rotter 的上限時，第三個 idle 由 rotter 靜默而結束這串（共 3 個 idle、3 次 rotter、2 次 `promptAsync`）。
 
 來源：<https://github.com/sst/opencode> commit `8d05153965bee0a1e46eccffe944dc84d0b0c6f1`
 （2026-09-28，2026-09-29 重新查閱）：`packages/opencode/src/config/plugin.ts`（`load` 的 glob）、

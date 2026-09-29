@@ -360,11 +360,11 @@ shim 在 Pi 的 `agent_before_settle`（只在執行 `completed` 時）、Letta 
 `stopReason` 為 `end_turn` 時）或 OpenCode 的 `session.idle`（只處理沒有 `parentID` 的頂層 session）以 `child_process.spawn` 直接執行 `rotter hook <host> --timeout <n>`
 （不經 shell、不用 `exec`／`spawnSync`），stdin 只有 `session_id` 與 `cwd`，環境只有 PATH 與
 LANG（不傳 `process.env`），stdout 超過 64 KiB、非 JSON、`continue` 不是字串、逾時（殺掉整個
-process group）或任何錯誤都靜默結束，每個 session 最多連續兩次要求、同時只跑一次。rotter 回
+process group）或任何錯誤都靜默結束，同時只跑一次；每個 session 連續要求的上限由 rotter 本身負責。rotter 回
 `{"continue":"…"}`，shim 把它加成 Pi 的 `custom_message`（並要求一次續跑）、Letta 的續跑訊息，或
 以 OpenCode 的 `client.session.promptAsync` 送出一則**看得見的新使用者訊息**（內容只有固定文字、
 數量、cwd 與引用過的 binary 路徑，沒有報告內容或檔名；送出前已放開「同時只跑一次」旗標，所以
-注入的那一輪結束時照常計數）。rotter 端這三個宿主的 HOME 取自密碼資料庫，XDG_*、ROTTER_*、TMPDIR 一律忽略（見
+注入的那一輪結束時照常交給 rotter 計數）。rotter 端這三個宿主的 HOME 取自密碼資料庫，XDG_*、ROTTER_*、TMPDIR 一律忽略（見
 [宿主契約](docs/hosts.md) 的 env-injectable 一節），`--timeout` 只會縮短執行時間。
 
 信任：shim 在宿主每次啟動時自動載入並在宿主程序內執行，宿主不會詢問；能改寫它的人本來就能改寫

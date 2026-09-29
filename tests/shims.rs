@@ -127,7 +127,7 @@ fn shims_install_exactly_their_render_and_leave_foreign_code_alone() {
         assert_eq!(state, "mismatch");
         assert!(detail.contains("timeout 61, expected 90"), "{detail}");
         // Foreign code at rotter's path: never rewritten or removed.
-        let foreign = rendered.replace("MAX_REQUESTS = 2", "MAX_REQUESTS = 9");
+        let foreign = rendered.replace("MAX_STDOUT = 65536", "MAX_STDOUT = 99");
         fs::write(&shim, &foreign).unwrap();
         for args in [&["install", host][..], &["uninstall", host]] {
             let (code, text) = integration(&root, args);
@@ -431,9 +431,10 @@ fn shims_run_rotter_without_a_shell_with_only_path_and_lang() {
 }
 
 #[test]
-fn shims_cap_consecutive_requests_and_run_one_at_a_time() {
+fn shims_leave_the_cap_to_rotter_and_run_one_at_a_time() {
     for (host, file, engine) in cells() {
-        let run = run(host, file, engine, "reply", "loop");
+        // The stub answers like rotter's own cap: two requests, then one quiet stop.
+        let run = run(host, file, engine, "capped", "loop");
         let answers: Vec<&Value> = run.answers.iter().map(|(answer, _)| answer).collect();
         let request = Value::from(REQUEST);
         assert_eq!(
@@ -448,23 +449,24 @@ fn shims_cap_consecutive_requests_and_run_one_at_a_time() {
             ],
             "{host} {engine}"
         );
-        // The suppressed and the concurrent stop never reached rotter.
-        assert_eq!(run.calls.len(), 4, "{host} {engine}");
+        // Every stop reached rotter, so its cap alone decided the silent one (the shim keeps no
+        // second count that would silence one more); only the concurrent stop did not.
+        assert_eq!(run.calls.len(), 5, "{host} {engine}");
         let _ = fs::remove_dir_all(run.stub.parent().unwrap());
     }
 }
 
 /// OpenCode's re-prompt starts a turn whose idle comes back to the plugin: the stub
 /// `promptAsync` emits the new user message and that idle before it returns. The in-flight flag
-/// is not held for the injected turn (the second idle asks again), the user message does not
-/// reset the cap, and across three changing reports the third request is still suppressed.
+/// is not held for the injected turn (the second idle asks again), every idle reaches rotter, and
+/// rotter's cap (emulated by the stub) ends the chain at the third one.
 #[test]
 fn opencode_re_prompts_are_capped_across_the_turns_they_start() {
     for engine in engines("opencode") {
-        let chain = run("opencode", "rotter-review.js", engine, "reply", "chain");
+        let chain = run("opencode", "rotter-review.js", engine, "capped", "chain");
         let answers: Vec<&Value> = chain.answers.iter().map(|(answer, _)| answer).collect();
         assert_eq!(answers, [REQUEST, REQUEST], "{engine}");
-        assert_eq!((chain.idles, chain.calls.len()), (3, 2), "{engine}");
+        assert_eq!((chain.idles, chain.calls.len()), (3, 3), "{engine}");
         let _ = fs::remove_dir_all(chain.stub.parent().unwrap());
         // A rejected re-prompt is swallowed.
         let rejected = run("opencode", "rotter-review.js", engine, "reply", "rejecting");
