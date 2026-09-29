@@ -778,13 +778,17 @@ fn changed_file_level_comments_are_their_own_unit_right_above_code() {
     let repo = Repo::new();
     repo.write("a.rs", "//! Crate docs.\nfn f() {}\n");
     repo.write("a.sh", "#!/usr/bin/env bash\nf() {\n  echo hi\n}\n");
+    repo.write("b.rs", "// Regular.\n//! Inner.\nfn g() {}\n");
     repo.commit();
     repo.write("a.rs", "//! Changed crate docs.\nfn f() {}\n");
     repo.write("a.sh", "#!/bin/bash\nf() {\n  echo hi\n}\n");
+    // A regular comment above a file-level one does not attach to the code below either.
+    repo.write("b.rs", "// Changed regular.\n//! Inner.\nfn g() {}\n");
     let report = repo.extract(Mode::Worktree, false);
     for (path, text, directive) in [
         ("a.rs", "//! Changed crate docs.", None),
         ("a.sh", "#!/bin/bash", Some("shebang")),
+        ("b.rs", "// Changed regular.", None),
     ] {
         let units = file(&report.json, path).get("after").get("units").as_arr();
         let [only] = units else {

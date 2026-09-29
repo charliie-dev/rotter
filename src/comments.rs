@@ -418,6 +418,11 @@ impl<'t> File<'t> {
                 return None;
             }
             if let Some(next) = self.by_start_row.get(&row) {
+                // A file-level comment ends the block: nothing above it attaches to the code
+                // below, since leading() stops there too.
+                if self.file_level(*next) {
+                    return None;
+                }
                 row = last_row(*next) + 1;
             } else if self.attribute_rows.contains(&row) {
                 row += 1;
