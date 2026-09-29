@@ -16,7 +16,6 @@ fn has(kinds: &[String], kind: &str) -> bool {
     kinds.iter().any(|known| known == kind)
 }
 
-/// Last row that holds text of `node`; Rust doc comments end at column 0 of the next row.
 /// Whether a syntax-error byte range touches a unit's; both are end-exclusive. An ERROR must share
 /// a byte, while a zero-width MISSING node counts inside the unit or on either edge.
 fn touches(error: &Range<usize>, unit: Range<usize>) -> bool {
@@ -27,6 +26,7 @@ fn touches(error: &Range<usize>, unit: Range<usize>) -> bool {
     }
 }
 
+/// Last row that holds text of `node`; Rust doc comments end at column 0 of the next row.
 fn last_row(node: Node<'_>) -> usize {
     let end = node.end_position();
     if end.column == 0 && end.row > node.start_position().row {
