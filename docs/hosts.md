@@ -4,7 +4,7 @@
 安裝後的確切格式與擁有權判斷，以及 hook 程序的環境可否被 project 設定注入。新增宿主前，
 本頁該宿主的每一格都要有出處；查不到時，提示管道預設為 stderr、續跑判斷預設為「只靠
 rotter 的上限」，其他格查不到就標為不支援。已支援：claude、grok、copilot，以及實驗性的 codex、
-droid、pi、letta、opencode（rotter 作者未在真實宿主上執行過，`status` 行尾標 `[experimental]`）；
+droid、pi、letta、opencode（rotter 作者未在真實宿主上執行過，`status` 的 `support` 為 `experimental`）；
 mastracode、devin、cursor、antigravity-cli 查核後標為不支援；omp、kilo、hermes 依使用者決定
 （S4，不再研究）直接標為「尚未支援（TODO）」（`status` 列出原因，`install` 退出碼 2，見 S2
 補遺末尾的「不支援」一節）。中國廠商的 agent（kimi、qwen、qodercli）刻意不在範圍內，不出現在
@@ -130,7 +130,7 @@ trust，皆與上表相符。
    退出碼 2）。
 
 找不到可用的 git 時，hook 靜默，`rotter extract` 退出碼 2，訊息列出被略過的候選與原因；
-`integration status` 的 `git:` 行也會顯示。
+`integration status` 的 `git` 也會顯示。
 
 殘留風險：會依 cwd 挑選程式的原生 dispatcher（例如 proto 的原生 shim）仍會通過；Apple 的
 `/usr/bin/git` 經 xcode-select 選擇實際的 git，hook 模式不傳 `DEVELOPER_DIR`；linked worktree 的
@@ -203,8 +203,8 @@ ROTTER_* 與 TMPDIR 一律忽略。沒有任何環境變數、參數或檔案能
 擁有權同 claude：`command` 恰為 `'<絕對路徑>' hook codex || true`；`'/x/rotter-proxy' hook codex`
 等其他形式是外來項目。因為信任記在索引上，install 在原位置改寫第一筆 rotter 項目、移除其他 rotter
 項目，沒有時才在最後附加一個 group；uninstall 只移除 rotter 自己清空的 group（rotter 的 group 通常
-在最後，不會使其他 hook 位移）。改寫後的項目 hash 不同，Codex 會要求重新信任。`status` 另外一行
-顯示 `[features]` 的狀態，並提醒 `/hooks` 信任（rotter 不檢查信任狀態，也不修改 Codex 設定）。
+在最後，不會使其他 hook 位移）。改寫後的項目 hash 不同，Codex 會要求重新信任。`status` 在 codex 的
+`notes` 顯示 `[features]` 的狀態，並提醒 `/hooks` 信任（rotter 不檢查信任狀態，也不修改 Codex 設定）。
 
 來源：<https://learn.chatgpt.com/docs/hooks>（原 developers.openai.com/codex/hooks）；openai/codex
 commit `5a5a4aa79696a4c8a46dea1c9c04066b22559332`：`codex-rs/utils/home-dir/src/lib.rs`

@@ -123,6 +123,43 @@ after oid 全為 0、前後都是一般檔案且 mode 相同）：以不跟隨 s
 Git 回傳後即刪除；`git diff --no-index` 以 `GIT_CEILING_DIRECTORIES=<暫存根目錄>` 執行。
 私有 index 副本只從一般檔案複製（`.git/index` 是 FIFO、symlink 或裝置時直接報錯）。
 
+## 輸出格式
+
+每個指令（`extract`、`integration status`、`integration install|uninstall`、`parser list`、
+`parser install`）預設在 stdout 輸出一份縮排 JSON（結尾換行），都帶 `"tool": "rotter"` 與
+`"schema"`：`rotter.extract.poc/0`（內容與位元組不因本節改變）、`rotter.status/1`（15 個宿主依表格
+順序，各有 `id`、`support`（stable／experimental／unsupported）、`state`（installed、not_installed、
+mismatch、other_binary、foreign、error；不支援的宿主為 null）、`path`、`detail`（沿用原本的文字）、
+`notes`；另有 `compat`、`git`、`executable`）、`rotter.integration/1`（`host`、`action`、`result`：
+installed、already_installed、updated、removed、not_installed，`path`、`notes`）、
+`rotter.parsers/1`（`name`、`enabled`、`installed`、`path`、`source`、`detail`）與
+`rotter.parser_install/1`（每個 grammar 的 `result`：installed、failed、skipped，以及 `notes`：
+有安裝任何 grammar 時必定附上執行原生碼的提醒）。錯誤一律是 stderr 的 `rotter: <訊息>`、退出碼 2、
+stdout 無內容；唯一例外是 `parser install` 途中失敗：仍在第一個失敗處停止，但 stdout 會輸出一份
+文件（先前的 installed、失敗的 failed 附 `detail`、其餘 skipped），錯誤同時寫到 stderr，退出碼 2。
+`hook`、`--skill`、`--help` 的輸出不變。
+
+```sh
+rotter extract --worktree --pretty                 # 人類閱讀用：每檔一節、單元含行號與程式碼
+rotter integration status --pretty --color=never
+```
+
+`--pretty` 改印對齊、易讀的版本（extract：每個檔案一節，單元附行號範圍與原文、變更行標 `~`、
+註解行上色、未完整分析的檔案標示狀態與 `detail`，最後一行為 `N files · M units · complete|incomplete`）；
+退出碼不變。只有這個旗標會切換格式：環境變數、設定檔或是否為終端機都不影響（agent 常在 pty 下執行），
+終端機只影響顏色。`--color=auto|always|never` 只接受 `=` 形式且必須搭配 `--pretty`（否則退出碼 2）；
+預設 `auto` 在 stdout 是終端機、`NO_COLOR` 未設或為空、`TERM` 不是 `dumb` 時才上色，只用 ANSI SGR
+且每行結束前重設。旗標放在子指令之後；`extract` 須放在 `--` 之前，`--` 之後一律是 pathspec
+（`--help` 亦然）。`hook` 不接受這些旗標。
+
+跳脫規則：JSON 只跳脫 U+0020 以下字元、`"` 與 `\`，因此不會輸出 7-bit 的 ESC／CSI／OSC，但 DEL
+與 C1 控制字元（例如 U+009B、U+009D）及 bidi 字元原樣保留；repository 內容、宿主設定檔的片段、cc
+或 git 的錯誤輸出都可能出現在字串中，JSON 的使用者須自行安全地呈現（預設 JSON 即使輸出到終端機也
+不另外處理）。`--pretty` 的每個值都經過同一個清理函式：所有控制字元（C0、DEL、C1）、bidi 控制字元
+（U+202A–U+202E、U+2066–U+2069、U+200E、U+200F、U+061C）與零寬字元（U+200B–U+200D、U+2060、
+U+FEFF）顯示為 `\u{…}`；單行欄位的換行與 tab 也跳脫，程式碼保留 tab、CRLF 的 CR 不顯示、其他 CR
+跳脫。stderr 的 `rotter: <訊息>` 也經過同樣處理。非 UTF-8 路徑以替代字元顯示，可能與其他路徑看起來相同。
+
 ## 設定檔與外部 parser（opt-in）
 
 七種內建語言之外的 Tree-sitter grammar 須由使用者在設定檔啟用，並由使用者自己執行
@@ -242,8 +279,8 @@ rotter integration uninstall claude
 rotter integration uninstall grok
 ```
 
-範圍內共 15 個宿主（狀態、目錄環境變數 → fallback、安裝指令）；實驗性的一欄標明 `status` 行尾
-會加註 `[experimental]`（rotter 作者未在真實宿主上執行過，見上方指令清單）：
+範圍內共 15 個宿主（狀態、目錄環境變數 → fallback、安裝指令）；實驗性的宿主在 `status` 的
+`support` 為 `experimental`（rotter 作者未在真實宿主上執行過，見上方指令清單）：
 
 | 宿主 | 狀態 | 目錄：環境變數 → fallback | 安裝指令 |
 | --- | --- | --- | --- |
@@ -270,11 +307,11 @@ rotter integration uninstall grok
 binary 被移除或換成不認得該子指令的舊版時，也不會以退出碼 2 迫使宿主續跑。每個
 `rotter hook <任何名稱>` 都以退出碼 0 結束（未知名稱只在 stderr 提示）。`timeout` 為
 `max(60, parse_timeout_seconds + 30)`；**修改 `parse_timeout_seconds` 後須重新執行 install**，
-`status` 會顯示 `installed (timeout N, expected M)`。install 前先檢查 binary 本身：它與上層每一層
+`status` 的 `detail` 會顯示 `installed (timeout N, expected M)`（`state` 為 `mismatch`）。install 前先檢查 binary 本身：它與上層每一層
 目錄須屬於使用者或 root 且不可被群組／他人寫入，路徑不可含 `$`、`` ` ``、NUL 或換行（Grok 會
-展開指令中的 `$VAR`）；不符時退出碼 2、不寫入任何檔案，`status` 的 `executable:` 行也會顯示。
+展開指令中的 `$VAR`）；不符時退出碼 2、不寫入任何檔案，`status` 的 `executable` 也會顯示（`trusted: false`）。
 宿主目錄位於 git work tree 內時 install 一律拒絕（checkout 或 commit 可能改變 hook）；`status` 的
-`git:` 行顯示 hook 會用的 git，或為何沒有可用的 git。擁有權的確切形式與各宿主的來源見
+`git` 顯示 hook 會用的 git，或為何沒有可用的 git。擁有權的確切形式與各宿主的來源見
 [宿主契約](docs/hosts.md)。
 
 Claude Code：`install` 在 `$CLAUDE_CONFIG_DIR/settings.json`（預設 `~/.claude/settings.json`）的
@@ -336,8 +373,8 @@ process group）或任何錯誤都靜默結束，每個 session 最多連續兩�
 的 `.env`，可以改變 Pi 程序與 shim 看到的 PATH；PATH 仍受 git 選擇規則約束，其他變數不會傳給 rotter。
 
 相容性：Grok 預設（`[compat.claude] hooks = true`）也會執行 `~/.claude/settings.json`（固定路徑）
-中的 hooks。`status` 以唯讀方式檢查 `$HOME/.claude/settings.json`：含 rotter 項目時顯示
-`found a Claude entry that Grok's Claude compatibility can pick up (whether compat is enabled was not checked)`；
+中的 hooks。`status` 以唯讀方式檢查 `$HOME/.claude/settings.json`：含 rotter 項目時 `compat` 為
+`found`，`detail` 為 `found a Claude entry that Grok's Claude compatibility can pick up (whether compat is enabled was not checked)`；
 無法讀取或不尋常的檔案（權限 0000、FIFO 等）只顯示 `unknown`，不會讓 `status` 失敗。
 它不判斷 `GROK_CLAUDE_HOOKS_ENABLED` 或 `[compat.claude]` 的實際設定。已安裝 Claude 整合且 Grok
 的相容性開啟時，Grok 整合是選用的；若不想兩者重疊，請停用其中一個（uninstall 其一，或關閉 Grok
