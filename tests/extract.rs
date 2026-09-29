@@ -774,6 +774,34 @@ fn changed_names_pull_in_same_file_users_with_a_cap() {
 }
 
 #[test]
+fn changed_file_level_comments_are_their_own_unit_right_above_code() {
+    let repo = Repo::new();
+    repo.write("a.rs", "//! Crate docs.\nfn f() {}\n");
+    repo.write("a.sh", "#!/usr/bin/env bash\nf() {\n  echo hi\n}\n");
+    repo.commit();
+    repo.write("a.rs", "//! Changed crate docs.\nfn f() {}\n");
+    repo.write("a.sh", "#!/bin/bash\nf() {\n  echo hi\n}\n");
+    let report = repo.extract(Mode::Worktree, false);
+    for (path, text, directive) in [
+        ("a.rs", "//! Changed crate docs.", None),
+        ("a.sh", "#!/bin/bash", Some("shebang")),
+    ] {
+        let units = file(&report.json, path).get("after").get("units").as_arr();
+        let [only] = units else {
+            panic!("{path}: {units:?}");
+        };
+        assert!(
+            only.get("kind")
+                .as_str()
+                .is_some_and(|kind| kind.ends_with("comment")),
+            "{path}: {only}"
+        );
+        assert_eq!(only.get("changed_lines").as_arr()[0].as_u64(), Some(1));
+        assert_eq!(comment(only, text), ("inside", true, directive), "{path}");
+    }
+}
+
+#[test]
 fn omitted_reference_units_are_counted_once_each() {
     let repo = Repo::new();
     // 20 users fill the cap; the 5 after it use the name three times each.

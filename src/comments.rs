@@ -386,7 +386,10 @@ impl<'t> File<'t> {
         let mut current = Some(node);
         while let Some(candidate) = current {
             if has(&self.grammar.comment_kinds, candidate.kind()) {
+                // A file-level comment is its own unit even right above a declaration, since
+                // leading() never attaches it there.
                 if self.standalone(candidate)
+                    && !self.file_level(candidate)
                     && let Some(unit) = self.follow(candidate)
                 {
                     return unit;
@@ -440,6 +443,13 @@ impl<'t> File<'t> {
         scope(above).into_iter().find(|node| below.contains(node))
     }
 
+    /// Inner docs and shebangs describe the enclosing file or module, not the next item.
+    fn file_level(&self, comment: Node<'t>) -> bool {
+        let text = &self.source[comment.byte_range()];
+        comment_style(comment, text) == "doc_inner"
+            || directive(self.grammar, text) == Some("shebang")
+    }
+
     fn leading(&self, node: Node<'t>) -> Vec<Node<'t>> {
         let mut found = Vec::new();
         let mut row = self.start_row(node);
@@ -453,12 +463,7 @@ impl<'t> File<'t> {
             else {
                 break;
             };
-            // Inner docs and shebangs describe the enclosing file or module, not the next item.
-            let text = &self.source[comment.byte_range()];
-            if comment.start_byte() >= node.start_byte()
-                || comment_style(*comment, text) == "doc_inner"
-                || directive(self.grammar, text) == Some("shebang")
-            {
+            if comment.start_byte() >= node.start_byte() || self.file_level(*comment) {
                 break;
             }
             found.push(*comment);
