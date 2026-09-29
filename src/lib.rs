@@ -243,23 +243,26 @@ impl Languages {
 /// Matches a repository-relative path: `*` and `?` stay within one path component, `**`
 /// crosses components (`**/` also matches no directory).
 pub fn glob_match(pattern: &str, path: &str) -> bool {
-    fn matches(pattern: &[u8], path: &[u8]) -> bool {
+    fn matches(pattern: &[char], path: &[char]) -> bool {
         match pattern {
             [] => path.is_empty(),
-            [b'*', b'*', b'/', rest @ ..] => (0..=path.len())
-                .filter(|&index| index == 0 || path[index - 1] == b'/')
+            ['*', '*', '/', rest @ ..] => (0..=path.len())
+                .filter(|&index| index == 0 || path[index - 1] == '/')
                 .any(|index| matches(rest, &path[index..])),
-            [b'*', b'*', rest @ ..] => (0..=path.len()).any(|index| matches(rest, &path[index..])),
-            [b'*', rest @ ..] => (0..=path.len())
-                .take_while(|&index| index == 0 || path[index - 1] != b'/')
+            ['*', '*', rest @ ..] => (0..=path.len()).any(|index| matches(rest, &path[index..])),
+            ['*', rest @ ..] => (0..=path.len())
+                .take_while(|&index| index == 0 || path[index - 1] != '/')
                 .any(|index| matches(rest, &path[index..])),
-            [b'?', rest @ ..] => {
-                matches!(path, [first, ..] if *first != b'/') && matches(rest, &path[1..])
+            ['?', rest @ ..] => {
+                matches!(path, [first, ..] if *first != '/') && matches(rest, &path[1..])
             }
             [first, rest @ ..] => path.first() == Some(first) && matches(rest, &path[1..]),
         }
     }
-    matches(pattern.as_bytes(), path.as_bytes())
+    // Chars, not bytes, so `?` consumes one character of a non-ASCII name.
+    let pattern: Vec<char> = pattern.chars().collect();
+    let path: Vec<char> = path.chars().collect();
+    matches(&pattern, &path)
 }
 
 #[derive(Debug)]
@@ -402,6 +405,9 @@ mod tests {
         assert!(glob_match("**/lib/*", "lib/render"));
         assert!(!glob_match("**/lib/*", "xlib/render"));
         assert!(glob_match("scripts/**", "scripts/a/b.sh"));
+        assert!(glob_match("?.go", "é.go"));
+        assert!(!glob_match("?.go", "éé.go"));
+        assert!(glob_match("*é.go", "xé.go"));
         assert!(glob_match("a?c", "abc") && !glob_match("a?c", "a/c"));
         assert!(!glob_match("*.sh", "dir/a.sh"));
     }
