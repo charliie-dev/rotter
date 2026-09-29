@@ -68,6 +68,26 @@ on stdout, except that a failed parser install still prints its document.";
 /// `--lang` values, resolved once the config says which external languages exist.
 type LangArgs = Vec<(String, String)>;
 
+/// The extract options that take the next argument as their value; that value is never a flag,
+/// even when it looks like one (`-C --pretty` names a directory).
+const VALUE_OPTIONS: [&str; 3] = ["--base", "--lang", "-C"];
+
+/// Indexes of extract's arguments in flag position: after `extract`, before the first `--` that
+/// is not an option's value, and not an option's value themselves.
+fn flag_positions(args: &[String]) -> Vec<usize> {
+    let mut positions = Vec::new();
+    let mut index = 1;
+    while index < args.len() && args[index] != "--" {
+        positions.push(index);
+        index += if VALUE_OPTIONS.contains(&args[index].as_str()) {
+            2
+        } else {
+            1
+        };
+    }
+    positions
+}
+
 fn parse_args(args: &[String]) -> Result<(PathBuf, Options, LangArgs), String> {
     let mut args = args.iter();
     if args.next().map(String::as_str) != Some("extract") {
@@ -128,8 +148,13 @@ fn output_flags(args: &mut Vec<String>) -> Result<Option<Color>, String> {
         _ => return Ok(None),
     };
     let (mut pretty, mut color) = (false, None);
-    let mut index = start;
-    while index < args.len() && args[index] != "--" {
+    let positions = if start == 1 {
+        flag_positions(args)
+    } else {
+        (start..args.len()).collect()
+    };
+    let mut taken = Vec::new();
+    for index in positions {
         match args[index].as_str() {
             "--pretty" => pretty = true,
             "--color" => {
@@ -142,12 +167,12 @@ fn output_flags(args: &mut Vec<String>) -> Result<Option<Color>, String> {
                             .ok_or_else(|| format!("unknown --color value: {value}"))?,
                     );
                 }
-                None => {
-                    index += 1;
-                    continue;
-                }
+                None => continue,
             },
         }
+        taken.push(index);
+    }
+    for index in taken.into_iter().rev() {
         args.remove(index);
     }
     match (pretty, color) {
@@ -336,11 +361,17 @@ fn main() -> ExitCode {
             None => ExitCode::SUCCESS,
         };
     }
-    // Arguments after `--` are pathspecs, never options.
-    if args
-        .iter()
-        .take_while(|arg| *arg != "--")
-        .any(|arg| arg == "-h" || arg == "--help")
+    // Arguments after `--` are pathspecs and an option's value is never a flag.
+    let flags = if args.first().map(String::as_str) == Some("extract") {
+        flag_positions(&args)
+    } else {
+        (0..args.len())
+            .take_while(|&index| args[index] != "--")
+            .collect()
+    };
+    if flags
+        .into_iter()
+        .any(|index| args[index] == "-h" || args[index] == "--help")
     {
         return emit(&format!("{USAGE}\n"), ExitCode::SUCCESS);
     }

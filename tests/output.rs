@@ -447,6 +447,35 @@ fn output_flags_are_validated_and_stop_at_the_pathspec() {
         serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()["schema"],
         "rotter.extract.poc/0"
     );
+    // An option's value is never a flag: directories named like one are just directories.
+    let parent = root.join("flag-named");
+    for name in ["--pretty", "--color=never", "-h"] {
+        let dir = parent.join(name);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("a.rs"), "fn f() {}\n").unwrap();
+        git(&dir, &["init", "-q", "-b", "main"]);
+        git(&dir, &["add", "-A"]);
+        git(&dir, &["commit", "-q", "-m", "c"]);
+        let output = rotter(&root, &["extract", "--full", "-C", name], &parent, "", &[]);
+        assert_eq!(output.status.code(), Some(0), "{name}: {output:?}");
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(
+            report["repository"].as_str().unwrap().ends_with(name),
+            "{name}"
+        );
+    }
+    let output = rotter(
+        &root,
+        &["extract", "--full", "--pretty", "-C", "--pretty"],
+        &parent,
+        "",
+        &[],
+    );
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).starts_with("full"),
+        "{output:?}"
+    );
     // Before `--`, --help still prints the usage.
     let output = run(&root, &repo, &["extract", "--worktree", "--help"]);
     assert_eq!(output.status.code(), Some(0));
