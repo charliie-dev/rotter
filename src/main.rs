@@ -151,7 +151,9 @@ fn output_flags(args: &mut Vec<String>) -> Result<Option<Color>, String> {
     let positions = if start == 1 {
         flag_positions(args)
     } else {
-        (start..args.len()).collect()
+        (start..args.len())
+            .take_while(|&index| args[index] != "--")
+            .collect()
     };
     let mut taken = Vec::new();
     for index in positions {
