@@ -983,15 +983,6 @@ impl Run<'_> {
         if matches!(detected, Detected::NotInScope) {
             return side.status("not_in_scope", None, false);
         }
-        // `path` shows invalid bytes as U+FFFD, so two such names can read the same; the side
-        // is not analysed, and `detail` carries the exact bytes, escaped.
-        if std::str::from_utf8(path).is_err() {
-            return side.status(
-                "non_utf8_path",
-                Some(format!("path bytes: {}", path.escape_ascii())),
-                true,
-            );
-        }
         if self.deadline_passed() {
             return side.status(
                 "parse_timeout",
@@ -1088,6 +1079,16 @@ impl Run<'_> {
                 return side.status("not_in_scope", None, false);
             }
         };
+        // Only once the side is known to be in scope (an extensionless name is decided by its
+        // first line): `path` shows invalid bytes as U+FFFD, so two such names can read the same.
+        // The side is not analysed, and `detail` carries the exact bytes, escaped.
+        if std::str::from_utf8(path).is_err() {
+            return side.status(
+                "non_utf8_path",
+                Some(format!("path bytes: {}", path.escape_ascii())),
+                true,
+            );
+        }
         side.json.push(("language", language.name().into()));
         side.json.push(("dialect", dialect.into()));
         // The only place a grammar that cannot be loaded becomes a status.

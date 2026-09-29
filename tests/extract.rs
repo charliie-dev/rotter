@@ -947,6 +947,10 @@ fn non_utf8_paths_are_reported_by_their_bytes_and_not_analysed() {
         entries.extend_from_slice(format!("100644 {oid}\t").as_bytes());
         entries.extend_from_slice(&[b'a', byte, b'.', b'g', b'o', 0]);
     }
+    // An extensionless name is decided by its first line (`package a`, no shebang): it stays
+    // not_in_scope rather than failing the run.
+    entries.extend_from_slice(format!("100644 {oid}\t").as_bytes());
+    entries.extend_from_slice(b"NOTES\x80\0");
     let mut child = Command::new("git")
         .arg("-C")
         .arg(&repo.0)
@@ -977,6 +981,17 @@ fn non_utf8_paths_are_reported_by_their_bytes_and_not_analysed() {
         })
         .collect();
     assert_eq!(details, ["path bytes: a\\x80.go", "path bytes: a\\x81.go"]);
+    let notes = report
+        .json
+        .get("files")
+        .as_arr()
+        .iter()
+        .find(|file| file.get("new_path").as_str() == Some("NOTES\u{fffd}"))
+        .unwrap();
+    assert_eq!(
+        notes.get("after").get("status").as_str(),
+        Some("not_in_scope")
+    );
 }
 
 #[test]
