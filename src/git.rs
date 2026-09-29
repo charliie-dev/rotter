@@ -423,7 +423,7 @@ impl Git {
         let stderr = String::from_utf8_lossy(&output.stderr);
         match output.status.code() {
             Some(0) => String::from_utf8(output.stdout)
-                .map(|top| Some(PathBuf::from(top.trim_end())))
+                .map(|top| Some(PathBuf::from(top.trim_end_matches('\n'))))
                 .map_err(|_| "git printed non-UTF-8 output".to_owned()),
             // Apple's git stub may print xcrun warnings first.
             Some(128)
@@ -561,7 +561,7 @@ fn git_text(git: &Git, dir: &Path, guard: &[String], args: &[&str]) -> Result<St
     let args: Vec<&OsStr> = args.iter().map(OsStr::new).collect();
     let output = call(git, dir, &args, None, &[0], guard)?;
     String::from_utf8(output)
-        .map(|text| text.trim_end().to_owned())
+        .map(|text| text.trim_end_matches('\n').to_owned())
         .map_err(|_| "git printed non-UTF-8 output".to_owned())
 }
 
