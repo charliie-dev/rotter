@@ -17,6 +17,16 @@ fn has(kinds: &[String], kind: &str) -> bool {
 }
 
 /// Last row that holds text of `node`; Rust doc comments end at column 0 of the next row.
+/// Whether a syntax-error byte range touches a unit's; both are end-exclusive. An ERROR must share
+/// a byte, while a zero-width MISSING node counts inside the unit or on either edge.
+fn touches(error: &Range<usize>, unit: Range<usize>) -> bool {
+    if error.is_empty() {
+        unit.start <= error.start && error.start <= unit.end
+    } else {
+        error.start < unit.end && unit.start < error.end
+    }
+}
+
 fn last_row(node: Node<'_>) -> usize {
     let end = node.end_position();
     if end.column == 0 && end.row > node.start_position().row {
@@ -558,9 +568,7 @@ impl<'t> File<'t> {
 
     fn overlaps_error(&self, node: Node<'_>) -> bool {
         let (start, end) = (self.start_byte(node), node.end_byte());
-        self.errors
-            .iter()
-            .any(|error| error.start <= end && start <= error.end)
+        self.errors.iter().any(|error| touches(error, start..end))
     }
 
     fn unit_json(&self, item: &Selected<'t>) -> Json {
@@ -730,5 +738,24 @@ fn directive<'g>(grammar: &'g Grammar, text: &str) -> Option<&'g str> {
             .then_some("yaml_language_server"),
         Language::Toml => text.starts_with("#:schema").then_some("toml_schema"),
         Language::Nix | Language::Rust => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::touches;
+
+    #[test]
+    fn errors_touch_a_unit_only_when_they_share_a_byte() {
+        // Unit covers bytes 10..20.
+        assert!(!touches(&(20..21), 10..20), "an ERROR right after the unit");
+        assert!(!touches(&(9..10), 10..20), "an ERROR right before the unit");
+        assert!(touches(&(19..21), 10..20));
+        assert!(touches(&(5..11), 10..20));
+        // A zero-width MISSING node inside or on either edge still counts.
+        assert!(touches(&(20..20), 10..20));
+        assert!(touches(&(10..10), 10..20));
+        assert!(touches(&(15..15), 10..20));
+        assert!(!touches(&(21..21), 10..20));
     }
 }
