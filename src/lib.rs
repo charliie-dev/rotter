@@ -12,6 +12,7 @@ pub use comments::{Change, error_lines, full_units, units};
 pub use git::{Git, Mode, Options, Report, extract, extract_with, toplevel};
 pub use grammar::{ExternalSource, Grammar, Languages};
 
+use std::collections::HashSet;
 use std::fmt;
 use std::ops::ControlFlow;
 use std::path::Path;
@@ -243,26 +244,39 @@ impl Languages {
 /// Matches a repository-relative path: `*` and `?` stay within one path component, `**`
 /// crosses components (`**/` also matches no directory).
 pub fn glob_match(pattern: &str, path: &str) -> bool {
-    fn matches(pattern: &[char], path: &[char]) -> bool {
-        match pattern {
+    // Remembers the (pattern suffix, path suffix) pairs already known not to match, so each
+    // pair is tried once: backtracking over several `*` stays polynomial instead of exponential
+    // (`*a*a*a…*b` against `aaa…`).
+    fn matches(pattern: &[char], path: &[char], failed: &mut HashSet<(usize, usize)>) -> bool {
+        let key = (pattern.len(), path.len());
+        if failed.contains(&key) {
+            return false;
+        }
+        let found = match pattern {
             [] => path.is_empty(),
             ['*', '*', '/', rest @ ..] => (0..=path.len())
                 .filter(|&index| index == 0 || path[index - 1] == '/')
-                .any(|index| matches(rest, &path[index..])),
-            ['*', '*', rest @ ..] => (0..=path.len()).any(|index| matches(rest, &path[index..])),
+                .any(|index| matches(rest, &path[index..], failed)),
+            ['*', '*', rest @ ..] => {
+                (0..=path.len()).any(|index| matches(rest, &path[index..], failed))
+            }
             ['*', rest @ ..] => (0..=path.len())
                 .take_while(|&index| index == 0 || path[index - 1] != '/')
-                .any(|index| matches(rest, &path[index..])),
+                .any(|index| matches(rest, &path[index..], failed)),
             ['?', rest @ ..] => {
-                matches!(path, [first, ..] if *first != '/') && matches(rest, &path[1..])
+                matches!(path, [first, ..] if *first != '/') && matches(rest, &path[1..], failed)
             }
-            [first, rest @ ..] => path.first() == Some(first) && matches(rest, &path[1..]),
+            [first, rest @ ..] => path.first() == Some(first) && matches(rest, &path[1..], failed),
+        };
+        if !found {
+            failed.insert(key);
         }
+        found
     }
     // Chars, not bytes, so `?` consumes one character of a non-ASCII name.
     let pattern: Vec<char> = pattern.chars().collect();
     let path: Vec<char> = path.chars().collect();
-    matches(&pattern, &path)
+    matches(&pattern, &path, &mut HashSet::new())
 }
 
 #[derive(Debug)]
@@ -408,6 +422,12 @@ mod tests {
         assert!(glob_match("?.go", "é.go"));
         assert!(!glob_match("?.go", "éé.go"));
         assert!(glob_match("*é.go", "xé.go"));
+        // Many `*` against a long near-miss: each suffix pair is tried once, not exponentially.
+        let pattern = format!("{}*b", "*a".repeat(30));
+        let started = std::time::Instant::now();
+        assert!(!glob_match(&pattern, &"a".repeat(200)));
+        assert!(glob_match(&pattern, &format!("{}b", "a".repeat(200))));
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
         assert!(glob_match("a?c", "abc") && !glob_match("a?c", "a/c"));
         assert!(!glob_match("*.sh", "dir/a.sh"));
     }
