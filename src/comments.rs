@@ -230,7 +230,9 @@ pub fn units(grammar: &Grammar, source: &str, tree: &Tree, changes: &[Change]) -
             // It holds a unit already selected (say, a method of this impl), so selecting it
             // too would repeat that text; it stays out of the report, and is counted as such.
             if added == MAX_REFERENCES || selected.any(|other| overlaps(other.node, unit)) {
-                if !omitted.iter().any(|other| overlaps(*other, unit)) {
+                // The same unit only once; a nested or enclosing one is a different unit, and the
+                // final count decides which of them the report shows.
+                if !omitted.contains(&unit) {
                     omitted.push(unit);
                 }
                 continue;

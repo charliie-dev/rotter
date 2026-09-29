@@ -876,6 +876,41 @@ fn an_omitted_unit_stays_counted_when_only_a_nested_unit_is_selected() {
 }
 
 #[test]
+fn nested_omitted_units_are_counted_separately() {
+    let repo = Repo::new();
+    // Past foo's cap, `outer` and the `inner` nested in it both use foo. With bar changed too,
+    // bar selects `inner`, which shows inner's text but not the rest of outer.
+    let users: String = (0..20)
+        .map(|index| format!("fn u{index}() -> u8 {{ foo() }}\n"))
+        .collect();
+    let outer =
+        "fn outer() -> u8 {\n    fn inner() -> u8 {\n        foo() + bar()\n    }\n    foo()\n}\n";
+    let source = |value: u8, with_bar: bool| {
+        let bar = if with_bar {
+            format!("pub fn bar() -> u8 {{ {value} }}\n")
+        } else {
+            "pub fn bar() -> u8 { 0 }\n".to_owned()
+        };
+        format!("pub fn foo() -> u8 {{ {value} }}\n{bar}{users}{outer}")
+    };
+    repo.write("a.rs", &source(1, true));
+    repo.write("b.rs", &source(1, false));
+    repo.commit();
+    repo.write("a.rs", &source(2, true));
+    repo.write("b.rs", &source(2, false));
+    let report = repo.extract(Mode::Worktree, false);
+    // With bar: only outer is missing. Without: inner and outer both are.
+    for (path, omitted) in [("a.rs", 1), ("b.rs", 2)] {
+        let foo = unit(file(&report.json, path).get("after"), "foo");
+        assert_eq!(
+            foo.get("omitted_reference_units").as_u64(),
+            Some(omitted),
+            "{path}"
+        );
+    }
+}
+
+#[test]
 fn omitted_reference_units_are_counted_once_each() {
     let repo = Repo::new();
     // 20 users fill the cap; the 5 after it use the name three times each.
