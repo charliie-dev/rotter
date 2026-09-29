@@ -1006,35 +1006,50 @@ impl Run<'_> {
                         return side.status("skipped_symlink", None, false);
                     }
                     Ok(meta) if !meta.is_file() => Err("not a regular file".to_owned()),
-                    Ok(_) if matches!(detected, Detected::NeedsContent) => {
-                        // Decide from the first line before reading the rest of the file.
-                        let mut first = Vec::new();
-                        let prefix = fs::File::open(&full)
-                            .and_then(|file| file.take(4096).read_to_end(&mut first))
-                            .map_err(|error| error.to_string());
-                        match prefix.map(|_| {
-                            let line = first
-                                .split(|byte| *byte == b'\n')
-                                .next()
-                                .unwrap_or_default();
-                            grammars.detect_content(relative, &String::from_utf8_lossy(line))
-                        }) {
-                            Ok(Detected::NotInScope) => {
-                                return side.status("not_in_scope", None, false);
+                    // One no-follow, non-blocking descriptor for every read, so an entry swapped
+                    // for a symlink or FIFO after the lstat above is never followed or waited on.
+                    Ok(_) => match open_regular(&full) {
+                        Ok(Some(file)) if matches!(detected, Detected::NeedsContent) => {
+                            // Decide from the first line before reading the rest of the file.
+                            let mut first = Vec::new();
+                            let prefix = (&file)
+                                .take(4096)
+                                .read_to_end(&mut first)
+                                .map_err(|error| error.to_string());
+                            match prefix.map(|_| {
+                                let line = first
+                                    .split(|byte| *byte == b'\n')
+                                    .next()
+                                    .unwrap_or_default();
+                                grammars.detect_content(relative, &String::from_utf8_lossy(line))
+                            }) {
+                                Ok(Detected::NotInScope) => {
+                                    return side.status("not_in_scope", None, false);
+                                }
+                                Ok(Detected::UnsupportedDialect(dialect)) => {
+                                    side.json.push(("dialect", dialect.into()));
+                                    return side.status(
+                                        "unsupported_dialect",
+                                        Some("only Bash is supported".into()),
+                                        true,
+                                    );
+                                }
+                                Ok(_) => (&file)
+                                    .read_to_end(&mut first)
+                                    .map(|_| first)
+                                    .map_err(|error| error.to_string()),
+                                Err(error) => Err(error),
                             }
-                            Ok(Detected::UnsupportedDialect(dialect)) => {
-                                side.json.push(("dialect", dialect.into()));
-                                return side.status(
-                                    "unsupported_dialect",
-                                    Some("only Bash is supported".into()),
-                                    true,
-                                );
-                            }
-                            Ok(_) => fs::read(&full).map_err(|error| error.to_string()),
-                            Err(error) => Err(error),
                         }
-                    }
-                    Ok(_) => fs::read(&full).map_err(|error| error.to_string()),
+                        Ok(Some(mut file)) => {
+                            let mut bytes = Vec::new();
+                            file.read_to_end(&mut bytes)
+                                .map(|_| bytes)
+                                .map_err(|error| error.to_string())
+                        }
+                        Ok(None) => Err("the file disappeared while it was being read".to_owned()),
+                        Err(error) => Err(error),
+                    },
                     Err(error) => Err(error.to_string()),
                 }
             }
