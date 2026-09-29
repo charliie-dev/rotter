@@ -69,7 +69,7 @@ JSON schema 標為 `rotter.extract.poc/0`，仍可能變動。
   （同一行尾）、`enclosing_leading`（外層單元上方）。相鄰的同類行註解合併成一個區塊；
   Go 指示、Lua 型別標註、ShellCheck 指示、shebang 等另標 `directive`，不與一般註解合併。
 - `range.bytes` 是 UTF-8 byte offset（結尾不含），`range.lines` 是 1 起算的閉區間；
-  `text` 必須等於快照在該範圍的原文。`blob` 是該快照的 Git blob id，可用來核對。
+  `text` 必須等於快照在該範圍的原文（`text_truncated` 為 true 時只有該範圍的前 80 行）。`blob` 是該快照的 Git blob id，可用來核對。
 
 CLI 只讀：Git 以 `GIT_OPTIONAL_LOCKS=0`、`core.fsmonitor=false` 執行，並透過私有 index 副本
 （`GIT_INDEX_FILE`）讀取，避免 `git diff` refresh 時重寫 `.git/index`。`git` 只用 PATH 中
