@@ -198,6 +198,10 @@ pub fn units(grammar: &Grammar, source: &str, tree: &Tree, changes: &[Change]) -
     let overlaps = |a: Node<'_>, b: Node<'_>| {
         file.start_byte(a) < b.end_byte() && file.start_byte(b) < a.end_byte()
     };
+    // Only a selection that contains a unit shows its text; one nested inside it does not.
+    let contains = |outer: Node<'_>, inner: Node<'_>| {
+        file.start_byte(outer) <= file.start_byte(inner) && inner.end_byte() <= outer.end_byte()
+    };
     let mut references: Vec<Selected<'_>> = Vec::new();
     // Per changed unit, the units past its cap; settled once every changed unit has picked its
     // references, since another changed unit may select one of them, or a unit containing it,
@@ -219,14 +223,13 @@ pub fn units(grammar: &Grammar, source: &str, tree: &Tree, changes: &[Change]) -
                 continue;
             }
             let unit = file.unit_for(*identifier);
-            if kept
-                .iter()
-                .chain(&references)
-                .any(|other| overlaps(other.node, unit))
-            {
+            let mut selected = kept.iter().chain(&references);
+            if selected.clone().any(|other| contains(other.node, unit)) {
                 continue;
             }
-            if added == MAX_REFERENCES {
+            // It holds a unit already selected (say, a method of this impl), so selecting it
+            // too would repeat that text; it stays out of the report, and is counted as such.
+            if added == MAX_REFERENCES || selected.any(|other| overlaps(other.node, unit)) {
                 if !omitted.iter().any(|other| overlaps(*other, unit)) {
                     omitted.push(unit);
                 }
@@ -240,14 +243,7 @@ pub fn units(grammar: &Grammar, source: &str, tree: &Tree, changes: &[Change]) -
     for (index, omitted) in omitted_by {
         kept[index].omitted_references = omitted
             .iter()
-            // Only a selected reference that contains the unit shows its text; one nested inside
-            // it (an impl's method, a function's inner function) does not.
-            .filter(|unit| {
-                !references.iter().any(|other| {
-                    file.start_byte(other.node) <= file.start_byte(**unit)
-                        && unit.end_byte() <= other.node.end_byte()
-                })
-            })
+            .filter(|unit| !references.iter().any(|other| contains(other.node, **unit)))
             .count();
     }
     kept.extend(references);
