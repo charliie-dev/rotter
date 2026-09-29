@@ -199,6 +199,9 @@ pub fn units(grammar: &Grammar, source: &str, tree: &Tree, changes: &[Change]) -
         file.start_byte(a) < b.end_byte() && file.start_byte(b) < a.end_byte()
     };
     let mut references: Vec<Selected<'_>> = Vec::new();
+    // Per changed unit, the units past its cap; settled once every changed unit has picked its
+    // references, since a later unit with the same name may pick them after all.
+    let mut omitted_by: Vec<(usize, Vec<Node<'_>>)> = Vec::new();
     for index in 0..kept.len() {
         let item = &kept[index];
         let Some(name) = file.name_text(item.node) else {
@@ -231,7 +234,13 @@ pub fn units(grammar: &Grammar, source: &str, tree: &Tree, changes: &[Change]) -
             added += 1;
             references.push(Selected::new(unit, Some(name.clone())));
         }
-        kept[index].omitted_references = omitted.len();
+        omitted_by.push((index, omitted));
+    }
+    for (index, omitted) in omitted_by {
+        kept[index].omitted_references = omitted
+            .iter()
+            .filter(|unit| !references.iter().any(|other| overlaps(other.node, **unit)))
+            .count();
     }
     kept.extend(references);
     Json::Arr(kept.iter().map(|item| file.unit_json(item)).collect())

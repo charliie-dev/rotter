@@ -802,6 +802,39 @@ fn changed_file_level_comments_are_their_own_unit_right_above_code() {
 }
 
 #[test]
+fn units_another_changed_unit_picks_up_are_not_counted_as_omitted() {
+    let repo = Repo::new();
+    // Two changed methods named Run: the second picks up the users past the first one's cap.
+    let users: String = (0..25)
+        .map(|index| format!("func U{index}() {{ _ = Run }}\n\n"))
+        .collect();
+    let source = |value: u8| {
+        format!(
+            "package p\n\ntype A struct{{}}\ntype B struct{{}}\n\nfunc (A) Run() int {{ return {value} }}\n\nfunc (B) Run() int {{ return {value} }}\n\n{users}"
+        )
+    };
+    repo.write("a.go", &source(3));
+    repo.commit();
+    repo.write("a.go", &source(5));
+    let report = repo.extract(Mode::Worktree, false);
+    let units = file(&report.json, "a.go")
+        .get("after")
+        .get("units")
+        .as_arr();
+    assert_eq!(units.len(), 27);
+    for run in units
+        .iter()
+        .filter(|unit| unit.get("name").as_str() == Some("Run"))
+    {
+        assert_eq!(
+            run.get("omitted_reference_units").as_u64(),
+            Some(0),
+            "{run}"
+        );
+    }
+}
+
+#[test]
 fn omitted_reference_units_are_counted_once_each() {
     let repo = Repo::new();
     // 20 users fill the cap; the 5 after it use the name three times each.
