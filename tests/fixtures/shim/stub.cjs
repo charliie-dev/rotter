@@ -39,9 +39,9 @@ switch (mode) {
     process.stdout.write(`{"continue":"${big}"}`, () => process.exit(0));
     break;
   case "attimeout":
-    // Answers just as a 1 s timeout fires.
+    // Answers just as the test's 2 s timeout fires.
     record(fs.readFileSync(0, "utf8"));
-    setTimeout(() => process.stdout.write(reply, () => process.exit(0)), 1000);
+    setTimeout(() => process.stdout.write(reply, () => process.exit(0)), 2000);
     break;
   case "capped": {
     // Rotter's own per-session cap: two consecutive requests, then one quiet answer that resets.

@@ -305,7 +305,7 @@ struct Run {
 }
 
 /// Renders `host`'s shim with a stub rotter (in a directory whose name needs quoting in a shell)
-/// and a 1 s timeout, and runs `scenario` of the harness under `engine`. The stub rotter itself
+/// and a 2 s timeout, and runs `scenario` of the harness under `engine`. The stub rotter itself
 /// always runs on Node.
 fn run(host: &str, file: &str, engine: &str, stub_mode: &str, scenario: &str) -> Run {
     let (node, _) = runtime("node");
@@ -325,7 +325,7 @@ fn run(host: &str, file: &str, engine: &str, stub_mode: &str, scenario: &str) ->
         stub.clone()
     };
     let shim = root.join(file);
-    fs::write(&shim, render_shim(host, exe.to_str().unwrap(), 1).unwrap()).unwrap();
+    fs::write(&shim, render_shim(host, exe.to_str().unwrap(), 2).unwrap()).unwrap();
     let cwd = root.join("work");
     fs::create_dir(&cwd).unwrap();
     let output = Command::new(&binary)
@@ -410,7 +410,7 @@ fn shims_run_rotter_without_a_shell_with_only_path_and_lang() {
         // Spawned directly: the exe path with a space and a quote arrived as one argv[0].
         assert_eq!(
             call["argv"],
-            serde_json::json!(["hook", host, "--timeout", "1"])
+            serde_json::json!(["hook", host, "--timeout", "2"])
         );
         // macOS CoreFoundation adds its text encoding to the stub's own environment at start.
         let mut env = call["env"].clone();
@@ -479,16 +479,17 @@ fn opencode_re_prompts_are_capped_across_the_turns_they_start() {
 #[test]
 fn shims_resolve_quietly_whatever_rotter_does() {
     // (stub mode, scenario, fastest, slowest) in ms; every answer is null, so OpenCode is never
-    // re-prompted.
+    // re-prompted. Under the 2 s timeout, an answer before 1800 ms came without waiting for it;
+    // the margin is for the stub's Node start on a loaded machine (CI, coverage, mutants).
     let cases = [
-        ("quiet", "once", 0, 900),
-        ("nonstring", "once", 0, 900),
-        ("garbage", "once", 0, 900),
-        ("epipe", "once", 0, 900),
-        ("missing", "once", 0, 900),
-        ("big", "once", 0, 900),
-        ("bigexit", "once", 0, 900),
-        ("hang", "once", 900, 3000),
+        ("quiet", "once", 0, 1800),
+        ("nonstring", "once", 0, 1800),
+        ("garbage", "once", 0, 1800),
+        ("epipe", "once", 0, 1800),
+        ("missing", "once", 0, 1800),
+        ("big", "once", 0, 1800),
+        ("bigexit", "once", 0, 1800),
+        ("hang", "once", 1900, 4000),
         ("reply", "skipped", 0, 100),
         ("reply", "throwing", 0, 100),
     ];

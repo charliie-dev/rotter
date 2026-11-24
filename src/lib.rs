@@ -443,11 +443,13 @@ mod tests {
         assert!(!glob_match("?.go", "éé.go"));
         assert!(glob_match("*é.go", "xé.go"));
         // Many `*` against a long near-miss: each suffix pair is tried once, not exponentially.
+        // Polynomial takes milliseconds; exponential would never finish. The bound only has to
+        // tell the two apart, with room for a loaded machine and coverage instrumentation.
         let pattern = format!("{}*b", "*a".repeat(30));
         let started = std::time::Instant::now();
         assert!(!glob_match(&pattern, &"a".repeat(200)));
         assert!(glob_match(&pattern, &format!("{}b", "a".repeat(200))));
-        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
         assert!(glob_match("a?c", "abc") && !glob_match("a?c", "a/c"));
         assert!(!glob_match("*.sh", "dir/a.sh"));
     }

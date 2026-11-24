@@ -345,10 +345,10 @@ Bun 1.4.4 下各跑一次，letta 用 Node 26.13.1，opencode 用 Bun 1.4.4（�
 （`tests/fixtures/shim/harness.mjs`，含 `uncaughtException`／`unhandledRejection` 偵測，handler 結束
 後再等約 1 秒，然後直接結束、不等 shim 留下的程序）與 stub rotter（`stub.cjs`，以 Node 執行，放在
 含空白、引號與非 ASCII 的目錄）。驗證：直接執行（argv 恰為
-`hook <host> --timeout 1`）、環境只有 PATH 與 LANG（harness 設了 `LD_PRELOAD`、
+`hook <host> --timeout 2`）、環境只有 PATH 與 LANG（harness 設了 `LD_PRELOAD`、
 `DYLD_INSERT_LIBRARIES`、`DEVELOPER_DIR`、HOME、`GIT_DIR`、`ROTTER_STATE_DIR`）、stdin 內容、三次
 每次停下都交給 rotter（stub 模擬 rotter 的上限時，第三次由 rotter 靜默、第四次照常要求）、同時兩次只跑一次、只有字串的 `continue` 被採用，以及 exe 不存在
-（ENOENT）、不讀 stdin 就結束（EPIPE）、卡住（1 秒後殺掉整個 process group：孫程序原本會睡 300 秒，比 harness 活得久，
+（ENOENT）、不讀 stdin 就結束（EPIPE）、卡住（2 秒後殺掉整個 process group：孫程序原本會睡 300 秒，比 harness 活得久，
 測試結束時必須已不在；拿掉 timer 裡的 `kill()` 時此案例失敗）、
 輸出垃圾、輸出超過 64 KiB（卡住或結束）、恰在 timeout 時回覆、宿主 API 丟出例外、非 completed／
 end_turn 的回合都靜默且不留下未處理的例外。
