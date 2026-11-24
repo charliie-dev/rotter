@@ -1074,6 +1074,68 @@ fn unsupported(mut side: Side, dialect: String) -> Side {
     )
 }
 
+/// Adds a parsed side's status: `ok`, or `partial` naming up to 20 lines with syntax errors.
+/// False when the side is partial.
+fn parse_status(json: &mut Vec<(&'static str, Json)>, tree: &tree_sitter::Tree) -> bool {
+    let errors = error_lines(tree);
+    if errors.is_empty() {
+        json.push(("status", "ok".into()));
+        json.push(("detail", Json::Null));
+        return true;
+    }
+    let lines: Vec<String> = errors.iter().take(20).map(ToString::to_string).collect();
+    json.push(("status", "partial".into()));
+    json.push((
+        "detail",
+        format!("syntax errors near lines {}", lines.join(", ")).into(),
+    ));
+    false
+}
+
+/// Why a parse stopped: the run's budget when it was shorter than the per-file limit.
+fn timeout_detail(budget: Duration, limit: Duration) -> String {
+    if budget < limit {
+        "stopped: the run's time budget ran out during this file".to_owned()
+    } else {
+        format!(
+            "stopped after {} s; the limit is parse_timeout_seconds in \
+             $XDG_CONFIG_HOME/rotter/config.toml",
+            limit.as_secs()
+        )
+    }
+}
+
+/// The report's `change` and `similarity` for a diff status letter (and its score).
+fn change_kind(status: &str) -> (&'static str, Option<u32>) {
+    match status.split_at(1) {
+        ("M", _) => ("modified", None),
+        ("A", _) => ("added", None),
+        ("D", _) => ("deleted", None),
+        ("R", score) => ("renamed", score.parse::<u32>().ok()),
+        ("C", score) => ("copied", score.parse::<u32>().ok()),
+        ("T", _) => ("type_changed", None),
+        ("U", _) => ("unmerged", None),
+        ("?", _) => ("untracked_added", None),
+        ("F", _) => ("full", None),
+        _ => ("unknown", None),
+    }
+}
+
+/// `[{"before": [start, count], "after": [start, count]}, …]`.
+fn hunks_json(hunks: &[Hunk]) -> Json {
+    Json::Arr(
+        hunks
+            .iter()
+            .map(|hunk| {
+                Json::Obj(vec![
+                    ("before", vec![hunk.before.0, hunk.before.1].into()),
+                    ("after", vec![hunk.after.0, hunk.after.1].into()),
+                ])
+            })
+            .collect(),
+    )
+}
+
 /// The first line of `bytes`, invalid UTF-8 replaced.
 fn first_line(bytes: &[u8]) -> String {
     let line = bytes
@@ -1294,21 +1356,10 @@ impl Run<'_> {
             .old
             .as_ref()
             .map(|(path, mode, oid)| self.load(path, mode, Source::Blob(oid)));
-        let after = entry.new.as_ref().map(|(path, mode, oid)| {
-            if after_on_disk {
-                self.load(path, mode, Source::Disk)
-            } else if is_zero(oid) {
-                Side {
-                    json: vec![("path", String::from_utf8_lossy(path).into_owned().into())],
-                    text: None,
-                    language: None,
-                    in_scope: true,
-                }
-                .status("unmerged", None, true)
-            } else {
-                self.load(path, mode, Source::Blob(oid))
-            }
-        });
+        let after = entry
+            .new
+            .as_ref()
+            .map(|(path, mode, oid)| self.after_side(path, mode, oid, after_on_disk));
         let sides = [before, after];
         let in_scope = sides.iter().flatten().any(|side| side.in_scope);
         let readable = sides
@@ -1327,74 +1378,9 @@ impl Run<'_> {
         };
         let mut complete = readable;
         let [before, after] = sides;
-        let side_json = |side: Option<Side>, is_after: bool, complete: &mut bool| {
-            let mut side = side?;
-            if let (Some(text), Some(language)) = (&side.text, side.language.clone()) {
-                let limit = self.options.parse_timeout;
-                let budget = self.options.deadline.map_or(limit, |deadline| {
-                    limit.min(deadline.saturating_duration_since(Instant::now()))
-                });
-                match parse_with_deadline(&language, text, budget) {
-                    Ok(tree) => {
-                        // Keep what parsed; units touching an error are flagged, not dropped.
-                        let errors = error_lines(&tree);
-                        if errors.is_empty() {
-                            side.json.push(("status", "ok".into()));
-                            side.json.push(("detail", Json::Null));
-                        } else {
-                            *complete = false;
-                            let lines: Vec<String> =
-                                errors.iter().take(20).map(ToString::to_string).collect();
-                            side.json.push(("status", "partial".into()));
-                            side.json.push((
-                                "detail",
-                                format!("syntax errors near lines {}", lines.join(", ")).into(),
-                            ));
-                        }
-                        let found = if full {
-                            full_units(&language, text, &tree)
-                        } else {
-                            units(&language, text, &tree, &changes(&hunks, is_after))
-                        };
-                        side.json.push(("units", found));
-                    }
-                    Err(ParseError::Timeout) => {
-                        *complete = false;
-                        side.json.push(("status", "parse_timeout".into()));
-                        let detail = if budget < limit {
-                            "stopped: the run's time budget ran out during this file".to_owned()
-                        } else {
-                            format!(
-                                "stopped after {} s; the limit is parse_timeout_seconds in \
-                                 $XDG_CONFIG_HOME/rotter/config.toml",
-                                limit.as_secs()
-                            )
-                        };
-                        side.json.push(("detail", detail.into()));
-                    }
-                    Err(error) => {
-                        *complete = false;
-                        side.json.push(("status", "parse_error".into()));
-                        side.json.push(("detail", error.to_string().into()));
-                    }
-                }
-            }
-            Some(Json::Obj(side.json))
-        };
-        let before = side_json(before, false, &mut complete);
-        let after = side_json(after, true, &mut complete);
-        let (change, similarity) = match entry.status.split_at(1) {
-            ("M", _) => ("modified", None),
-            ("A", _) => ("added", None),
-            ("D", _) => ("deleted", None),
-            ("R", score) => ("renamed", score.parse::<u32>().ok()),
-            ("C", score) => ("copied", score.parse::<u32>().ok()),
-            ("T", _) => ("type_changed", None),
-            ("U", _) => ("unmerged", None),
-            ("?", _) => ("untracked_added", None),
-            ("F", _) => ("full", None),
-            _ => ("unknown", None),
-        };
+        let before = self.side_json(before, &hunks, false, full, &mut complete);
+        let after = self.side_json(after, &hunks, true, full, &mut complete);
+        let (change, similarity) = change_kind(&entry.status);
         if change == "unmerged" || change == "unknown" {
             complete = false;
         }
@@ -1408,24 +1394,72 @@ impl Run<'_> {
             ("old_path", path(&entry.old).into()),
             ("new_path", path(&entry.new).into()),
             ("complete", complete.into()),
-            (
-                "hunks",
-                Json::Arr(
-                    hunks
-                        .iter()
-                        .map(|hunk| {
-                            Json::Obj(vec![
-                                ("before", vec![hunk.before.0, hunk.before.1].into()),
-                                ("after", vec![hunk.after.0, hunk.after.1].into()),
-                            ])
-                        })
-                        .collect(),
-                ),
-            ),
+            ("hunks", hunks_json(&hunks)),
             ("before", before.into()),
             ("after", after.into()),
         ]);
         Ok((json, complete))
+    }
+
+    /// The after side: from disk, the index blob, or `unmerged` for a conflicted index entry
+    /// (its oid is all zeros).
+    fn after_side(&self, path: &[u8], mode: &str, oid: &str, on_disk: bool) -> Side {
+        if on_disk {
+            return self.load(path, mode, Source::Disk);
+        }
+        if is_zero(oid) {
+            return Side {
+                json: vec![("path", String::from_utf8_lossy(path).into_owned().into())],
+                text: None,
+                language: None,
+                in_scope: true,
+            }
+            .status("unmerged", None, true);
+        }
+        self.load(path, mode, Source::Blob(oid))
+    }
+
+    /// A side's document: parsed with its units when it has text and a language. A partial
+    /// parse, a timeout or a parse error clears `complete`.
+    fn side_json(
+        &self,
+        side: Option<Side>,
+        hunks: &[Hunk],
+        is_after: bool,
+        full: bool,
+        complete: &mut bool,
+    ) -> Option<Json> {
+        let mut side = side?;
+        if let (Some(text), Some(language)) = (&side.text, side.language.clone()) {
+            let limit = self.options.parse_timeout;
+            let budget = self.options.deadline.map_or(limit, |deadline| {
+                limit.min(deadline.saturating_duration_since(Instant::now()))
+            });
+            match parse_with_deadline(&language, text, budget) {
+                Ok(tree) => {
+                    // Keep what parsed; units touching an error are flagged, not dropped.
+                    *complete &= parse_status(&mut side.json, &tree);
+                    let found = if full {
+                        full_units(&language, text, &tree)
+                    } else {
+                        units(&language, text, &tree, &changes(hunks, is_after))
+                    };
+                    side.json.push(("units", found));
+                }
+                Err(ParseError::Timeout) => {
+                    *complete = false;
+                    side.json.push(("status", "parse_timeout".into()));
+                    side.json
+                        .push(("detail", timeout_detail(budget, limit).into()));
+                }
+                Err(error) => {
+                    *complete = false;
+                    side.json.push(("status", "parse_error".into()));
+                    side.json.push(("detail", error.to_string().into()));
+                }
+            }
+        }
+        Some(Json::Obj(side.json))
     }
 }
 
