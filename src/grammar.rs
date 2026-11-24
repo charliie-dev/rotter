@@ -145,16 +145,32 @@ impl Grammar {
         self.ts
             .get_or_init(|| match &self.source {
                 Source::Builtin(language) => Ok(language.clone()),
-                Source::External { symbol, .. } => self.load(symbol).map_err(|why| {
-                    format!(
-                        "{why}; ask the user to run `rotter parser install {}`; installing needs \
-                         user approval",
-                        self.name
-                    )
-                }),
+                Source::External { symbol, source } => self
+                    .load(symbol)
+                    .map_err(|why| format!("{why}; {}", self.install_hint(source))),
             })
             .as_ref()
             .map_err(Clone::clone)
+    }
+
+    /// What the user can do about an external grammar that cannot be loaded.
+    fn install_hint(&self, source: &ExternalSource) -> String {
+        match source {
+            // The library is found by its source's contents, so a local source that cannot be
+            // used hides even an installed one, and installing again would fail the same way.
+            ExternalSource::Path(dir) if read_inputs(dir).is_err() => format!(
+                "the local source {} of {} cannot be used to find its installed library: fix or \
+                 restore it (`rotter parser install {}` needs it too; installing needs user \
+                 approval)",
+                dir.display(),
+                self.name,
+                self.name
+            ),
+            _ => format!(
+                "ask the user to run `rotter parser install {}`; installing needs user approval",
+                self.name
+            ),
+        }
     }
 
     /// The verified path of this external grammar's installed library (nothing is loaded).

@@ -345,6 +345,13 @@ fn offline_lua2_install_then_extract() {
     for (path, extra) in [("a.lua2", vec![]), ("b.txt", vec!["--lang", "b.txt=lua2"])] {
         let side = world.side(&repo, path, &extra);
         assert_eq!(side["status"], "parser_not_installed", "{side}");
+        // The source is fine, only the library is missing: installing is the remedy.
+        let detail = side["detail"].as_str().unwrap();
+        assert!(
+            detail.contains("ask the user to run `rotter parser install lua2`"),
+            "{side}"
+        );
+        assert!(!detail.contains("cannot be used to find"), "{side}");
     }
     assert!(!world.cache.exists(), "extract creates no cache");
 
@@ -403,6 +410,16 @@ fn offline_lua2_install_then_extract() {
         (&python["enabled"], &python["installed"]),
         (&false.into(), &false.into())
     );
+
+    // Without its source the installed library cannot be found; installing again would not help.
+    let moved = world.root.join("lua-src-moved");
+    fs::rename(&src, &moved).unwrap();
+    let side = world.side(&repo, "a.lua2", &[]);
+    let detail = side["detail"].as_str().unwrap();
+    assert!(detail.contains("cannot be used to find"), "{side}");
+    assert!(!detail.contains("ask the user to run"), "{side}");
+    fs::rename(&moved, &src).unwrap();
+    assert_eq!(world.side(&repo, "a.lua2", &[])["status"], "ok");
 }
 
 #[test]
