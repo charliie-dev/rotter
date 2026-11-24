@@ -57,39 +57,18 @@ impl Json {
             Json::Num(value) => write!(out, "{value}"),
             Json::Str(value) => write_str(out, value),
             Json::Arr(items) if items.iter().all(Json::is_scalar) => {
-                out.write_char('[')?;
-                for (index, item) in items.iter().enumerate() {
-                    if index > 0 {
-                        out.write_str(", ")?;
-                    }
-                    item.write(out, indent)?;
-                }
-                out.write_char(']')
+                write_inline(out, items, indent)
             }
-            Json::Arr(items) => {
-                out.write_char('[')?;
-                for (index, item) in items.iter().enumerate() {
-                    out.write_str(if index > 0 { ",\n" } else { "\n" })?;
-                    pad(out, indent + 1)?;
-                    item.write(out, indent + 1)?;
-                }
-                out.write_char('\n')?;
-                pad(out, indent)?;
-                out.write_char(']')
-            }
+            Json::Arr(items) => write_block(out, indent, ('[', ']'), items, |out, item| {
+                item.write(out, indent + 1)
+            }),
             Json::Obj(fields) if fields.is_empty() => out.write_str("{}"),
             Json::Obj(fields) => {
-                out.write_char('{')?;
-                for (index, (name, value)) in fields.iter().enumerate() {
-                    out.write_str(if index > 0 { ",\n" } else { "\n" })?;
-                    pad(out, indent + 1)?;
+                write_block(out, indent, ('{', '}'), fields, |out, (name, value)| {
                     write_str(out, name)?;
                     out.write_str(": ")?;
-                    value.write(out, indent + 1)?;
-                }
-                out.write_char('\n')?;
-                pad(out, indent)?;
-                out.write_char('}')
+                    value.write(out, indent + 1)
+                })
             }
         }
     }
@@ -97,6 +76,38 @@ impl Json {
     fn is_scalar(&self) -> bool {
         !matches!(self, Json::Arr(_) | Json::Obj(_))
     }
+}
+
+/// Scalars on one line: `[1, "a", null]`.
+fn write_inline(out: &mut fmt::Formatter<'_>, items: &[Json], indent: usize) -> fmt::Result {
+    out.write_char('[')?;
+    for (index, item) in items.iter().enumerate() {
+        if index > 0 {
+            out.write_str(", ")?;
+        }
+        item.write(out, indent)?;
+    }
+    out.write_char(']')
+}
+
+/// `items` one per line, each indented one level deeper than `indent`, between `open` and
+/// `close`; `item` writes one of them.
+fn write_block<T>(
+    out: &mut fmt::Formatter<'_>,
+    indent: usize,
+    (open, close): (char, char),
+    items: &[T],
+    mut item: impl FnMut(&mut fmt::Formatter<'_>, &T) -> fmt::Result,
+) -> fmt::Result {
+    out.write_char(open)?;
+    for (index, value) in items.iter().enumerate() {
+        out.write_str(if index > 0 { ",\n" } else { "\n" })?;
+        pad(out, indent + 1)?;
+        item(out, value)?;
+    }
+    out.write_char('\n')?;
+    pad(out, indent)?;
+    out.write_char(close)
 }
 
 fn pad(out: &mut fmt::Formatter<'_>, indent: usize) -> fmt::Result {
