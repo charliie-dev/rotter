@@ -1046,9 +1046,41 @@ impl Side {
     }
 }
 
+#[derive(Clone, Copy)]
 enum Source<'a> {
     Blob(&'a str),
     Disk,
+}
+
+/// Why a side's bytes were not read; each maps to the side's status in [`Run::load`].
+enum Unread {
+    /// A symlink in the working tree: `skipped_symlink`.
+    Symlink,
+    /// The first line put the file out of scope: `not_in_scope`.
+    NotInScope,
+    /// The first line named an unsupported shell dialect: `unsupported_dialect`.
+    Dialect(String),
+    /// A read failure: `read_error`.
+    Error(String),
+}
+
+/// The status of a side in an unsupported shell dialect.
+fn unsupported(mut side: Side, dialect: String) -> Side {
+    side.json.push(("dialect", dialect.into()));
+    side.status(
+        "unsupported_dialect",
+        Some("only Bash is supported".into()),
+        true,
+    )
+}
+
+/// The first line of `bytes`, invalid UTF-8 replaced.
+fn first_line(bytes: &[u8]) -> String {
+    let line = bytes
+        .split(|byte| *byte == b'\n')
+        .next()
+        .unwrap_or_default();
+    String::from_utf8_lossy(line).into_owned()
 }
 
 struct Run<'a> {
@@ -1079,18 +1111,7 @@ impl Run<'_> {
             "160000" => return side.status("skipped_submodule", None, false),
             _ => {}
         }
-        let grammars = &self.options.grammars;
-        let override_language = self
-            .options
-            .languages
-            .iter()
-            .find(|(pattern, _, _)| crate::glob_match(pattern, &display));
-        let mut detected = match override_language {
-            Some((_, grammar, dialect)) => {
-                Detected::Supported(Arc::clone(grammar), dialect.clone())
-            }
-            None => grammars.detect_path(relative),
-        };
+        let mut detected = self.detect(&display, relative);
         if matches!(detected, Detected::NotInScope) {
             return side.status("not_in_scope", None, false);
         }
@@ -1101,91 +1122,19 @@ impl Run<'_> {
                 true,
             );
         }
-        let bytes = match source {
-            Source::Blob(oid) => call(
-                self.git,
-                self.top,
-                &[OsStr::new("cat-file"), OsStr::new("blob"), OsStr::new(oid)],
-                None,
-                &[0],
-                self.guard,
-            ),
-            Source::Disk => {
-                let full = self.top.join(relative);
-                match fs::symlink_metadata(&full) {
-                    Ok(meta) if meta.file_type().is_symlink() => {
-                        return side.status("skipped_symlink", None, false);
-                    }
-                    Ok(meta) if !meta.is_file() => Err("not a regular file".to_owned()),
-                    // One no-follow, non-blocking descriptor for every read, so an entry swapped
-                    // for a symlink or FIFO after the lstat above is never followed or waited on.
-                    Ok(_) => match open_regular(&full) {
-                        Ok(Some(file)) if matches!(detected, Detected::NeedsContent) => {
-                            // Decide from the first line before reading the rest of the file.
-                            let mut first = Vec::new();
-                            let prefix = (&file)
-                                .take(4096)
-                                .read_to_end(&mut first)
-                                .map_err(|error| error.to_string());
-                            match prefix.map(|_| {
-                                let line = first
-                                    .split(|byte| *byte == b'\n')
-                                    .next()
-                                    .unwrap_or_default();
-                                grammars.detect_content(relative, &String::from_utf8_lossy(line))
-                            }) {
-                                Ok(Detected::NotInScope) => {
-                                    return side.status("not_in_scope", None, false);
-                                }
-                                Ok(Detected::UnsupportedDialect(dialect)) => {
-                                    side.json.push(("dialect", dialect.into()));
-                                    return side.status(
-                                        "unsupported_dialect",
-                                        Some("only Bash is supported".into()),
-                                        true,
-                                    );
-                                }
-                                Ok(_) => (&file)
-                                    .read_to_end(&mut first)
-                                    .map(|_| first)
-                                    .map_err(|error| error.to_string()),
-                                Err(error) => Err(error),
-                            }
-                        }
-                        Ok(Some(mut file)) => {
-                            let mut bytes = Vec::new();
-                            file.read_to_end(&mut bytes)
-                                .map(|_| bytes)
-                                .map_err(|error| error.to_string())
-                        }
-                        Ok(None) => Err("the file disappeared while it was being read".to_owned()),
-                        Err(error) => Err(error),
-                    },
-                    Err(error) => Err(error.to_string()),
-                }
-            }
-        };
-        let bytes = match bytes {
+        let bytes = match self.read(relative, source, &detected) {
             Ok(bytes) => bytes,
-            Err(error) => return side.status("read_error", Some(error), true),
+            Err(Unread::Symlink) => return side.status("skipped_symlink", None, false),
+            Err(Unread::NotInScope) => return side.status("not_in_scope", None, false),
+            Err(Unread::Dialect(dialect)) => return unsupported(side, dialect),
+            Err(Unread::Error(error)) => return side.status("read_error", Some(error), true),
         };
         if matches!(detected, Detected::NeedsContent) {
-            let first = bytes
-                .split(|byte| *byte == b'\n')
-                .next()
-                .unwrap_or_default();
-            detected = grammars.detect_content(relative, &String::from_utf8_lossy(first));
+            detected = (self.options.grammars).detect_content(relative, &first_line(&bytes));
         }
         let (language, dialect) = match detected {
             Detected::Supported(language, dialect) => (language, dialect),
-            Detected::UnsupportedDialect(dialect) => {
-                side.json.push(("dialect", dialect.into()));
-                return side.status(
-                    "unsupported_dialect",
-                    Some("only Bash is supported".into()),
-                    true,
-                );
-            }
+            Detected::UnsupportedDialect(dialect) => return unsupported(side, dialect),
             Detected::NotInScope | Detected::NeedsContent => {
                 return side.status("not_in_scope", None, false);
             }
@@ -1206,19 +1155,7 @@ impl Run<'_> {
         if let Err(detail) = language.language() {
             return side.status("parser_not_installed", Some(detail), true);
         }
-        let blob = match source {
-            Source::Blob(oid) => Ok(oid.to_owned()),
-            Source::Disk => call(
-                self.git,
-                self.top,
-                &["hash-object", "--no-filters", "--stdin"].map(OsStr::new),
-                Some(&bytes),
-                &[0],
-                self.guard,
-            )
-            .map(|out| String::from_utf8_lossy(&out).trim().to_owned()),
-        };
-        match blob {
+        match self.blob_id(source, &bytes) {
             Ok(blob) => side.json.push(("blob", blob.into())),
             Err(error) => return side.status("read_error", Some(error), true),
         }
@@ -1232,6 +1169,100 @@ impl Run<'_> {
                 side
             }
             Err(_) => side.status("not_utf8", None, true),
+        }
+    }
+
+    /// The language of `display`: a `--lang`/`[overrides]` glob first, else the path.
+    fn detect(&self, display: &str, relative: &Path) -> Detected {
+        let override_language = self
+            .options
+            .languages
+            .iter()
+            .find(|(pattern, _, _)| crate::glob_match(pattern, display));
+        match override_language {
+            Some((_, grammar, dialect)) => {
+                Detected::Supported(Arc::clone(grammar), dialect.clone())
+            }
+            None => self.options.grammars.detect_path(relative),
+        }
+    }
+
+    /// A side's bytes, from its blob or from disk.
+    fn read(
+        &self,
+        relative: &Path,
+        source: Source<'_>,
+        detected: &Detected,
+    ) -> Result<Vec<u8>, Unread> {
+        match source {
+            Source::Blob(oid) => call(
+                self.git,
+                self.top,
+                &[OsStr::new("cat-file"), OsStr::new("blob"), OsStr::new(oid)],
+                None,
+                &[0],
+                self.guard,
+            )
+            .map_err(Unread::Error),
+            Source::Disk => self.read_disk(relative, detected),
+        }
+    }
+
+    fn read_disk(&self, relative: &Path, detected: &Detected) -> Result<Vec<u8>, Unread> {
+        let full = self.top.join(relative);
+        let meta = fs::symlink_metadata(&full).map_err(|error| Unread::Error(error.to_string()))?;
+        if meta.file_type().is_symlink() {
+            return Err(Unread::Symlink);
+        }
+        if !meta.is_file() {
+            return Err(Unread::Error("not a regular file".to_owned()));
+        }
+        // One no-follow, non-blocking descriptor for every read, so an entry swapped for a
+        // symlink or FIFO after the lstat above is never followed or waited on.
+        let file = open_regular(&full).map_err(Unread::Error)?.ok_or_else(|| {
+            Unread::Error("the file disappeared while it was being read".to_owned())
+        })?;
+        if matches!(detected, Detected::NeedsContent) {
+            return self.read_deciding(&file, relative);
+        }
+        let mut bytes = Vec::new();
+        (&file)
+            .read_to_end(&mut bytes)
+            .map_err(|error| Unread::Error(error.to_string()))?;
+        Ok(bytes)
+    }
+
+    /// Decides from the first line before reading the rest of the file.
+    fn read_deciding(&self, file: &fs::File, relative: &Path) -> Result<Vec<u8>, Unread> {
+        let mut first = Vec::new();
+        file.take(4096)
+            .read_to_end(&mut first)
+            .map_err(|error| Unread::Error(error.to_string()))?;
+        match (self.options.grammars).detect_content(relative, &first_line(&first)) {
+            Detected::NotInScope => Err(Unread::NotInScope),
+            Detected::UnsupportedDialect(dialect) => Err(Unread::Dialect(dialect)),
+            _ => {
+                let mut rest = file;
+                rest.read_to_end(&mut first)
+                    .map_err(|error| Unread::Error(error.to_string()))?;
+                Ok(first)
+            }
+        }
+    }
+
+    /// The side's blob id: the one it was read from, or the hash of the disk bytes.
+    fn blob_id(&self, source: Source<'_>, bytes: &[u8]) -> Result<String, String> {
+        match source {
+            Source::Blob(oid) => Ok(oid.to_owned()),
+            Source::Disk => call(
+                self.git,
+                self.top,
+                &["hash-object", "--no-filters", "--stdin"].map(OsStr::new),
+                Some(bytes),
+                &[0],
+                self.guard,
+            )
+            .map(|out| String::from_utf8_lossy(&out).trim().to_owned()),
         }
     }
 
