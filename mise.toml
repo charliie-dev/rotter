@@ -52,17 +52,37 @@ cargo mutants --in-diff "$diff" -- --all-targets --locked
 description = "Line and region coverage of all tests, as a summary and LCOV"
 run = '''
 set -eu
+dir=target/llvm-cov-target
+# After a toolchain change the other Cargo's build-dir layout leaves binaries that cargo-llvm-cov
+# 0.9.2 still reports, which drops region coverage and makes the LCOV export disagree with the
+# summary (taiki-e/cargo-llvm-cov#536); start from an empty directory then.
+toolchain="$(rustc -vV)"
+if [ "$(cat "$dir/.rotter-rustc" 2>/dev/null || true)" != "$toolchain" ]; then
+  rm -rf "$dir"
+fi
+# Profiles of earlier runs are never removed by --no-report runs and would be merged in.
+rm -f "$dir"/*.profraw
 cargo llvm-cov --no-report --all-targets --locked
+printf '%s\n' "$toolchain" > "$dir/.rotter-rustc"
 # A test that kills rotter while it exits leaves a truncated profile, and one unreadable profile
 # fails the whole merge: drop those (never all of them blindly), then report.
 profdata="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/bin/llvm-profdata"
 test -x "$profdata" || { echo "coverage: no llvm-profdata at $profdata" >&2; exit 1; }
+total=0
+dropped=0
 for profile in target/llvm-cov-target/*.profraw; do
+  total=$((total + 1))
   "$profdata" show "$profile" > /dev/null 2>&1 || {
     echo "coverage: dropping unreadable $profile" >&2
     rm -f "$profile"
+    dropped=$((dropped + 1))
   }
 done
+# More than a stray truncated profile means the report would rest on missing data.
+if [ $((dropped * 100)) -gt "$total" ]; then
+  echo "coverage: $dropped of $total profiles were unreadable; not reporting" >&2
+  exit 1
+fi
 mkdir -p target/coverage/rust
 cargo llvm-cov report --lcov --output-path target/coverage/rust/lcov.info
 cargo llvm-cov report --summary-only
