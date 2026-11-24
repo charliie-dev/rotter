@@ -73,7 +73,10 @@ JSON schema 標為 `rotter.extract.poc/0`，仍可能變動。
 
 CLI 只讀：Git 以 `GIT_OPTIONAL_LOCKS=0`、`core.fsmonitor=false` 執行，並透過私有 index 副本
 （`GIT_INDEX_FILE`）讀取，避免 `git diff` refresh 時重寫 `.git/index`。`git` 只用 PATH 中
-受信任、不在目前 repo 內的原生 `git`（相對項目、腳本、mise／asdf 等 shim 都會被略過），每個 git
+受信任、不在目前 repo 內的原生 `git`（相對項目、腳本、mise／asdf 等 shim 都會被略過；路徑上任一
+目錄的擁有者不是你或 root、或可被群組／他人寫入時，該 PATH 項目也會被略過，例如 Homebrew 預設的
+`/opt/homebrew/bin`，需 `chmod g-w` 後才會採用；排在所選 git 之前而被略過的項目列在
+`integration status` 的 `git.detail`，找不到 git 時全部列在錯誤訊息中），每個 git
 子程序的 TMPDIR 是私有的 scratch 目錄；hook 中的 git 另只拿到固定的環境變數。細節見
 [宿主契約](docs/hosts.md)。只讀取內建與已啟用語言的檔案內容；其他檔案只列路徑。
 
@@ -100,7 +103,7 @@ CLI 退出碼 2，hook 不阻擋：Claude hook 每個 session 以一則 `systemM
   `remote.*.partialclonefilter`（不論值，含沒有名稱的 `remote.promisor`）時，在讀取任何物件前
   拒絕（CLI 退出碼 2 並指出 partial clone／promisor；Claude hook 以 `systemMessage` 提示，Grok hook
   退出碼 0、stdout 為空、在 stderr 提示）。macOS
-  內建的舊版 Apple Git（例如 2.39.x）因此無法處理 partial clone，請把較新的 git 放在 PATH 前面。
+  內建的舊版 Apple Git（例如 2.39.x）因此無法處理 partial clone，請把較新的 git 放在 PATH 前面（其所在目錄須通過上述信任檢查）。
 - 子模組：`git diff --ignore-submodules=dirty`，不在子模組中以其自身設定執行 `git status`
   （gitlink commit 的變更仍會列出並略過）。
 - 隱含的 bare repo：`safe.bareRepository=explicit`，工作目錄內嵌的 bare repo 不會被採用。

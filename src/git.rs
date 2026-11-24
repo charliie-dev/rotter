@@ -253,18 +253,37 @@ fn candidate(dir: &Path, roots: &[Identity]) -> Result<Option<PathBuf>, String> 
     Ok(Some(resolved))
 }
 
-/// The first usable `git` on `path` and the usable entries: absolute, through
-/// [`resolve_trusted`], directories, not inside `roots` and without `:` once resolved.
-fn select(path: Option<&OsStr>, roots: &[Identity]) -> Result<(PathBuf, Vec<PathBuf>), String> {
+/// The first usable `git` on `path`, the usable entries (absolute, through
+/// [`resolve_trusted`], directories, not inside `roots` and without `:` once resolved) and why
+/// each entry before that git was refused as untrusted (e.g. a group-writable Homebrew `bin`).
+fn select(
+    path: Option<&OsStr>,
+    roots: &[Identity],
+) -> Result<(PathBuf, Vec<PathBuf>, Vec<String>), String> {
     let mut program = None;
     let mut entries: Vec<PathBuf> = Vec::new();
     let mut skipped = Vec::new();
+    let mut refused = Vec::new();
     for entry in path.map(std::env::split_paths).into_iter().flatten() {
         if !entry.is_absolute() {
             continue;
         }
-        let Ok(resolved) = resolve_trusted(&entry, user(), &lstat) else {
-            continue;
+        let resolved = match resolve_trusted(&entry, user(), &lstat) {
+            Ok(resolved) => resolved,
+            Err(Untrusted::Refused(why)) => {
+                if program.is_none() {
+                    // `why` is "<refused path>: <reason>"; when that path is the entry itself,
+                    // name it once. A link target or a directory above it is named separately.
+                    let shown = entry.display().to_string();
+                    refused.push(if why.starts_with(&format!("{shown}: ")) {
+                        format!("PATH entry {why}")
+                    } else {
+                        format!("PATH entry {shown} ({why})")
+                    });
+                }
+                continue;
+            }
+            Err(Untrusted::Missing) => continue,
         };
         if lstat(&resolved).map_or(true, |meta| meta.kind != Kind::Dir)
             || inside(&resolved, roots)
@@ -281,14 +300,18 @@ fn select(path: Option<&OsStr>, roots: &[Identity]) -> Result<(PathBuf, Vec<Path
         entries.push(resolved);
     }
     match program {
-        Some(program) => Ok((program, entries)),
-        None if skipped.is_empty() => {
-            Err("cannot find git on the trusted absolute entries of PATH".to_owned())
+        Some(program) => Ok((program, entries, refused)),
+        None => {
+            skipped.extend(refused);
+            if skipped.is_empty() {
+                Err("cannot find git on the trusted absolute entries of PATH".to_owned())
+            } else {
+                Err(format!(
+                    "cannot find a usable git on the trusted absolute entries of PATH; skipped {}",
+                    skipped.join("; ")
+                ))
+            }
         }
-        None => Err(format!(
-            "cannot find a usable git on the trusted absolute entries of PATH; skipped {}",
-            skipped.join("; ")
-        )),
     }
 }
 
@@ -299,6 +322,8 @@ pub struct Git {
     program: PathBuf,
     /// The usable PATH entries, the PATH of an isolated child.
     entries: Vec<PathBuf>,
+    /// Why each PATH entry before `program` was refused as untrusted, for `status`.
+    refused: Vec<String>,
     /// Some in hook mode: children get only the allowlist, with this HOME.
     isolated: Option<Option<PathBuf>>,
     scratch: Scratch,
@@ -316,7 +341,7 @@ impl Git {
         sources: &Sources,
         isolated: bool,
     ) -> Result<Self, String> {
-        let (program, entries) =
+        let (program, entries, refused) =
             select(sources.path.as_deref(), &walk.roots).map_err(|why| match &walk.repository {
                 Some(repository) => format!(
                     "{why} (entries inside the repository {} are not used)",
@@ -327,6 +352,7 @@ impl Git {
         let mut git = Self {
             program,
             entries,
+            refused,
             isolated: isolated.then(|| sources.home.clone()),
             scratch,
             version: Err(String::new()),
@@ -355,10 +381,16 @@ impl Git {
 
     /// The resolved path and its `git version` text, or why that git is not used, for `status`.
     pub(crate) fn summary(&self) -> (String, String) {
-        let detail = match self.class() {
+        let mut detail = match self.class() {
             Ok((_, version)) => version.to_owned(),
             Err(why) => why,
         };
+        if !self.refused.is_empty() {
+            detail.push_str(&format!(
+                "; untrusted PATH entries before it were skipped: {}",
+                self.refused.join("; ")
+            ));
+        }
         (self.program.display().to_string(), detail)
     }
 
@@ -1651,6 +1683,50 @@ mod tests {
     }
 
     #[test]
+    fn untrusted_path_entries_before_the_chosen_git_are_named() {
+        let root = temp("untrusted-path");
+        let native = fs::read(std::env::current_exe().unwrap()).unwrap();
+        // Like Homebrew's default /opt/homebrew/bin: group-writable.
+        let shared = root.join("shared");
+        place(&shared, &native, 0o755);
+        fs::set_permissions(&shared, fs::Permissions::from_mode(0o775)).unwrap();
+        let good = root.join("good");
+        let real = place(&good, &native, 0o755);
+
+        let (program, _, refused) = select(Some(&joined(&[&shared, &good])), &[]).unwrap();
+        assert_eq!(program, real);
+        assert_eq!(refused.len(), 1, "{refused:?}");
+        assert!(
+            refused[0].contains(&shared.display().to_string()),
+            "{refused:?}"
+        );
+        assert!(
+            refused[0].contains("writable by other users"),
+            "{refused:?}"
+        );
+        let (_, _, after) = select(Some(&joined(&[&good, &shared])), &[]).unwrap();
+        assert!(
+            after.is_empty(),
+            "entries after the chosen git do not matter: {after:?}"
+        );
+        let error = select(Some(&joined(&[&shared])), &[]).unwrap_err();
+        assert!(error.contains(&shared.display().to_string()), "{error}");
+        // A link whose name prefixes its target's still names the PATH entry itself.
+        let short = root.join("sh");
+        std::os::unix::fs::symlink(&shared, &short).unwrap();
+        let (_, _, refused) = select(Some(&joined(&[&short, &good])), &[]).unwrap();
+        assert_eq!(
+            refused,
+            [format!(
+                "PATH entry {} ({}: directory is owned by another user or writable by other users)",
+                short.display(),
+                shared.display()
+            )]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn unusable_git_candidates_are_skipped_and_the_search_continues() {
         let root = temp("candidates");
         // This test binary is a native executable of this OS.
@@ -1693,7 +1769,7 @@ mod tests {
         let bad: Vec<&Path> = dirs.iter().map(PathBuf::as_path).collect();
         let mut all = bad.clone();
         all.push(&good);
-        let (program, entries) = select(Some(&joined(&all)), &[]).unwrap();
+        let (program, entries, _) = select(Some(&joined(&all)), &[]).unwrap();
         assert_eq!(program, real, "the first usable one, after every skip");
         assert_eq!(
             entries.len(),
@@ -1714,8 +1790,9 @@ mod tests {
         let other = temp("candidates-other");
         let fallback = place(&other.join("bin"), &native, 0o755);
         let path = joined(&[&good, &other.join("bin")]);
-        let (program, entries) = select(Some(&path), &[identity(&root).unwrap()]).unwrap();
+        let (program, entries, refused) = select(Some(&path), &[identity(&root).unwrap()]).unwrap();
         assert_eq!((program, entries), (fallback, vec![other.join("bin")]));
+        assert!(refused.is_empty(), "{refused:?}");
         let error = select(Some(&joined(&[&good])), &[identity(&root).unwrap()]).unwrap_err();
         assert!(!error.contains("good"), "{error}");
         fs::remove_dir_all(other).unwrap();
