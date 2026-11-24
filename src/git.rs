@@ -1091,6 +1091,29 @@ struct Run<'a> {
 }
 
 impl Run<'_> {
+    /// The changed entries: every tracked file still on disk (full), else the diff against
+    /// `tree` without the files that differ only in stat data.
+    fn changed(
+        &self,
+        dir: &Path,
+        specs: &[&OsStr],
+        index: Private<'_>,
+        tree: &str,
+    ) -> Result<Vec<Entry>, String> {
+        let (git, guard) = (self.git, self.guard);
+        if matches!(self.options.mode, Mode::Full) {
+            let args = args_with(&["ls-files", "-s", "-z", "--full-name"], specs);
+            let listed = git_in(git, dir, &args, None, &[0], index, guard)?;
+            return snapshot_entries(self.top, &listed);
+        }
+        let args = args_with(&diff_args(&self.options.mode, tree), specs);
+        let mut entries = parse_raw(&git_in(git, dir, &args, None, &[0], index, guard)?)?;
+        if matches!(self.options.mode, Mode::Worktree | Mode::Base(_)) {
+            drop_stat_only(git, self.top, &mut entries, guard, self.options.deadline)?;
+        }
+        Ok(entries)
+    }
+
     fn deadline_passed(&self) -> bool {
         self.options
             .deadline
@@ -1426,49 +1449,7 @@ pub fn extract_with(git: &Git, dir: &Path, options: &Options) -> Result<Report, 
         .and_then(|keys| guard_args(&keys))
         .map_err(|error| format!("refusing to read {}: {error}", top.display()))?;
     let guard = guard.as_slice();
-    let (rev, commit) = match &options.mode {
-        Mode::Base(rev) => {
-            if rev.is_empty() || rev.starts_with('-') {
-                return Err(format!("invalid base revision: {rev:?}"));
-            }
-            let commit = git_text(
-                git,
-                &top,
-                guard,
-                &[
-                    "rev-parse",
-                    "--verify",
-                    "--quiet",
-                    &format!("{rev}^{{commit}}"),
-                ],
-            )
-            .map_err(|_| format!("cannot resolve base revision {rev:?}"))?;
-            (rev.clone(), Some(commit))
-        }
-        Mode::Staged | Mode::Worktree | Mode::Full => {
-            // "No commits yet" means HEAD does not resolve; a HEAD naming a commit that cannot
-            // be read (e.g. missing from a partial clone) is an error, not an empty snapshot.
-            let commit = match git_text(
-                git,
-                &top,
-                guard,
-                &["rev-parse", "--verify", "--quiet", "HEAD"],
-            ) {
-                Ok(_) => Some(
-                    git_text(
-                        git,
-                        &top,
-                        guard,
-                        &["rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
-                    )
-                    .map_err(|_| "HEAD does not name a readable commit".to_owned())?,
-                ),
-                Err(_) => None,
-            };
-            ("HEAD".to_owned(), commit)
-        }
-    };
-    let full = matches!(options.mode, Mode::Full);
+    let (rev, commit) = before_commit(git, &top, guard, &options.mode)?;
     // Pathspecs are relative to `dir`, so commands that take them run there with top-level
     // output paths; `:/` means the whole repository.
     let specs: Vec<&OsStr> = if options.paths.is_empty() {
@@ -1476,22 +1457,9 @@ pub fn extract_with(git: &Git, dir: &Path, options: &Options) -> Result<Report, 
     } else {
         options.paths.iter().map(OsStr::new).collect()
     };
-    fn args_with<'a>(args: &[&'a str], specs: &[&'a OsStr]) -> Vec<&'a OsStr> {
-        args.iter()
-            .map(|arg| OsStr::new(*arg))
-            .chain([OsStr::new("--")])
-            .chain(specs.iter().copied())
-            .collect()
-    }
-    let with_specs = |args: &[&'static str]| args_with(args, &specs);
     let tree = match &commit {
         Some(commit) => commit.clone(),
-        None => {
-            let args = ["hash-object", "-t", "tree", "--stdin"].map(OsStr::new);
-            String::from_utf8_lossy(&call(git, &top, &args, Some(b""), &[0], guard)?)
-                .trim()
-                .to_owned()
-        }
+        None => empty_tree(git, &top, guard)?,
     };
     // `git diff <tree>` would refresh stat data and rewrite the index even with
     // GIT_OPTIONAL_LOCKS=0 (now off through diff.autoRefreshIndex), so every index read also
@@ -1505,8 +1473,153 @@ pub fn extract_with(git: &Git, dir: &Path, options: &Options) -> Result<Report, 
     )?);
     copy_index(&real_index, &index)?;
     let index = Private::Index(&index);
+    let run = Run {
+        top: &top,
+        git,
+        options,
+        guard,
+    };
+    let mut entries = run.changed(dir, &specs, index, &tree)?;
+    // HEAD→disk diffs report conflicted paths as plain modifications; keep them visible.
+    let unmerged_args = args_with(&["ls-files", "--unmerged", "-z", "--full-name"], &specs);
+    let unmerged = git_in(git, dir, &unmerged_args, None, &[0], index, guard)?;
+    mark_unmerged(&mut entries, &unmerged);
+
+    let untracked_args = args_with(
+        &[
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "-z",
+            "--full-name",
+        ],
+        &specs,
+    );
+    let untracked = paths(&git_in(
+        git,
+        dir,
+        &untracked_args,
+        None,
+        &[0],
+        index,
+        guard,
+    )?);
+    let include = options.include_untracked && !matches!(options.mode, Mode::Staged);
+    // An untracked nested repository is listed as one `dir/` record; its files belong to that
+    // repository, so it is never read as a file and stays under `not_covered`.
+    let nested = |path: &Vec<u8>| path.ends_with(b"/");
+    if include {
+        entries.extend(
+            untracked
+                .iter()
+                .filter(|path| !nested(path))
+                .map(|path| Entry {
+                    status: "?".to_owned(),
+                    old: None,
+                    new: Some((path.clone(), "100644".to_owned(), String::new())),
+                }),
+        );
+    }
+
+    let after_on_disk = !matches!(options.mode, Mode::Staged);
+    let full = matches!(options.mode, Mode::Full);
+    let mut complete = true;
+    let mut files = Vec::new();
+    for entry in &entries {
+        let (json, file_complete) = run.file(entry, after_on_disk, full)?;
+        complete &= file_complete;
+        files.push(json);
+    }
+    let not_covered: Vec<String> = untracked
+        .iter()
+        .filter(|path| !include || nested(path))
+        .map(|path| String::from_utf8_lossy(path).into_owned())
+        .collect();
+    let json = report_json(
+        options,
+        &top,
+        (rev, commit),
+        (include, not_covered),
+        complete,
+        files,
+    );
+    Ok(Report { json, complete })
+}
+
+/// `args`, then `--` and the pathspecs.
+fn args_with<'a>(args: &[&'a str], specs: &[&'a OsStr]) -> Vec<&'a OsStr> {
+    args.iter()
+        .map(|arg| OsStr::new(*arg))
+        .chain([OsStr::new("--")])
+        .chain(specs.iter().copied())
+        .collect()
+}
+
+/// The before side: the revision it names and its commit, None when there are no commits yet.
+fn before_commit(
+    git: &Git,
+    top: &Path,
+    guard: &[String],
+    mode: &Mode,
+) -> Result<(String, Option<String>), String> {
+    match mode {
+        Mode::Base(rev) => {
+            if rev.is_empty() || rev.starts_with('-') {
+                return Err(format!("invalid base revision: {rev:?}"));
+            }
+            let commit = git_text(
+                git,
+                top,
+                guard,
+                &[
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    &format!("{rev}^{{commit}}"),
+                ],
+            )
+            .map_err(|_| format!("cannot resolve base revision {rev:?}"))?;
+            Ok((rev.clone(), Some(commit)))
+        }
+        Mode::Staged | Mode::Worktree | Mode::Full => {
+            // "No commits yet" means HEAD does not resolve; a HEAD naming a commit that cannot
+            // be read (e.g. missing from a partial clone) is an error, not an empty snapshot.
+            let commit = match git_text(
+                git,
+                top,
+                guard,
+                &["rev-parse", "--verify", "--quiet", "HEAD"],
+            ) {
+                Ok(_) => Some(
+                    git_text(
+                        git,
+                        top,
+                        guard,
+                        &["rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
+                    )
+                    .map_err(|_| "HEAD does not name a readable commit".to_owned())?,
+                ),
+                Err(_) => None,
+            };
+            Ok(("HEAD".to_owned(), commit))
+        }
+    }
+}
+
+/// The empty tree's id: the before side of a repository without commits.
+fn empty_tree(git: &Git, top: &Path, guard: &[String]) -> Result<String, String> {
+    let args = ["hash-object", "-t", "tree", "--stdin"].map(OsStr::new);
+    Ok(
+        String::from_utf8_lossy(&call(git, top, &args, Some(b""), &[0], guard)?)
+            .trim()
+            .to_owned(),
+    )
+}
+
+/// `git diff --raw` of `tree` against the index (staged) or the working tree.
+fn diff_args<'a>(mode: &Mode, tree: &'a str) -> Vec<&'a str> {
     let mut args = vec!["diff"];
-    if matches!(options.mode, Mode::Staged) {
+    if matches!(mode, Mode::Staged) {
         args.push("--cached");
     }
     args.extend([
@@ -1519,63 +1632,44 @@ pub fn extract_with(git: &Git, dir: &Path, options: &Options) -> Result<Report, 
         "--no-relative",
         // No `git status` inside submodules, which would run with their own config.
         "--ignore-submodules=dirty",
-        tree.as_str(),
+        tree,
     ]);
-    let mut entries = if full {
-        let listed = git_in(
-            git,
-            dir,
-            &with_specs(&["ls-files", "-s", "-z", "--full-name"]),
-            None,
-            &[0],
-            index,
-            guard,
-        )?;
-        let mut entries: Vec<Entry> = Vec::new();
-        for record in listed
-            .split(|byte| *byte == 0)
-            .filter(|record| !record.is_empty())
-        {
-            let tab = record
-                .iter()
-                .position(|byte| *byte == b'\t')
-                .ok_or("unexpected ls-files record")?;
-            let mode = String::from_utf8_lossy(&record[..6]).into_owned();
-            let path = record[tab + 1..].to_vec();
-            // Tracked files deleted from the working tree are not part of this snapshot.
-            let on_disk = fs::symlink_metadata(top.join(OsStr::from_bytes(&path))).is_ok();
-            if on_disk
-                && entries
-                    .last()
-                    .is_none_or(|last| last.new.as_ref().is_none_or(|new| new.0 != path))
-            {
-                entries.push(Entry {
-                    status: "F".to_owned(),
-                    old: None,
-                    new: Some((path, mode, String::new())),
-                });
-            }
-        }
-        entries
-    } else {
-        let mut entries = parse_raw(&git_in(
-            git,
-            dir,
-            &args_with(&args, &specs),
-            None,
-            &[0],
-            index,
-            guard,
-        )?)?;
-        if matches!(options.mode, Mode::Worktree | Mode::Base(_)) {
-            drop_stat_only(git, &top, &mut entries, guard, options.deadline)?;
-        }
-        entries
-    };
+    args
+}
 
-    // HEAD→disk diffs report conflicted paths as plain modifications; keep them visible.
-    let unmerged_args = with_specs(&["ls-files", "--unmerged", "-z", "--full-name"]);
-    let mut unmerged: Vec<Vec<u8>> = git_in(git, dir, &unmerged_args, None, &[0], index, guard)?
+/// One `F` entry per tracked file still on disk, from `git ls-files -s -z` output.
+fn snapshot_entries(top: &Path, listed: &[u8]) -> Result<Vec<Entry>, String> {
+    let mut entries: Vec<Entry> = Vec::new();
+    for record in listed
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+    {
+        let tab = record
+            .iter()
+            .position(|byte| *byte == b'\t')
+            .ok_or("unexpected ls-files record")?;
+        let mode = String::from_utf8_lossy(&record[..6]).into_owned();
+        let path = record[tab + 1..].to_vec();
+        // Tracked files deleted from the working tree are not part of this snapshot.
+        let on_disk = fs::symlink_metadata(top.join(OsStr::from_bytes(&path))).is_ok();
+        if on_disk
+            && entries
+                .last()
+                .is_none_or(|last| last.new.as_ref().is_none_or(|new| new.0 != path))
+        {
+            entries.push(Entry {
+                status: "F".to_owned(),
+                old: None,
+                new: Some((path, mode, String::new())),
+            });
+        }
+    }
+    Ok(entries)
+}
+
+/// Marks the paths of `git ls-files --unmerged -z` output as conflicted (`U`).
+fn mark_unmerged(entries: &mut Vec<Entry>, listed: &[u8]) {
+    let mut unmerged: Vec<Vec<u8>> = listed
         .split(|byte| *byte == 0)
         .filter_map(|record| {
             let tab = record.iter().position(|byte| *byte == b'\t')?;
@@ -1600,85 +1694,57 @@ pub fn extract_with(git: &Git, dir: &Path, options: &Options) -> Result<Report, 
             }),
         }
     }
+}
 
-    let untracked_args = with_specs(&[
-        "ls-files",
-        "--others",
-        "--exclude-standard",
-        "-z",
-        "--full-name",
-    ]);
-    let untracked: Vec<Vec<u8>> = git_in(git, dir, &untracked_args, None, &[0], index, guard)?
+/// The non-empty NUL-separated paths of `listed`.
+fn paths(listed: &[u8]) -> Vec<Vec<u8>> {
+    listed
         .split(|byte| *byte == 0)
         .filter(|path| !path.is_empty())
         .map(<[u8]>::to_vec)
-        .collect();
-    let include = options.include_untracked && !matches!(options.mode, Mode::Staged);
-    // An untracked nested repository is listed as one `dir/` record; its files belong to that
-    // repository, so it is never read as a file and stays under `not_covered`.
-    let nested = |path: &Vec<u8>| path.ends_with(b"/");
-    if include {
-        entries.extend(
-            untracked
-                .iter()
-                .filter(|path| !nested(path))
-                .map(|path| Entry {
-                    status: "?".to_owned(),
-                    old: None,
-                    new: Some((path.clone(), "100644".to_owned(), String::new())),
-                }),
-        );
-    }
+        .collect()
+}
 
-    let run = Run {
-        top: &top,
-        git,
-        options,
-        guard,
-    };
-    let after_on_disk = !matches!(options.mode, Mode::Staged);
-    let mut complete = true;
-    let mut files = Vec::new();
-    for entry in &entries {
-        let (json, file_complete) = run.file(entry, after_on_disk, full)?;
-        complete &= file_complete;
-        files.push(json);
-    }
+/// The `rotter.extract.poc/0` document. `before` is the revision and its commit; `untracked`
+/// whether untracked files were included and which ones the report does not cover.
+fn report_json(
+    options: &Options,
+    top: &Path,
+    (rev, commit): (String, Option<String>),
+    (include, not_covered): (bool, Vec<String>),
+    complete: bool,
+    files: Vec<Json>,
+) -> Json {
     let mode = match options.mode {
         Mode::Staged => "staged",
         Mode::Worktree => "worktree",
         Mode::Base(_) => "base",
         Mode::Full => "full",
     };
-    let not_covered: Vec<String> = untracked
-        .iter()
-        .filter(|path| !include || nested(path))
-        .map(|path| String::from_utf8_lossy(path).into_owned())
-        .collect();
-    let json = Json::Obj(vec![
+    let before = if matches!(options.mode, Mode::Full) {
+        Json::Null
+    } else {
+        Json::Obj(vec![
+            ("rev", rev.into()),
+            ("commit", commit.clone().into()),
+            ("empty_initial", commit.is_none().into()),
+        ])
+    };
+    let after = if matches!(options.mode, Mode::Staged) {
+        "index"
+    } else {
+        "worktree"
+    };
+    Json::Obj(vec![
         ("tool", "rotter".into()),
         ("schema", "rotter.extract.poc/0".into()),
         ("stage", "extraction".into()),
         ("semantic_verification", "not_performed".into()),
         ("mode", mode.into()),
         ("repository", top.to_string_lossy().into_owned().into()),
-        (
-            "before",
-            if full {
-                Json::Null
-            } else {
-                Json::Obj(vec![
-                    ("rev", rev.into()),
-                    ("commit", commit.clone().into()),
-                    ("empty_initial", commit.is_none().into()),
-                ])
-            },
-        ),
+        ("before", before),
         ("pathspec", options.paths.clone().into()),
-        (
-            "after",
-            (if after_on_disk { "worktree" } else { "index" }).into(),
-        ),
+        ("after", after.into()),
         (
             "untracked",
             Json::Obj(vec![
@@ -1688,8 +1754,7 @@ pub fn extract_with(git: &Git, dir: &Path, options: &Options) -> Result<Report, 
         ),
         ("complete", complete.into()),
         ("files", Json::Arr(files)),
-    ]);
-    Ok(Report { json, complete })
+    ])
 }
 
 #[cfg(test)]
