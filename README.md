@@ -294,6 +294,27 @@ Windows 版（使用 Unix 專屬 API）。從原始碼安裝：
 cargo install --path . --locked
 ```
 
+## MCP server
+
+`rotter mcp` 在 stdin／stdout 上提供 [Model Context Protocol](https://modelcontextprotocol.io/specification/2026-07-28)
+server，只支援協定 2026-07-28：沒有 `initialize` 握手，每個請求都要在 `_meta` 帶
+`io.modelcontextprotocol/protocolVersion` 與 `io.modelcontextprotocol/clientCapabilities`，
+版本不符時回 `-32022`（`data.supported` 列出可用版本）。只認得舊版 `initialize` 的 client
+會收到 `-32601`，錯誤訊息寫明支援的版本。stdout 只輸出 MCP 訊息，stdin 關閉即結束。
+
+| 功能 | 內容 |
+| --- | --- |
+| `server/discover` | 支援的版本、`tools` 與 `prompts` 能力、使用說明 |
+| tool `extract` | 唯讀；參數 `mode`（staged／worktree／base／full）、`base`、`directory`（預設為 server 的工作目錄）、`include_untracked`、`paths`、`lang`。與 `rotter extract` 走同一段程式；報告放在 `structuredContent`，同一份 JSON 也放在文字內容。參數或擷取錯誤以 `isError: true` 回傳 |
+| prompt `rotter-comment-review` | 與此 binary 相符的審查 skill（同 `rotter --skill`） |
+
+清單結果附 `ttlMs`、`cacheScope: "public"`；取消（`notifications/cancelled`）的請求不再送出回應。
+client 設定範例（client 須支援協定 2026-07-28）：
+
+```json
+{ "mcpServers": { "rotter": { "command": "rotter", "args": ["mcp"] } } }
+```
+
 ## Agent 整合
 
 skill 已編進 binary，不需另外安裝或維護：`rotter --skill` 印出與此版本相符的審查 skill。

@@ -1,7 +1,7 @@
 use rotter::config::{self, Config, Sources};
 use rotter::json::Json;
 use rotter::render::{self, Color, clean};
-use rotter::{Git, Mode, Options, extract_with, hosts, install, integration, toplevel};
+use rotter::{Git, Mode, Options, extract_with, hosts, install, integration, mcp, toplevel};
 use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -20,7 +20,12 @@ const USAGE: &str = "usage: rotter --skill
        rotter extract (--staged | --worktree | --base <rev> | --full)
                       [--include-untracked] [--lang <glob>=<language>]... [-C <dir>]
                       [-- <pathspec>...]
-Every command but --skill and hook takes [--pretty [--color=(auto | always | never)]].
+       rotter mcp
+Every command but --skill, hook and mcp takes [--pretty [--color=(auto | always | never)]].
+
+mcp serves the Model Context Protocol (version 2026-07-28 only) on stdin/stdout: a read-only
+`extract` tool, run exactly like `rotter extract`, and the review skill as the prompt
+`rotter-comment-review`. It exits when stdin closes.
 
 --skill prints the comment review skill for coding agents (it matches this binary's version).
 integration install claude registers `'<rotter>' hook claude-stop || true` as a Claude Code Stop
@@ -238,6 +243,15 @@ fn configure(
     Ok(())
 }
 
+/// The MCP `extract` tool runs the same parsing, configuration and extraction as `rotter extract`.
+fn mcp_extract(args: Vec<String>) -> Result<(String, bool), String> {
+    let (dir, mut options, languages) = parse_args(&args)?;
+    let git = Git::cli(&dir)?;
+    configure(&git, &dir, &mut options, languages)?;
+    let report = extract_with(&git, &dir, &options)?;
+    Ok((report.json.to_string(), report.complete))
+}
+
 /// A reader that closed the pipe early (`rotter extract | head`) is not an error, so the run keeps
 /// the exit status it earned.
 fn emit(text: &str, earned: ExitCode) -> ExitCode {
@@ -285,6 +299,7 @@ fn main() -> ExitCode {
     match words.as_slice() {
         ["--skill"] => emit(SKILL, ExitCode::SUCCESS),
         ["hook", rest @ ..] => hook(rest),
+        ["mcp"] => mcp_command(),
         words => match document(words, &show) {
             Some(result) => finish(result),
             None => extract_command(&args, &show),
@@ -307,6 +322,17 @@ fn utf8_args() -> Result<Vec<String>, ExitCode> {
             ExitCode::from(2)
         }
     })
+}
+
+fn mcp_command() -> ExitCode {
+    let input = std::io::BufReader::new(std::io::stdin());
+    match mcp::serve(input, std::io::stdout().lock(), &mcp_extract, SKILL) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("rotter: mcp: {}", clean(&error.to_string()));
+            ExitCode::from(2)
+        }
+    }
 }
 
 fn hook(rest: &[&str]) -> ExitCode {

@@ -6,6 +6,7 @@ pub mod hosts;
 pub mod install;
 pub mod integration;
 pub mod json;
+pub mod mcp;
 pub mod render;
 
 pub use comments::{Change, error_lines, full_units, units};
