@@ -214,6 +214,9 @@ pub fn load(repo: Option<&Path>, sources: &Sources) -> Result<Loaded, String> {
         if path.starts_with(repo)
             || path.starts_with(&canonical)
             || resolved.starts_with(&canonical)
+            || link_hops(&path)
+                .iter()
+                .any(|hop| canonical_parent(hop).is_some_and(|dir| dir.starts_with(&canonical)))
         {
             return Ok(Loaded::off(format!(
                 "config {} is inside the repository {}; it is off for this repository",
@@ -231,6 +234,28 @@ pub fn load(repo: Option<&Path>, sources: &Sources) -> Result<Loaded, String> {
     let config = parse_in(&text, base, repo.as_deref(), sources.cache.as_deref())
         .map_err(|error| format!("{}: {error}", path.display()))?;
     Ok(Loaded { config, note: None })
+}
+
+/// `path` and every link it leads through (each link target made absolute), at most 40.
+fn link_hops(path: &Path) -> Vec<PathBuf> {
+    let mut hops = vec![path.to_owned()];
+    while hops.len() <= 40 {
+        let last = hops.last().expect("hops starts with path");
+        let Ok(target) = fs::read_link(last) else {
+            break;
+        };
+        let next = match last.parent() {
+            Some(parent) if target.is_relative() => parent.join(target),
+            _ => target,
+        };
+        hops.push(next);
+    }
+    hops
+}
+
+/// The canonical directory holding `path`: whoever controls it chooses what `path` is.
+fn canonical_parent(path: &Path) -> Option<PathBuf> {
+    fs::canonicalize(path.parent()?).ok()
 }
 
 #[derive(Deserialize)]

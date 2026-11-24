@@ -230,6 +230,52 @@ fn untrusted_or_repository_config_is_ignored_with_a_note() {
 }
 
 #[test]
+fn a_config_directory_linked_into_the_repository_is_off() {
+    let repo = repo(&[("a.lua2", "-- A.\nlocal a = 1\n")]);
+    // The file the repository's link points at is outside it and trusted.
+    let outside = temp("outside");
+    let target = write_config(&outside, LUA2);
+    fs::create_dir(repo.join("cfgdir")).unwrap();
+    symlink(&target, repo.join("cfgdir/config.toml")).unwrap();
+    let xdg = temp("xdg");
+    symlink(repo.join("cfgdir"), xdg.join("rotter")).unwrap();
+    let run = extract_cli(&repo, &[], &xdg_env(&xdg), &repo);
+    assert!(
+        run.stderr.contains("inside the repository"),
+        "{}",
+        run.stderr
+    );
+    assert_eq!(run.status("a.lua2"), "not_in_scope");
+    for dir in [repo, outside, xdg] {
+        fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[test]
+fn a_link_kept_in_the_repository_on_the_way_to_the_config_turns_it_off() {
+    let repo = repo(&[("a.lua2", "-- A.\nlocal a = 1\n")]);
+    // The config directory and the final file are outside; only the middle link is inside.
+    let outside = temp("outside");
+    let target = write_config(&outside, LUA2);
+    symlink(&target, repo.join("x")).unwrap();
+    let xdg = temp("xdg");
+    fs::create_dir(xdg.join("rotter")).unwrap();
+    // Relative, so the hop must be resolved against the link's own directory.
+    let relative = Path::new("../..").join(repo.file_name().unwrap()).join("x");
+    symlink(&relative, xdg.join("rotter/config.toml")).unwrap();
+    let run = extract_cli(&repo, &[], &xdg_env(&xdg), &repo);
+    assert!(
+        run.stderr.contains("inside the repository"),
+        "{}",
+        run.stderr
+    );
+    assert_eq!(run.status("a.lua2"), "not_in_scope");
+    for dir in [repo, outside, xdg] {
+        fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[test]
 fn a_missing_config_under_an_untrusted_directory_is_not_a_note() {
     let repo = repo(&[("a.go", "package p\n")]);
     let xdg = temp("xdg");
