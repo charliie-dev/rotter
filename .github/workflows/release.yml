@@ -1,0 +1,142 @@
+# No musl build: rotter dlopens the grammars `rotter parser install` compiles, which a static musl
+# binary cannot. No Windows build: rotter uses Unix-only APIs.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-15
+          - target: x86_64-apple-darwin
+            runner: macos-15
+          # The oldest supported Ubuntu runners, so the binaries need only that glibc.
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-22.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # No cache: a release build must not restore anything another workflow could have written.
+      - uses: jdx/mise-action@236a21c3b91f5db6d4e174b348674a0f0caac06d # v5.2.9
+        with:
+          install_args: rust
+          cache: false
+      - name: Check that the tag matches the crate version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')"
+          if [ "v$version" != "$TAG" ]; then
+            echo "::error::tag $TAG does not match Cargo.toml version $version"
+            exit 1
+          fi
+      - name: Build
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          rustup target add "$TARGET"
+          cargo build --release --locked --target "$TARGET"
+      - name: Package
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          stage="$(mktemp -d)"
+          cp "target/$TARGET/release/rotter" README.md "$stage/"
+          mkdir -p "$stage/skills"
+          cp -R skills/rotter-comment-review "$stage/skills/"
+          mkdir -p dist
+          tar -C "$stage" -czf "dist/rotter-$TARGET.tar.gz" .
+          tar -tzf "dist/rotter-$TARGET.tar.gz"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rotter-${{ matrix.target }}
+          path: dist/rotter-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: [build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write # Create the release and upload the archives.
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: rotter-*
+          path: dist
+          merge-multiple: true
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" dist/rotter-*.tar.gz --repo "$REPO" --verify-tag \
+            --title "rotter $TAG" --generate-notes
+
+  # Signing gets no write access to the release; the next job uploads the bundle
+  # (https://packslip.dev/docs/publishing/#keep-the-action-away-from-release-write-access).
+  packslip:
+    needs: [release]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write # Sign with the workflow's identity.
+      attestations: write # Attest the archives.
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: rotter-*
+          path: dist
+          merge-multiple: true
+      - uses: jdx/packslip@e0340e0c1d10c90a434de2b90f3a1ba345923564 # v1.11.4
+        with:
+          artifacts: dist/rotter-*.tar.gz
+          bin: rotter
+          resources: |
+            skill/rotter-comment-review=archive:skills/rotter-comment-review
+          upload: false
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: packslip
+          path: packslip/packslip.sigstore.json
+          if-no-files-found: error
+
+  publish-packslip:
+    needs: [packslip]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write # Upload the bundle to the release.
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: packslip
+          path: packslip
+      - name: Upload the bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: gh release upload "$TAG" packslip/packslip.sigstore.json --repo "$REPO"
