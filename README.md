@@ -131,8 +131,9 @@ Git 回傳後即刪除；`git diff --no-index` 以 `GIT_CEILING_DIRECTORIES=<暫
 每個指令（`extract`、`integration status`、`integration install|uninstall`、`parser list`、
 `parser install`）預設在 stdout 輸出一份縮排 JSON（結尾換行），都帶 `"tool": "rotter"` 與
 `"schema"`：`rotter.extract.poc/0`（內容與位元組不因本節改變）、`rotter.status/1`（15 個宿主依表格
-順序，各有 `id`、`support`（stable／experimental／unsupported）、`state`（installed、not_installed、
-mismatch、other_binary、foreign、error；不支援的宿主為 null）、`path`、`detail`（沿用原本的文字）、
+順序：先 8 個支援的宿主，再 7 個不支援的；各有 `id`、`support`（stable／experimental／unsupported）、`state`（installed、not_installed、
+mismatch、other_binary、foreign、error；不支援的宿主為 null。唯一例外：Claude 的 `settings.json`
+無法讀取（例如是 FIFO）時，整個 `status` 以退出碼 2 失敗，而不是回報 `error`）、`path`、`detail`（沿用原本的文字）、
 `notes`；另有 `compat`、`git`、`executable`）、`rotter.integration/1`（`host`、`action`、`result`：
 installed、already_installed、updated、removed、not_installed，`path`、`notes`）、
 `rotter.parsers/1`（`name`、`enabled`、`installed`、`path`、`source`、`detail`）與
@@ -291,19 +292,19 @@ rotter integration uninstall grok
 | --- | --- | --- | --- |
 | claude | 已出貨 | `CLAUDE_CONFIG_DIR` → `~/.claude` | `rotter integration install claude` |
 | grok | 已出貨 | `GROK_HOME` → `~/.grok` | `rotter integration install grok` |
-| copilot | 已出貨 | `COPILOT_HOME` → `~/.copilot` | `rotter integration install copilot` |
 | codex | 實驗性 | `CODEX_HOME` → `~/.codex` | `rotter integration install codex` |
+| copilot | 已出貨 | `COPILOT_HOME` → `~/.copilot` | `rotter integration install copilot` |
 | droid | 實驗性 | 無變數 → `~/.factory` | `rotter integration install droid` |
 | pi | 實驗性 | `PI_CODING_AGENT_DIR` → `~/.pi/agent` | `rotter integration install pi` |
 | letta | 實驗性 | 無變數 → `~/.letta` | `rotter integration install letta` |
 | opencode | 實驗性 | `OPENCODE_CONFIG_DIR` → `$XDG_CONFIG_HOME/opencode` → `~/.config/opencode` | `rotter integration install opencode` |
+| omp | 不支援：尚未支援（TODO） | — | 拒絕，退出碼 2 |
+| kilo | 不支援：尚未支援（TODO） | — | 拒絕，退出碼 2 |
+| hermes | 不支援：尚未支援（TODO） | — | 拒絕，退出碼 2 |
 | mastracode | 不支援（見下） | `~/.mastracode`（無變數） | 拒絕，退出碼 2 |
 | devin | 不支援（見下） | `XDG_CONFIG_HOME` → `~/.config/devin` | 拒絕，退出碼 2 |
 | cursor | 不支援（見下） | `CURSOR_CONFIG_DIR`（不含 hooks）→ `~/.cursor` | 拒絕，退出碼 2 |
 | antigravity-cli | 不支援（見下） | `~/.gemini/config`（無變數） | 拒絕，退出碼 2 |
-| omp | 不支援：尚未支援（TODO） | — | 拒絕，退出碼 2 |
-| kilo | 不支援：尚未支援（TODO） | — | 拒絕，退出碼 2 |
-| hermes | 不支援：尚未支援（TODO） | — | 拒絕，退出碼 2 |
 
 中國廠商的 agent（kimi、qwen、qodercli）刻意不在範圍內，不會出現在上表、`status` 或
 `install`／`uninstall` 的宿主清單中。

@@ -32,8 +32,8 @@ parse_timeout_seconds. install codex merges `hook codex` into $CODEX_HOME/hooks.
 ~/.codex; trust it in Codex's /hooks), install copilot writes $COPILOT_HOME/hooks/rotter.json
 (default ~/.copilot) and install droid merges `hook droid` into ~/.factory/hooks.json. install
 pi writes the extension $PI_CODING_AGENT_DIR/extensions/rotter-review.ts (default ~/.pi/agent)
-and install letta the mod ~/.letta/mods/rotter-review.js (timeout capped at 120 s, the host
-waits); install opencode writes the plugin $OPENCODE_CONFIG_DIR/plugins/rotter-review.js
+and install letta the mod ~/.letta/mods/rotter-review.js (for pi and letta the timeout is capped
+at 120 s, the host waits); install opencode writes the plugin $OPENCODE_CONFIG_DIR/plugins/rotter-review.js
 (default $XDG_CONFIG_HOME/opencode, else ~/.config/opencode), which re-prompts the session with a
 visible message. Each runs `hook <host> --timeout <n>` with only PATH and LANG. codex, droid,
 pi, letta and opencode are experimental. A host directory inside a git work tree is refused.
