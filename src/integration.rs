@@ -1806,11 +1806,17 @@ fn describe(host: &Host, ours: &[(Ours, &Value)], expected: u64) -> (&'static st
             "mismatch",
             format!("installed (older command without `|| true`); {install}"),
         ),
+        // Several entries, all for this binary: install keeps one.
+        _ if ours.iter().all(|(how, _)| *how != Ours::Other) => (
+            "mismatch",
+            format!("installed {} times; {install}", ours.len()),
+        ),
         _ => (
             "other_binary",
             format!(
                 "installed for another binary: {}",
                 ours.iter()
+                    .filter(|(how, _)| *how == Ours::Other)
                     .filter_map(|(_, entry)| entry[host.command_key].as_str())
                     .collect::<Vec<_>>()
                     .join(", ")
@@ -2098,10 +2104,10 @@ pub fn status(parse_timeout_seconds: u64) -> Result<Status, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Ours, SHIM_EXE, SHIM_TIMEOUT, Verdict, allow_request, entry_timeout, evaluate, faithful,
-        hook_timeout, ours, owned_document, owned_handler, record, remove_ours, render_template,
-        replace_file, reset_requests, respond, rewritable, run_budget, session, shim_timeout,
-        shim_values, shortened, temporary_path, trusted_home, verdict,
+        Ours, SHIM_EXE, SHIM_TIMEOUT, Verdict, allow_request, describe, entry_timeout, evaluate,
+        faithful, hook_timeout, ours, owned_document, owned_handler, record, remove_ours,
+        render_template, replace_file, reset_requests, respond, rewritable, run_budget, session,
+        shim_timeout, shim_values, shortened, temporary_path, trusted_home, verdict,
     };
     use crate::config::{Meta, Sources, lstat, user};
     use crate::hosts::{CLAUDE, COPILOT, DROID, GROK, Host, Install, LETTA, OPENCODE, PI};
@@ -2489,6 +2495,36 @@ mod tests {
             Some("g".to_owned())
         );
         assert_eq!(session(&GROK, &json!({})), None);
+    }
+
+    #[test]
+    fn several_entries_for_this_binary_are_a_mismatch_not_another_binary() {
+        let current = json!({ CLAUDE.command_key: "'/this/rotter' hook claude-stop || true" });
+        let other = json!({ CLAUDE.command_key: "'/else/rotter' hook claude-stop || true" });
+        let (state, detail) = describe(
+            &CLAUDE,
+            &[(Ours::Current, &current), (Ours::Legacy, &current)],
+            90,
+        );
+        assert_eq!(
+            (state, detail.as_str()),
+            (
+                "mismatch",
+                "installed 2 times; run `rotter integration install claude`"
+            )
+        );
+        let (state, detail) = describe(
+            &CLAUDE,
+            &[(Ours::Current, &current), (Ours::Other, &other)],
+            90,
+        );
+        assert_eq!(
+            (state, detail.as_str()),
+            (
+                "other_binary",
+                "installed for another binary: '/else/rotter' hook claude-stop || true"
+            )
+        );
     }
 
     #[test]
