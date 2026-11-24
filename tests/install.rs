@@ -683,6 +683,69 @@ fn changed_header_symbol_or_location_needs_a_reinstall() {
     );
 }
 
+/// A git grammar installs from its pinned commit. The https remote is played by a local
+/// repository: the git wrapper rewrites that one URL and allows the file protocol for the fetch
+/// only, so everything else runs as against a real remote (init, config, attributes, a depth-1
+/// fetch of the revision, the tree check, checkout, compile and publish).
+#[test]
+fn git_grammar_installs_from_its_pinned_commit() {
+    let mut world = World::new("gitsrc");
+    let upstream = world.root.join("upstream");
+    copy_lua(&upstream.join("grammars/lua/src"));
+    git(&upstream, &["init", "-q", "-b", "main"]);
+    git(
+        &upstream,
+        &["config", "uploadpack.allowAnySHA1InWant", "true"],
+    );
+    git(&upstream, &["add", "-A"]);
+    git(&upstream, &["commit", "-q", "-m", "grammar"]);
+    let head = Command::new("git")
+        .arg("-C")
+        .arg(&upstream)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .unwrap();
+    let revision = String::from_utf8(head.stdout).unwrap().trim().to_owned();
+
+    let url = "https://example.invalid/lua.git";
+    let bin = world.root.join("bin");
+    let log = recorder(
+        &bin,
+        "git",
+        &real("git"),
+        &format!(
+            "case \" $* \" in *' fetch '*)\n\
+             for a do shift; [ \"$a\" = '{url}' ] && a='file://{upstream}'; set -- \"$@\" \"$a\"; done\n\
+             set -- -c protocol.file.allow=always \"$@\";;\nesac\n",
+            upstream = upstream.display()
+        ),
+    );
+    world.set("PATH", path_with(&bin));
+    world.write_config(&format!(
+        "[language.lua3]\nurl = \"{url}\"\nrevision = \"{revision}\"\nlocation = \"grammars/lua\"\n\
+         symbol = \"tree_sitter_lua\"\nextensions = [\"lua3\"]\n\
+         units = [\"function_declaration\"]\nfunctions = [\"function_declaration\"]\n"
+    ));
+
+    ok(&world.install(&["lua3"]));
+    let fetched = fs::read_to_string(&log).unwrap();
+    assert!(
+        fetched.contains(&format!("fetch -q --depth 1 -- {url} {revision}")),
+        "{fetched}"
+    );
+    let libraries = world.listing("parsers");
+    assert_eq!(libraries.len(), 1, "{libraries:?}");
+    assert!(
+        libraries[0].starts_with(&format!("lua3-{revision}-")),
+        "{libraries:?}"
+    );
+    assert!(world.listing("build").is_empty(), "staging removed");
+    let repo = repo(&world.root, &[("a.lua3", LUA_FILE)]);
+    let side = world.side(&repo, "a.lua3", &[]);
+    assert_eq!(side["status"], "ok", "{side}");
+    assert_eq!(side["units"][0]["comments"][0]["text"], "-- Adds one.");
+}
+
 #[test]
 fn failed_build_leaves_nothing() {
     let world = World::new("fail");
