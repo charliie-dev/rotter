@@ -1475,12 +1475,20 @@ pub fn extract_with(git: &Git, dir: &Path, options: &Options) -> Result<Report, 
         .map(<[u8]>::to_vec)
         .collect();
     let include = options.include_untracked && !matches!(options.mode, Mode::Staged);
+    // An untracked nested repository is listed as one `dir/` record; its files belong to that
+    // repository, so it is never read as a file and stays under `not_covered`.
+    let nested = |path: &Vec<u8>| path.ends_with(b"/");
     if include {
-        entries.extend(untracked.iter().map(|path| Entry {
-            status: "?".to_owned(),
-            old: None,
-            new: Some((path.clone(), "100644".to_owned(), String::new())),
-        }));
+        entries.extend(
+            untracked
+                .iter()
+                .filter(|path| !nested(path))
+                .map(|path| Entry {
+                    status: "?".to_owned(),
+                    old: None,
+                    new: Some((path.clone(), "100644".to_owned(), String::new())),
+                }),
+        );
     }
 
     let run = Run {
@@ -1503,14 +1511,11 @@ pub fn extract_with(git: &Git, dir: &Path, options: &Options) -> Result<Report, 
         Mode::Base(_) => "base",
         Mode::Full => "full",
     };
-    let not_covered: Vec<String> = if include {
-        Vec::new()
-    } else {
-        untracked
-            .iter()
-            .map(|path| String::from_utf8_lossy(path).into_owned())
-            .collect()
-    };
+    let not_covered: Vec<String> = untracked
+        .iter()
+        .filter(|path| !include || nested(path))
+        .map(|path| String::from_utf8_lossy(path).into_owned())
+        .collect();
     let json = Json::Obj(vec![
         ("tool", "rotter".into()),
         ("schema", "rotter.extract.poc/0".into()),

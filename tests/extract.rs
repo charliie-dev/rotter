@@ -581,6 +581,46 @@ fn untracked_files_are_listed_unless_explicitly_included() {
 }
 
 #[test]
+fn untracked_nested_repository_is_not_covered_even_when_included() {
+    let repo = Repo::new();
+    repo.write("tracked.go", "package p\n");
+    repo.commit();
+    repo.write("nested/a.go", "package p\n");
+    let nested = Command::new("git")
+        .args(["init", "-q"])
+        .arg(repo.0.join("nested"))
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .status()
+        .unwrap();
+    assert!(nested.success());
+    repo.write("new.go", "package p\n");
+
+    for include in [false, true] {
+        let report = repo.extract(Mode::Worktree, include);
+        assert!(report.complete, "include {include}");
+        let paths: Vec<_> = report
+            .json
+            .get("files")
+            .as_arr()
+            .iter()
+            .map(|file| file.get("new_path").as_str().unwrap().to_owned())
+            .collect();
+        let not_covered = report.json.get("untracked").get("not_covered").as_arr();
+        if include {
+            assert_eq!(paths, ["new.go"]);
+            assert_eq!(not_covered, [Json::Str("nested/".into())]);
+        } else {
+            assert!(paths.is_empty());
+            assert_eq!(
+                not_covered,
+                [Json::Str("nested/".into()), Json::Str("new.go".into())]
+            );
+        }
+    }
+}
+
+#[test]
 fn inter_hunk_context_from_git_config_does_not_widen_hunks() {
     let repo = Repo::new();
     let source = |a: u8, c: u8| {
