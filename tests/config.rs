@@ -230,6 +230,23 @@ fn untrusted_or_repository_config_is_ignored_with_a_note() {
 }
 
 #[test]
+fn a_missing_config_under_an_untrusted_directory_is_not_a_note() {
+    let repo = repo(&[("a.go", "package p\n")]);
+    let xdg = temp("xdg");
+    fs::set_permissions(&xdg, fs::Permissions::from_mode(0o775)).unwrap();
+    let run = extract_cli(&repo, &[], &xdg_env(&xdg), &repo);
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert!(!run.stderr.contains("refused"), "{}", run.stderr);
+    // With a file there, the refusal is still reported.
+    write_config(&xdg, LUA2);
+    let run = extract_cli(&repo, &[], &xdg_env(&xdg), &repo);
+    assert!(run.stderr.contains("refused"), "{}", run.stderr);
+    for dir in [repo, xdg] {
+        fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[test]
 fn relative_language_paths_are_relative_to_the_config_directory() {
     // Like home-manager: the config directory holds a link to a file kept elsewhere.
     let store = temp("store");

@@ -195,6 +195,13 @@ pub fn load(repo: Option<&Path>, sources: &Sources) -> Result<Loaded, String> {
     let resolved = match trusted_file(&path, user(), &lstat) {
         Ok(resolved) => resolved,
         Err(Untrusted::Missing) => return Ok(Loaded::default()),
+        // No file at all: nothing is disabled, so an untrusted ancestor is not worth a note.
+        Err(Untrusted::Refused(_))
+            if fs::symlink_metadata(&path)
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            return Ok(Loaded::default());
+        }
         Err(Untrusted::Refused(why)) => {
             return Ok(Loaded::off(format!(
                 "config {} refused: {why}",
