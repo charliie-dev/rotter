@@ -98,34 +98,19 @@ fn parse_args(args: &[String]) -> Result<(PathBuf, Options, LangArgs), String> {
     let mut dir = PathBuf::from(".");
     let mut paths = Vec::new();
     let mut languages = Vec::new();
-    let mut set = |value: Mode| match mode.replace(value) {
-        Some(_) => Err("choose exactly one of --staged, --worktree, --base, --full".to_owned()),
-        None => Ok(()),
-    };
     while let Some(arg) = args.next() {
+        if let Some(chosen) = mode_arg(arg, &mut args)? {
+            if mode.replace(chosen).is_some() {
+                return Err("choose exactly one of --staged, --worktree, --base, --full".into());
+            }
+            continue;
+        }
         match arg.as_str() {
-            "--staged" => set(Mode::Staged)?,
-            "--worktree" => set(Mode::Worktree)?,
-            "--full" => set(Mode::Full)?,
-            "--" => {
-                paths.extend(args.by_ref().cloned());
-            }
-            "--base" => set(Mode::Base(
-                args.next().ok_or("--base needs a revision")?.clone(),
-            ))?,
+            "--" => paths.extend(args.by_ref().cloned()),
             "--include-untracked" => include_untracked = true,
-            "--lang" => {
-                let value = args.next().ok_or("--lang needs <glob>=<language>")?;
-                let (pattern, name) = value
-                    .rsplit_once('=')
-                    .ok_or_else(|| format!("--lang needs <glob>=<language>: {value}"))?;
-                languages.push((pattern.to_owned(), name.to_owned()));
-            }
+            "--lang" => languages.push(lang_arg(args.next())?),
             "-C" => dir = args.next().ok_or("-C needs a directory")?.into(),
-            other => match other.strip_prefix("--base=") {
-                Some(rev) => set(Mode::Base(rev.to_owned()))?,
-                None => return Err(format!("unknown argument: {other}")),
-            },
+            other => return Err(format!("unknown argument: {other}")),
         }
     }
     let mode = mode.ok_or("choose one of --staged, --worktree, --base, --full")?;
@@ -136,6 +121,30 @@ fn parse_args(args: &[String]) -> Result<(PathBuf, Options, LangArgs), String> {
     options.include_untracked = include_untracked;
     options.paths = paths;
     Ok((dir, options, languages))
+}
+
+/// The mode `arg` chooses (`--base` takes the next argument as its revision), or None when it
+/// chooses none.
+fn mode_arg(arg: &str, rest: &mut std::slice::Iter<'_, String>) -> Result<Option<Mode>, String> {
+    Ok(Some(match arg {
+        "--staged" => Mode::Staged,
+        "--worktree" => Mode::Worktree,
+        "--full" => Mode::Full,
+        "--base" => Mode::Base(rest.next().ok_or("--base needs a revision")?.clone()),
+        other => match other.strip_prefix("--base=") {
+            Some(rev) => Mode::Base(rev.to_owned()),
+            None => return Ok(None),
+        },
+    }))
+}
+
+/// A `--lang` value: `<glob>=<language>`, split at the last `=`.
+fn lang_arg(value: Option<&String>) -> Result<(String, String), String> {
+    let value = value.ok_or("--lang needs <glob>=<language>")?;
+    let (pattern, name) = value
+        .rsplit_once('=')
+        .ok_or_else(|| format!("--lang needs <glob>=<language>: {value}"))?;
+    Ok((pattern.to_owned(), name.to_owned()))
 }
 
 /// Takes `--pretty` and `--color=<when>` out of `args` for the commands that print a document:
@@ -234,20 +243,13 @@ fn emit(text: &str, earned: ExitCode) -> ExitCode {
     }
 }
 
+/// Renders a document: the JSON, or with --pretty the rendering for the given colour choice.
+type Show<'a> = &'a dyn Fn(&Json, &dyn Fn(bool) -> String) -> String;
+
 fn main() -> ExitCode {
-    let args: Result<Vec<String>, _> = std::env::args_os()
-        .skip(1)
-        .map(|arg| arg.into_string())
-        .collect();
-    let Ok(mut args) = args else {
-        eprintln!("rotter: arguments must be UTF-8");
-        // Even a malformed `rotter hook …` must not fail the host's turn.
-        let hook = std::env::args_os().nth(1).is_some_and(|arg| arg == "hook");
-        return if hook {
-            ExitCode::SUCCESS
-        } else {
-            ExitCode::from(2)
-        };
+    let mut args = match utf8_args() {
+        Ok(args) => args,
+        Err(code) => return code,
     };
     let pretty = match output_flags(&mut args) {
         Ok(choice) => choice.map(|choice| {
@@ -268,40 +270,67 @@ fn main() -> ExitCode {
         Some(color) => rendered(color),
         None => format!("{json}\n"),
     };
-    let result: Option<Result<(String, Option<String>), String>> = match args
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>()
-        .as_slice()
-    {
-        ["--skill"] => {
-            return emit(SKILL, ExitCode::SUCCESS);
+    let words: Vec<&str> = args.iter().map(String::as_str).collect();
+    match words.as_slice() {
+        ["--skill"] => emit(SKILL, ExitCode::SUCCESS),
+        ["hook", rest @ ..] => hook(rest),
+        words => match document(words, &show) {
+            Some(result) => finish(result),
+            None => extract_command(&args, &show),
+        },
+    }
+}
+
+/// The arguments after the program name; any that is not UTF-8 is an error, with the exit code
+/// to return.
+fn utf8_args() -> Result<Vec<String>, ExitCode> {
+    let args: Result<Vec<String>, _> = std::env::args_os()
+        .skip(1)
+        .map(|arg| arg.into_string())
+        .collect();
+    args.map_err(|_| {
+        eprintln!("rotter: arguments must be UTF-8");
+        // Even a malformed `rotter hook …` must not fail the host's turn.
+        let hook = std::env::args_os().nth(1).is_some_and(|arg| arg == "hook");
+        if hook {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::from(2)
         }
-        ["hook", rest @ ..] => {
-            // A hook must never fail the host's turn: every `rotter hook …` exits 0, even on a
-            // panic, and problems surface as a systemMessage or on stderr, per host.
-            let _ = std::panic::catch_unwind(|| match rest {
-                [name, rest @ ..]
-                    if let Some(host) = hosts::by_hook(name)
-                        && matches!(rest, [] | ["--timeout", _]) =>
-                {
-                    // A shim's own timeout; anything but a positive integer is ignored.
-                    let timeout = match rest {
-                        ["--timeout", value] => value.parse().ok().filter(|value| *value > 0),
-                        _ => None,
-                    };
-                    let mut input = String::new();
-                    let _ = std::io::stdin().read_to_string(&mut input);
-                    integration::stop(host, &input, &Sources::for_host(host), timeout);
-                }
-                _ => eprintln!(
-                    "rotter: unknown hook {:?}; available: {}",
-                    rest.join(" "),
-                    hosts::names()
-                ),
-            });
-            return ExitCode::SUCCESS;
+    })
+}
+
+/// `rotter hook <name> [--timeout <seconds>]`.
+fn hook(rest: &[&str]) -> ExitCode {
+    // A hook must never fail the host's turn: every `rotter hook …` exits 0, even on a
+    // panic, and problems surface as a systemMessage or on stderr, per host.
+    let _ = std::panic::catch_unwind(|| match rest {
+        [name, rest @ ..]
+            if let Some(host) = hosts::by_hook(name)
+                && matches!(rest, [] | ["--timeout", _]) =>
+        {
+            // A shim's own timeout; anything but a positive integer is ignored.
+            let timeout = match rest {
+                ["--timeout", value] => value.parse().ok().filter(|value| *value > 0),
+                _ => None,
+            };
+            let mut input = String::new();
+            let _ = std::io::stdin().read_to_string(&mut input);
+            integration::stop(host, &input, &Sources::for_host(host), timeout);
         }
+        _ => eprintln!(
+            "rotter: unknown hook {:?}; available: {}",
+            rest.join(" "),
+            hosts::names()
+        ),
+    });
+    ExitCode::SUCCESS
+}
+
+/// The commands that print one document: the text to print and an error to report after it,
+/// or None when `words` names none of them.
+fn document(words: &[&str], show: Show<'_>) -> Option<Result<(String, Option<String>), String>> {
+    match words {
         ["integration", "install", name] => Some(
             cli_config(None)
                 .and_then(|config| integration::install(name, config.parse_timeout_seconds))
@@ -343,29 +372,35 @@ fn main() -> ExitCode {
                 }),
         ),
         _ => None,
-    };
-    if let Some(result) = result {
-        let error = match result {
-            Ok((text, error)) => {
-                let written = emit(&text, ExitCode::SUCCESS);
-                if written != ExitCode::SUCCESS {
-                    return written;
-                }
-                error
-            }
-            Err(error) => Some(error),
-        };
-        return match error {
-            Some(error) => {
-                eprintln!("rotter: {}", clean(&error));
-                ExitCode::from(2)
-            }
-            None => ExitCode::SUCCESS,
-        };
     }
+}
+
+/// Prints a document command's text, then its error if any: exit 0, or 2 on an error.
+fn finish(result: Result<(String, Option<String>), String>) -> ExitCode {
+    let error = match result {
+        Ok((text, error)) => {
+            let written = emit(&text, ExitCode::SUCCESS);
+            if written != ExitCode::SUCCESS {
+                return written;
+            }
+            error
+        }
+        Err(error) => Some(error),
+    };
+    match error {
+        Some(error) => {
+            eprintln!("rotter: {}", clean(&error));
+            ExitCode::from(2)
+        }
+        None => ExitCode::SUCCESS,
+    }
+}
+
+/// `rotter extract …` (and help or a usage error for anything else).
+fn extract_command(args: &[String], show: Show<'_>) -> ExitCode {
     // Arguments after `--` are pathspecs and an option's value is never a flag.
     let flags = if args.first().map(String::as_str) == Some("extract") {
-        flag_positions(&args)
+        flag_positions(args)
     } else {
         (0..args.len())
             .take_while(|&index| args[index] != "--")
@@ -377,7 +412,7 @@ fn main() -> ExitCode {
     {
         return emit(&format!("{USAGE}\n"), ExitCode::SUCCESS);
     }
-    let (dir, mut options, languages) = match parse_args(&args) {
+    let (dir, mut options, languages) = match parse_args(args) {
         Ok(parsed) => parsed,
         Err(error) => {
             eprintln!("rotter: {}\n{USAGE}", clean(&error));
