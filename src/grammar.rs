@@ -316,7 +316,7 @@ pub(crate) const O_NOFOLLOW: i32 = 0o400000;
 pub(crate) const O_NOFOLLOW: i32 = 0o100000;
 #[cfg(target_os = "linux")]
 const O_NONBLOCK: i32 = 0o4000;
-const OPEN_FLAGS: i32 = O_NOFOLLOW | O_NONBLOCK;
+pub(crate) const OPEN_FLAGS: i32 = O_NOFOLLOW | O_NONBLOCK;
 // ponytail: flag values per target without a libc dependency; add a target's values to port.
 #[cfg(not(any(
     target_os = "macos",

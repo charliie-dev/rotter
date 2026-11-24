@@ -161,9 +161,15 @@ ownership、逾時（10 秒）或非 UTF-8 輸出都拒絕安裝。
 每個宿主、每個 session 最多連續要求 2 次審查；下一個本來要要求的 Stop 改為靜默，這個靜默的 Stop
 與任何沒有要求的 Stop 一樣把計數歸零。計數存在 `<state>/<hook>-count/<session>`：在經
 `resolve_trusted` 的狀態目錄下以 O_NOFOLLOW 開啟、`flock(2)` 上鎖，在同一個 descriptor 上原地
-改寫（不 rename、不 unlink），所以並行的 Stop 會依序讀寫、不會遺失計數。上限一律 fail closed：
+改寫（不 rename、不 unlink），所以並行的 Stop 會依序讀寫、不會遺失計數。去重欄位
+（`<state>/<hook>/<session>`）與已提示訊息的紀錄（`<state>/<hook>-errors|notes/<session>`）走同一
+套檢查：經 `resolve_trusted` 的狀態目錄、使用者擁有且群組／他人不可寫的子目錄（新建時為 0700）、
+以 O_NOFOLLOW 與 O_NONBLOCK 開啟（FIFO 不會讓 hook 卡住）且須為使用者擁有、他人不可寫的一般檔案；
+不符時不讀也不寫。上限一律 fail closed：
 沒有可用的狀態目錄、計數讀不到或內容損壞、寫不進去，或 session id 缺少、為空、`.`、`..`、超過
-255 位元組時，都不要求審查。沒有「新的使用者回合」訊號可用（rotter 注入的提示看起來也像使用者
+255 位元組時，都不要求審查。其中計數器根本開不了（例如狀態目錄可被群組寫入）時，hook 會在宿主顯示
+訊息的管道提示「review request withheld」與原因，每次 Stop 都提示（記錄去重的地方正是壞掉的那個
+目錄），而不是靜默。沒有「新的使用者回合」訊號可用（rotter 注入的提示看起來也像使用者
 訊息）。Grok 的 Claude 相容性下，原生 grok 與相容的 claude handler 各有自己的計數器，而原生
 handler 會略過 `stopHookActive` 的 Stop，所以一串續跑最多約 3 次要求（接受）。
 

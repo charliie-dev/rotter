@@ -297,6 +297,77 @@ fn integration_install_keeps_other_settings_and_is_idempotent() {
 }
 
 #[test]
+fn an_untrusted_state_directory_is_reported_not_silent() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = temp("untrusted-state");
+    let repo = root.join("repo");
+    common::changed_repo(&repo);
+    let state = root.join("state");
+    fs::create_dir(&state).unwrap();
+    let input = common::claude_input("s", &repo);
+    for (mode, blocks) in [(0o770, false), (0o700, true)] {
+        fs::set_permissions(&state, fs::Permissions::from_mode(mode)).unwrap();
+        let output: serde_json::Value = serde_json::from_str(&hook(&input, &state)).unwrap();
+        assert_eq!(
+            output.get("decision").is_some(),
+            blocks,
+            "{mode:o}: {output}"
+        );
+        let message = output["systemMessage"].as_str().unwrap_or_default();
+        assert_eq!(
+            message.contains("review request withheld"),
+            !blocks,
+            "{mode:o}: {output}"
+        );
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn state_files_behind_a_link_are_neither_read_nor_written() {
+    let root = temp("state-link");
+    let repo = root.join("repo");
+    common::changed_repo(&repo);
+    let state = root.join("state");
+    fs::create_dir(&state).unwrap();
+    let input = common::claude_input("s", &repo);
+    let first = hook(&input, &state);
+    assert!(first.contains(r#""decision":"block""#), "{first}");
+    // The slot now remembers this report; swap it for a link to a file outside the state dir.
+    let slot = state.join("claude-stop/s");
+    let outside = root.join("outside");
+    fs::copy(&slot, &outside).unwrap();
+    fs::remove_file(&slot).unwrap();
+    std::os::unix::fs::symlink(&outside, &slot).unwrap();
+    let before = fs::read_to_string(&outside).unwrap();
+    // A link is not trusted as "already asked", and is never written through.
+    let again = hook(&input, &state);
+    assert!(again.contains(r#""decision":"block""#), "{again}");
+    assert_eq!(fs::read_to_string(&outside).unwrap(), before);
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn a_fifo_state_file_does_not_hang_the_hook() {
+    let root = temp("state-fifo");
+    let repo = root.join("repo");
+    common::changed_repo(&repo);
+    let state = root.join("state");
+    fs::create_dir(&state).unwrap();
+    let input = common::claude_input("s", &repo);
+    let first = hook(&input, &state);
+    assert!(first.contains(r#""decision":"block""#), "{first}");
+    let slot = state.join("claude-stop/s");
+    fs::remove_file(&slot).unwrap();
+    let made = Command::new("mkfifo").arg(&slot).status().unwrap();
+    assert!(made.success());
+    // `hook` fails the test if the run does not finish promptly.
+    let again = hook(&input, &state);
+    assert!(again.contains(r#""decision":"block""#), "{again}");
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
 fn integration_install_refuses_hooks_of_another_shape() {
     let config = temp("malformed");
     let settings = config.join("settings.json");

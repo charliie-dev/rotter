@@ -2,12 +2,13 @@ use crate::config::{
     self, Config, Kind, Meta, Sources, Untrusted, lstat, resolve_trusted, trusted_file, user,
 };
 use crate::git::{self, Git, Scratch};
-use crate::grammar::{O_NOFOLLOW, create_private, open_regular};
+use crate::grammar::{O_NOFOLLOW, OPEN_FLAGS, create_private, open_regular};
 use crate::hosts::{self, CLAUDE, Host, Install, Notes};
 use crate::json::Json;
 use crate::{Mode, Options, extract_with, toplevel};
 use serde::de::{self, Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde_json::{Value, json};
+use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -320,9 +321,18 @@ fn respond(host: &Host, input: &str, sources: &Sources, timeout: Option<u64>) ->
     // The loop cap fails closed: a request goes out only once it has been counted.
     let state = sources.state.as_deref();
     if outcome.reason.is_some() {
-        if !state.is_some_and(|state| allow_request(state, host, &session)) {
-            outcome.reason = None;
-            outcome.record = None;
+        match state.map(|state| allow_request(state, host, &session)) {
+            Some(Ok(true)) => {}
+            allowed => {
+                outcome.reason = None;
+                outcome.record = None;
+                // Not deduplicated: the store that would remember it is the one that failed.
+                if let Some(Err(why)) = allowed {
+                    outcome.messages.push(format!(
+                        "review request withheld: cannot count it in the state directory ({why})"
+                    ));
+                }
+            }
         }
     } else if let Some(state) = state {
         reset_requests(state, host, &session);
@@ -500,30 +510,10 @@ fn counter(
     session: &str,
     create: bool,
 ) -> Result<Option<fs::File>, String> {
-    if create {
-        crate::install::create_base(state)?;
-    }
-    let state = match resolve_trusted(state, user(), &lstat) {
-        Ok(resolved) => resolved,
-        Err(Untrusted::Missing) if !create => return Ok(None),
-        Err(Untrusted::Missing) => return Err(format!("{} vanished", state.display())),
-        Err(Untrusted::Refused(why)) => return Err(why),
+    let name = format!("{}-count", host.hook);
+    let Some(dir) = state_dir(state, OsStr::new(&name), create)? else {
+        return Ok(None);
     };
-    let dir = state.join(format!("{}-count", host.hook));
-    let fail = |error: io::Error| format!("{}: {error}", dir.display());
-    match lstat(&dir) {
-        Ok(meta) => owned_dir(&dir, meta, user())?,
-        Err(error) if error.kind() == io::ErrorKind::NotFound && create => {
-            match fs::DirBuilder::new().mode(0o700).create(&dir) {
-                Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-                Err(error) => return Err(fail(error)),
-            }
-            owned_dir(&dir, lstat(&dir).map_err(fail)?, user())?;
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(fail(error)),
-    }
     let path = dir.join(session);
     let fail = |error: io::Error| format!("{}: {error}", path.display());
     let file = match fs::OpenOptions::new()
@@ -546,6 +536,77 @@ fn counter(
         ));
     }
     file.lock().map_err(fail)?;
+    Ok(Some(file))
+}
+
+/// `<state>/<name>`: the state directory resolved through [`resolve_trusted`] and `<name>` a
+/// directory owned by the user. With `create`, missing directories are made 0700 one at a time
+/// below a trusted ancestor; without, a missing one is None.
+fn state_dir(state: &Path, name: &OsStr, create: bool) -> Result<Option<PathBuf>, String> {
+    if create {
+        crate::install::create_base(state)?;
+    }
+    let state = match resolve_trusted(state, user(), &lstat) {
+        Ok(resolved) => resolved,
+        Err(Untrusted::Missing) if !create => return Ok(None),
+        Err(Untrusted::Missing) => return Err(format!("{} vanished", state.display())),
+        Err(Untrusted::Refused(why)) => return Err(why),
+    };
+    let dir = state.join(name);
+    let fail = |error: io::Error| format!("{}: {error}", dir.display());
+    match lstat(&dir) {
+        Ok(meta) => owned_dir(&dir, meta, user())?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound && create => {
+            match fs::DirBuilder::new().mode(0o700).create(&dir) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(fail(error)),
+            }
+            owned_dir(&dir, lstat(&dir).map_err(fail)?, user())?;
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(fail(error)),
+    }
+    Ok(Some(dir))
+}
+
+/// `path` (`<state>/<name>/<file>`) split for [`state_dir`].
+fn state_parts(path: &Path) -> Option<(&Path, &OsStr, &OsStr)> {
+    let dir = path.parent()?;
+    Some((dir.parent()?, dir.file_name()?, path.file_name()?))
+}
+
+/// Opens `<state>/<name>/<file>` without following links or blocking (a FIFO is refused, not
+/// waited on); only a regular file owned by the user that others cannot write is returned. With
+/// `create` the directories and file are created.
+fn state_file(path: &Path, create: bool) -> Result<Option<fs::File>, String> {
+    let Some((state, name, file)) = state_parts(path) else {
+        return Err(format!("{}: not a state file path", path.display()));
+    };
+    let Some(dir) = state_dir(state, name, create)? else {
+        return Ok(None);
+    };
+    let path = dir.join(file);
+    let fail = |error: io::Error| format!("{}: {error}", path.display());
+    let file = match fs::OpenOptions::new()
+        .read(true)
+        .write(create)
+        .create(create)
+        .mode(0o600)
+        .custom_flags(OPEN_FLAGS)
+        .open(&path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound && !create => return Ok(None),
+        Err(error) => return Err(fail(error)),
+    };
+    let meta = file.metadata().map_err(fail)?;
+    if !meta.is_file() || meta.uid() != user() || meta.mode() & 0o022 != 0 {
+        return Err(format!(
+            "{} must be a regular file owned by you that others cannot write",
+            path.display()
+        ));
+    }
     Ok(Some(file))
 }
 
@@ -574,19 +635,20 @@ fn write_count(file: &fs::File, count: u32) -> io::Result<()> {
 }
 
 /// Counts one review request for `host` and `session`. False (the Stop stays silent) when the
-/// cap is reached, which resets the count, or when the count cannot be read or written.
-fn allow_request(state: &Path, host: &Host, session: &str) -> bool {
-    let Ok(Some(mut file)) = counter(state, host, session, true) else {
-        return false;
+/// cap is reached, which resets the count, or when the count cannot be read or written; an error
+/// when the counter cannot be opened (e.g. an untrusted state directory).
+fn allow_request(state: &Path, host: &Host, session: &str) -> Result<bool, String> {
+    let Some(mut file) = counter(state, host, session, true)? else {
+        return Ok(false);
     };
     let Some(count) = read_count(&mut file) else {
-        return false;
+        return Ok(false);
     };
     if count >= MAX_REQUESTS {
         let _ = write_count(&file, 0);
-        return false;
+        return Ok(false);
     }
-    write_count(&file, count + 1).is_ok()
+    Ok(write_count(&file, count + 1).is_ok())
 }
 
 /// A Stop that asks nothing ends the host's chain: the count goes back to 0.
@@ -640,15 +702,20 @@ fn fingerprint(content: &str) -> String {
 }
 
 fn seen(path: &Path) -> Option<String> {
-    fs::read_to_string(path)
-        .ok()
-        .map(|seen| seen.trim().to_owned())
+    let mut text = String::new();
+    state_file(path, false)
+        .ok()??
+        .read_to_string(&mut text)
+        .ok()?;
+    Some(text.trim().to_owned())
 }
 
 /// Failing to record state only means the same content may be announced again.
 fn record(path: &Path, fingerprint: &str) {
-    if let Some(dir) = path.parent() {
-        let _ = fs::create_dir_all(dir).and_then(|()| fs::write(path, format!("{fingerprint}\n")));
+    if let Ok(Some(file)) = state_file(path, true) {
+        let _ = file
+            .set_len(0)
+            .and_then(|()| file.write_all_at(format!("{fingerprint}\n").as_bytes(), 0));
     }
 }
 
@@ -2427,14 +2494,15 @@ mod tests {
     #[test]
     fn the_loop_cap_allows_two_requests_then_one_silent_stop() {
         let state = temp().join("state/rotter");
-        let asks: Vec<bool> = (0..7)
-            .map(|_| allow_request(&state, &CLAUDE, "s"))
-            .collect();
+        let ask = |state: &Path, host: &Host, session: &str| {
+            allow_request(state, host, session) == Ok(true)
+        };
+        let asks: Vec<bool> = (0..7).map(|_| ask(&state, &CLAUDE, "s")).collect();
         assert_eq!(asks, [true, true, false, true, true, false, true]);
         // A Stop without a request resets; the counter is per host and session.
         reset_requests(&state, &CLAUDE, "s");
-        assert!(allow_request(&state, &CLAUDE, "s") && allow_request(&state, &CLAUDE, "s"));
-        assert!(allow_request(&state, &GROK, "s") && allow_request(&state, &CLAUDE, "t"));
+        assert!(ask(&state, &CLAUDE, "s") && ask(&state, &CLAUDE, "s"));
+        assert!(ask(&state, &GROK, "s") && ask(&state, &CLAUDE, "t"));
         let count = state.join("claude-stop-count/s");
         assert_eq!(fs::read_to_string(&count).unwrap(), "2\n");
         assert_eq!(
@@ -2443,16 +2511,26 @@ mod tests {
         );
         // Fail closed: corrupt content, a directory in the way, an unwritable state dir.
         fs::write(&count, "x\n").unwrap();
-        assert!(!allow_request(&state, &CLAUDE, "s"));
+        assert_eq!(allow_request(&state, &CLAUDE, "s"), Ok(false));
         reset_requests(&state, &CLAUDE, "s");
-        assert!(allow_request(&state, &CLAUDE, "s"), "a reset repairs it");
+        assert!(ask(&state, &CLAUDE, "s"), "a reset repairs it");
+        // Errors (reported by the hook) when the counter cannot be opened at all.
         fs::create_dir(state.join("claude-stop-count/d")).unwrap();
-        assert!(!allow_request(&state, &CLAUDE, "d"));
+        assert!(allow_request(&state, &CLAUDE, "d").is_err());
+        // Owned by the user but writable by others: refused all the same.
+        let shared_count = state.join("claude-stop-count/w");
+        fs::write(&shared_count, "").unwrap();
+        fs::set_permissions(&shared_count, fs::Permissions::from_mode(0o622)).unwrap();
+        assert!(allow_request(&state, &CLAUDE, "w").is_err());
         let locked = temp();
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o500)).unwrap();
-        assert!(!allow_request(&locked.join("state"), &CLAUDE, "s"));
-        assert!(!allow_request(&locked, &CLAUDE, "s"));
+        assert!(allow_request(&locked.join("state"), &CLAUDE, "s").is_err());
+        assert!(allow_request(&locked, &CLAUDE, "s").is_err());
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+        let shared = temp();
+        fs::set_permissions(&shared, fs::Permissions::from_mode(0o770)).unwrap();
+        let refused = allow_request(&shared, &CLAUDE, "s").unwrap_err();
+        assert!(refused.contains("writable by other users"), "{refused}");
         // A reset never creates anything.
         let fresh = temp().join("state");
         reset_requests(&fresh, &CLAUDE, "s");
@@ -2474,7 +2552,7 @@ mod tests {
                     let (state, barrier) = (state.clone(), Arc::clone(&barrier));
                     std::thread::spawn(move || {
                         barrier.wait();
-                        allow_request(&state, &CLAUDE, "s")
+                        allow_request(&state, &CLAUDE, "s") == Ok(true)
                     })
                 })
                 .collect();
