@@ -1,6 +1,6 @@
 [tools]
 # llvm-tools-preview: the LLVM profile tools cargo-llvm-cov runs.
-rust = { version = "1.98.1", profile = "minimal", components = [
+rust = { version = "1.100.0", profile = "minimal", components = [
   "rustfmt",
   "clippy",
   "llvm-tools-preview",
