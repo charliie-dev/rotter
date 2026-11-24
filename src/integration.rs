@@ -1533,16 +1533,30 @@ fn install_merged(
         true
     });
     if !placed {
+        // A `hooks` or event value of another shape is someone else's content: replacing it
+        // would drop it, so the file is refused like any other rewrite that changes it.
+        let malformed = |what: &str| {
+            format!(
+                "{}: {what} would be replaced when rotter adds its hook; left alone",
+                path.display()
+            )
+        };
         let events = if shape(host).0 {
-            if !settings["hooks"].is_object() {
-                settings["hooks"] = json!({});
+            match &settings["hooks"] {
+                Value::Object(_) => {}
+                Value::Null => settings["hooks"] = json!({}),
+                _ => return Err(malformed("`hooks` is not an object and")),
             }
             &mut settings["hooks"]
         } else {
             &mut settings
         };
-        if !events[host.event].is_array() {
-            events[host.event] = json!([]);
+        match &events[host.event] {
+            Value::Array(_) => {}
+            Value::Null => events[host.event] = json!([]),
+            _ => {
+                return Err(malformed(&format!("`{}` is not an array and", host.event)));
+            }
         }
         events[host.event]
             .as_array_mut()

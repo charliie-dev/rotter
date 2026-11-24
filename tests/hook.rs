@@ -297,6 +297,24 @@ fn integration_install_keeps_other_settings_and_is_idempotent() {
 }
 
 #[test]
+fn integration_install_refuses_hooks_of_another_shape() {
+    let config = temp("malformed");
+    let settings = config.join("settings.json");
+    for original in [
+        r#"{"model": "x", "hooks": {"Stop": {"hooks": [{"type": "command", "command": "other"}]}}}"#,
+        r#"{"hooks": [{"event": "Stop", "command": "other"}]}"#,
+    ] {
+        fs::write(&settings, original).unwrap();
+        let (code, text) = integration(&config, &["install", "claude"]);
+        assert_eq!(code, 2, "{text}");
+        assert!(text.contains("left alone"), "{text}");
+        assert_eq!(fs::read_to_string(&settings).unwrap(), original);
+        assert!(!config.join("settings.json.rotter-bak").exists(), "{text}");
+    }
+    fs::remove_dir_all(&config).unwrap();
+}
+
+#[test]
 fn integration_install_creates_missing_settings() {
     let config = temp("fresh");
     assert_eq!(integration(&config, &["uninstall", "claude"]).0, 0);
