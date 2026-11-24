@@ -380,6 +380,26 @@ mod tests {
     use std::time::Duration;
 
     #[test]
+    fn parse_errors_say_what_failed() {
+        use std::error::Error;
+        let load = ParseError::GrammarLoad(tree_sitter::LanguageError::Version(1));
+        let inner = tree_sitter::LanguageError::Version(1).to_string();
+        assert_eq!(load.to_string(), format!("failed to load grammar: {inner}"));
+        assert_eq!(load.source().map(ToString::to_string), Some(inner));
+        for (error, text) in [
+            (ParseError::NoTree, "parser returned no tree"),
+            (ParseError::Syntax, "source contains syntax errors"),
+            (
+                ParseError::Timeout,
+                "parse did not finish before its deadline",
+            ),
+        ] {
+            assert_eq!(error.to_string(), text);
+            assert!(error.source().is_none(), "{text}");
+        }
+    }
+
+    #[test]
     fn zero_limit_times_out_before_parsing() {
         let go = Grammar::builtin(Language::Go);
         assert!(matches!(
