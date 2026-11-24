@@ -1,0 +1,35 @@
+# cargo-deny (`mise run sast`): known vulnerabilities, licenses, duplicated or wildcard crates
+# and the sources of every dependency. Started from `cargo deny init` (0.22.0), then trimmed.
+
+[graph]
+all-features = true
+
+[advisories]
+# A cache, not CARGO_HOME: the clone of the advisory database is fetched again when missing.
+db-path = "~/.cache/cargo-deny/advisory-dbs"
+# Every RustSec advisory against a dependency, direct or transitive (vulnerable, unsound,
+# unmaintained or yanked), fails; an accepted one is listed here with its id and the reason.
+# cargo-deny's defaults check unsound and unmaintained only for direct dependencies and only warn
+# on a yanked version.
+unmaintained = "all"
+unsound = "all"
+yanked = "deny"
+ignore = []
+
+[licenses]
+# The licenses today's dependencies use; any other needs a decision before it is added.
+allow = ["MIT", "Apache-2.0", "Unlicense", "ISC", "Unicode-3.0"]
+confidence-threshold = 0.8
+
+[licenses.private]
+# rotter is not published (`publish = false`), so it needs no license of its own here.
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

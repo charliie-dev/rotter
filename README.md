@@ -11,11 +11,12 @@ Rust 套件依賴由 [Cargo.toml](Cargo.toml)／[Cargo.lock](Cargo.lock) 固定�
 宿主需要已有 Git 與可用的 C 編譯器／平台 SDK，因為 Tree-sitter 會編譯原生 C 程式。
 
 ```sh
-mise install rust node bun
+mise install
 mise run check
 ```
 
-`check` 會執行 Rust 格式檢查、Clippy 和全部測試。Node 與 Bun（`mise.toml` 固定為 26.13.1 與
+`mise install` 安裝 `mise.toml` 固定的全部工具，包括 `lint` 用的 actionlint，以及 `sast`、`codeql`、
+`crap`、`mutants` 任務用的分析工具。`check` 會執行 Rust 格式檢查、Clippy、actionlint 和全部測試。Node 與 Bun（`mise.toml` 固定為 26.13.1 與
 1.4.4）用來在 [shim 測試](tests/shims.rs) 中以宿主實際使用的引擎執行 shim：pi 在兩者下各跑一次，
 letta 用 Node，opencode 用 Bun；沒有安裝時該測試直接失敗，不會略過。任務不會自動安裝從全域 mise 設定
 繼承的工具，因此首次使用須先執行上述安裝命令。

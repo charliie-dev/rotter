@@ -1,0 +1,63 @@
+# rotter's own opengrep rules (`mise run sast`). They replace the generic audit rules that flag
+# every use of std::env::args_os, current_exe, temp_dir and unsafe, which rotter uses on purpose.
+rules:
+  - id: rotter-no-shell
+    languages: [rust]
+    severity: ERROR
+    message: >-
+      rotter never runs a command through a shell: arguments reach the program exactly as given,
+      so nothing in a path or an option is interpreted. Spawn the program itself.
+    paths:
+      include: ["/src/**"]
+    # The shell's name as a literal, a `const` or local holding it, a `static` holding it, or a
+    # literal wrapped once (`OsStr::new("sh")`, `String::from(..)`, `"sh".to_owned()`). A program
+    # name built at run time is out of reach of this rule.
+    patterns:
+      - pattern-either:
+          - pattern: Command::new($ARG)
+          - pattern: std::process::Command::new($ARG)
+      - pattern-either:
+          - pattern: $C::new("$SHELL")
+          - pattern: $C::new($W::new("$SHELL"))
+          - pattern: $C::new($W::from("$SHELL"))
+          - pattern: $C::new("$SHELL".$M())
+          - patterns:
+              - pattern-inside: |
+                  static $S: $T = "$SHELL";
+                  ...
+              - pattern: $C::new($S)
+      - metavariable-regex:
+          metavariable: $SHELL
+          regex: ^(.*/)?(sh|bash|zsh|dash|ksh|mksh|fish|csh|tcsh|cmd|powershell|pwsh)(\.exe)?$
+
+  # The same literals matched as text: opengrep 2.0.0 does not match Rust patterns inside
+  # let-else blocks or macro arguments (`assert!`, `vec![]`), and the text has no such blind spot.
+  # Raw strings (`r"sh"`, `r#"sh"#`) and a wrapper's full path (`std::ffi::OsStr::new("sh")`)
+  # count too. The Rust rule above adds what text cannot see: a const, static or local holding
+  # the name, declared before its use in the same file. Neither rule sees a const or static
+  # declared after its use or in another module (`use crate::consts::SHELL`), a reference to one
+  # (`&SHELL`) or an associated const (`Self::SHELL`).
+  - id: rotter-no-shell-literal
+    languages: [generic]
+    severity: ERROR
+    message: >-
+      rotter never runs a command through a shell: arguments reach the program exactly as given,
+      so nothing in a path or an option is interpreted. Spawn the program itself.
+    paths:
+      include: ["/src/**"]
+    pattern-regex: >-
+      \bCommand::new\(\s*&?\s*((\w+::)+(new|from)\(\s*)?r?#*"([^"]*/)?(sh|bash|zsh|dash|ksh|mksh|fish|csh|tcsh|cmd|powershell|pwsh)(\.exe)?"
+
+  # Matched as text, not Rust: opengrep 2.0.0 cannot parse edition 2024's `unsafe extern` blocks,
+  # and the text covers every form (blocks, fn, impl, trait, extern, `#[unsafe(...)]`) alike.
+  - id: rotter-unsafe-confined
+    languages: [generic]
+    severity: ERROR
+    message: >-
+      unsafe code stays in src/grammar.rs (loading grammar libraries) and src/config.rs (the C
+      call that reads the password database). Code anywhere else needs a review first, and then
+      its file is added to this rule's exclusions.
+    paths:
+      include: ["/src/**"]
+      exclude: ["/src/grammar.rs", "/src/config.rs"]
+    pattern-regex: \bunsafe\s*(\{|\(|fn\b|impl\b|trait\b|extern\b)
