@@ -99,6 +99,9 @@ fn lua2(path: &Path) -> String {
 
 fn git(dir: &Path, args: &[&str]) {
     let status = Command::new("git")
+        // No detached auto-maintenance: it can still be writing a fixture's .git (e.g.
+        // objects/maintenance.lock) when a test snapshots it.
+        .args(["-c", "maintenance.auto=false", "-c", "gc.auto=0"])
         .arg("-C")
         .arg(dir)
         .args(args)
