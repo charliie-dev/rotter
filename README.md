@@ -15,8 +15,8 @@ mise install rust node bun
 mise run check
 ```
 
-`check` 會執行 Rust 格式檢查、Clippy 和全部測試。Node 與 Bun（`mise.toml` 固定為 24.21.0 與
-1.3.14）用來在 [shim 測試](tests/shims.rs) 中以宿主實際使用的引擎執行 shim：pi 在兩者下各跑一次，
+`check` 會執行 Rust 格式檢查、Clippy 和全部測試。Node 與 Bun（`mise.toml` 固定為 26.13.1 與
+1.4.4）用來在 [shim 測試](tests/shims.rs) 中以宿主實際使用的引擎執行 shim：pi 在兩者下各跑一次，
 letta 用 Node，opencode 用 Bun；沒有安裝時該測試直接失敗，不會略過。任務不會自動安裝從全域 mise 設定
 繼承的工具，因此首次使用須先執行上述安裝命令。
 

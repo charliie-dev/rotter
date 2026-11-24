@@ -339,8 +339,8 @@ pi、letta 與 opencode 沒有指令型 hook，只在自己的程序內載入程
 - 暫存檔 `rotter-review.ts.rotter-tmp`／`rotter-review.js.rotter-tmp` 不符合三個宿主的載入規則（見
   下表）。
 
-shim 測試（`tests/shims.rs`）以 `mise.toml` 固定的引擎執行產生的 shim：pi 在 Node 24.21.0 與
-Bun 1.3.14 下各跑一次，letta 用 Node 24.21.0，opencode 用 Bun 1.3.14（都取 mise 安裝目錄下的絕對
+shim 測試（`tests/shims.rs`）以 `mise.toml` 固定的引擎執行產生的 shim：pi 在 Node 26.13.1 與
+Bun 1.4.4 下各跑一次，letta 用 Node 26.13.1，opencode 用 Bun 1.4.4（都取 mise 安裝目錄下的絕對
 路徑，沒有時測試失敗、不略過；log 印出引擎版本，測試也比對它）。搭配 stub 宿主 API
 （`tests/fixtures/shim/harness.mjs`，含 `uncaughtException`／`unhandledRejection` 偵測，handler 結束
 後再等約 1 秒，然後直接結束、不等 shim 留下的程序）與 stub rotter（`stub.cjs`，以 Node 執行，放在
@@ -365,13 +365,13 @@ end_turn 的回合都靜默且不留下未處理的例外。
 | 續跑判斷 | 沒有續跑旗標：只靠 rotter 的上限；shim 只處理 `outcome` 為 `completed` 的回合 |
 | 要求續跑 | 回傳 `{entries: [...event.entries, {type:"custom_message", customType:"rotter-review", content, display:true}], continue: true}`（「append entries and request one continuation」） |
 | 提示管道 | 預設 stderr（shim 忽略；沒有使用 `ctx.ui.notify`） |
-| 引擎 | npm 版：Node ≥ 22.19.0（`engines.node`、README），extension 由 jiti 載入；release binary：Bun 1.3.14 編譯（`build-binaries.yml`），extension 由內嵌的 `jiti/static`（jiti 2.7.0）以 `{moduleCache:false, tryNative:false}` 載入（`loader.ts`、`jiti-static-loader.ts`）。測試在 Node 24.21.0 與 Bun 1.3.14 下都執行；見下方「Bun 下沒有模擬的部分」 |
+| 引擎 | npm 版：Node ≥ 22.19.0（`engines.node`、README），extension 由 jiti 載入；release binary：Bun 1.4.4 編譯（`build-binaries.yml`，earendil-works/pi `main`，2026-11-24 查核），extension 由內嵌的 `jiti/static`（jiti 2.7.0）以 `{moduleCache:false, tryNative:false}` 載入（`loader.ts`、`jiti-static-loader.ts`）。測試在 Node 26.13.1 與 Bun 1.4.4 下都執行；見下方「Bun 下沒有模擬的部分」 |
 | project `.env` | release binary 以 `bun build --compile --no-compile-autoload-bunfig` 建置，沒有關閉 `.env` 自動載入（Bun 的預設為開啟），所以工作目錄的 `.env` 會進入 Pi 程序的環境；npm 版（Node）不會。project extension（`.pi/extensions`）需要 project trust 才會載入 |
 | env-injectable 處理 | 是 |
 
 Bun 下沒有模擬的部分：harness 以 Bun 自己的 TypeScript 載入器 `import()` shim，不是 Pi 的 jiti；
 `bun build --compile` 產生的單一執行檔環境（內嵌模組、`virtualModules`）與 Pi 真正的
-`ExtensionAPI` 也沒有模擬（stub 只有 `on` 與 `agent_before_settle` 的欄位）。有執行到的是 Bun 1.3.14
+`ExtensionAPI` 也沒有模擬（stub 只有 `on` 與 `agent_before_settle` 的欄位）。有執行到的是 Bun 1.4.4
 的 `node:child_process`（`detached`、process group 的 SIGKILL、stdin／stdout 事件）、timer 與
 Promise 行為，這些是 shim 真正依賴的部分。2026-09-29 另以本機 Bun 快取中的 jiti 2.7.0
 `jiti/static`、Pi 的同一組選項手動載入 shim 執行 once／loop／hang／garbage／throwing，結果與上面相同
@@ -399,7 +399,7 @@ commit `fd889a2741891ee45116cb6131052d7fad220886`
 | 續跑判斷 | 沒有續跑旗標：只靠 rotter 的上限；shim 只處理 `stopReason` 為 `end_turn` 的回合 |
 | 要求續跑 | 回傳 `{continue: "<訊息>"}`（非空字串），Letta 以它作為新的使用者訊息再跑一輪（受 `--max-turns` 約束） |
 | 提示管道 | 預設 stderr（shim 忽略） |
-| 引擎 | npm 版 `letta.js` 以 `Bun.build({target:"node"})` 打包並加上 `#!/usr/bin/env node`，`engines.node` ≥ 22.19.0（也列 `bun` ≥ 1.3.2）；測試以 Node 24.21.0 執行 |
+| 引擎 | npm 版 `letta.js` 以 `Bun.build({target:"node"})` 打包並加上 `#!/usr/bin/env node`，`engines.node` ≥ 22.19.0（也列 `bun` ≥ 1.3.2）；測試以 Node 26.13.1 執行 |
 | project `.env` | Node 不會自動載入 `.env`；settings 的 `env` 只用於少數 Letta 自己的變數，不寫入 `process.env`；Letta 不支援 project mod |
 | env-injectable 處理 | 是（shim 只傳 PATH 與 LANG） |
 
@@ -424,11 +424,11 @@ commit `fd889a2741891ee45116cb6131052d7fad220886`
 | 要求續跑 | `client.session.promptAsync({path:{id}, body:{parts:[{type:"text", text}]}})`（`POST /session/{id}/prompt_async`，立即返回），在「同時只跑一次」旗標放開之後才呼叫，所以注入的那一輪結束時的 `session.idle` 照常交給 rotter 計數；失敗被吞掉。這是使用者看得到的新訊息，內容是 rotter 的 `continue`：固定文字、數量、cwd（絕對路徑、無控制字元）與 shell 引用過的 binary 路徑，沒有報告內容或檔名 |
 | 提示管道 | 預設 stderr（shim 忽略；沒有使用 `client.app.log`） |
 | timeout | shim 內的 timeout；OpenCode 不等待 handler，不設 120 秒上限 |
-| 引擎 | release binary 以 `Bun.build({compile})` 建置，macOS／Linux 用 Bun 1.3.14（根目錄 `package.json` 的 `packageManager: bun@1.3.14`）；測試以 Bun 1.3.14 執行 |
+| 引擎 | release binary 以 `Bun.build({compile})` 建置，macOS／Linux 用 Bun 1.4.4（根目錄 `package.json` 的 `packageManager: bun@1.4.4`，依 anomalyco/opencode commit `b47eb4ed2da71e940248c362d3f9ea175597f9b1`，2026-11-24 查核）；測試以 Bun 1.4.4 執行 |
 | project `.env` | 建置時 `autoloadDotenv:false`、`autoloadBunfig:false`，工作目錄的 `.env` 不會進入 OpenCode 程序；project 的 `.opencode/plugins/` 本來就在同一個程序內執行任意程式碼（宿主層級） |
 | env-injectable 處理 | 是（shim 只傳 PATH 與 LANG，rotter 端的 HOME 取自密碼資料庫） |
 
-測試（Bun 1.3.14）另外驗證：模組只有一個函式 export；`session.get` 丟出例外時不執行 rotter；
+測試（Bun 1.4.4）另外驗證：模組只有一個函式 export；`session.get` 丟出例外時不執行 rotter；
 子 session 不執行 rotter；只有 rotter 要求審查時才呼叫 `promptAsync`（錯誤路徑全部靜默）；
 `promptAsync` reject 時被吞掉；stub `promptAsync` 在返回之前就先發出新的使用者訊息事件與下一個
 `session.idle` 時，第二個 idle 仍會詢問 rotter（旗標沒有被注入的那一輪佔住，改成佔住時此案例
