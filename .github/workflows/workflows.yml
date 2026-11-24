@@ -1,0 +1,32 @@
+# Lints the GitHub Actions workflows (actionlint) and checks their security (zizmor), only when a
+# pull request changes something under .github/ or mise.toml (where both tools are pinned).
+name: workflows
+
+on:
+  pull_request:
+    paths:
+      - ".github/**"
+      - "mise.toml"
+
+permissions: {}
+
+concurrency:
+  group: workflows-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  workflows:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@236a21c3b91f5db6d4e174b348674a0f0caac06d # v5.2.9
+        with:
+          install_args: aqua:rhysd/actionlint aqua:zizmorcore/zizmor
+          cache: false
+      - run: actionlint
+      - run: zizmor --offline .github/workflows

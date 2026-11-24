@@ -9,6 +9,16 @@ name: mutants
 
 on:
   pull_request:
+    # Only when what the tests build or run changes.
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "skills/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".cargo/**"
+      - "mise.toml"
+      - ".github/workflows/mutants.yml"
 
 permissions: {}
 
@@ -35,9 +45,10 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      # Every tool mise.toml pins: Rust and cargo-mutants, and Node and Bun for the shim tests.
+      # Rust and cargo-mutants, and Node and Bun for the shim tests; not the static analysers.
       - uses: jdx/mise-action@236a21c3b91f5db6d4e174b348674a0f0caac06d # v5.2.9
         with:
+          install_args: rust node bun cargo:cargo-mutants
           cache: false
       # The install tests build a fixture offline, which needs every locked crate downloaded.
       - run: cargo fetch --locked
