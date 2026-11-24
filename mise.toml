@@ -40,12 +40,15 @@ run = "cargo test --test parsers --locked"
 
 [tasks.mutants]
 description = "Mutation-test the code changed since a base (default main)"
-usage = 'arg "[base]" default="main"'
+usage = '''
+arg "[base]" default="main"
+flag "--shard <shard>" help="Run only this share of the mutants, as k/n (0-based), as CI does"
+'''
 run = '''
 diff="$(mktemp "${TMPDIR:-/tmp}/mutants.XXXXXX")"
 trap 'rm -f "$diff"' EXIT
 git diff "${usage_base?}...HEAD" > "$diff"
-cargo mutants --in-diff "$diff" -- --all-targets --locked
+cargo mutants --in-diff "$diff" ${usage_shard:+--shard "$usage_shard"} -- --all-targets --locked
 '''
 
 [tasks.coverage]

@@ -1,0 +1,54 @@
+# Mutation testing as a pull request gate: every mutant cargo-mutants makes of the code the pull
+# request changes must be caught by the tests (`mise run mutants`; equivalent mutants are excluded
+# in .cargo/mutants.toml). A missed mutant or a timeout fails the check, and the shard's
+# mutants.out is kept as an artifact.
+#
+# The mutants are split over 8 jobs to stay within a job's 6 hours when a pull request changes most
+# of the code. Linux amd64 runners.
+name: mutants
+
+on:
+  pull_request:
+
+permissions: {}
+
+concurrency:
+  group: mutants-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  mutants:
+    name: mutants ${{ matrix.shard }}/8
+    runs-on: ubuntu-26.04
+    timeout-minutes: 360
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    env:
+      CARGO_MUTANTS_JOBS: "2"
+    steps:
+      # Full history, so the pull request's base branch is there to diff against.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      # Every tool mise.toml pins: Rust and cargo-mutants, and Node and Bun for the shim tests.
+      - uses: jdx/mise-action@236a21c3b91f5db6d4e174b348674a0f0caac06d # v5.2.9
+        with:
+          cache: false
+      # The install tests build a fixture offline, which needs every locked crate downloaded.
+      - run: cargo fetch --locked
+      - name: Mutation-test the pull request's changes
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          SHARD: ${{ matrix.shard }}
+        run: mise run mutants "origin/$BASE_REF" --shard "$SHARD/8"
+      - if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mutants-${{ matrix.shard }}
+          path: mutants.out
+          if-no-files-found: ignore
