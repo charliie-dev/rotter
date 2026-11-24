@@ -672,31 +672,107 @@ fn guard_args(keys: &[u8]) -> Result<Vec<String>, String> {
         .collect())
 }
 
-/// Whether a working-tree `M` entry differs from its before blob only in stat data (git no
-/// longer checks: diff.autoRefreshIndex=false). The disk file is read through rotter's own
-/// no-follow descriptor and hashed from those bytes without filters; any doubt keeps the entry.
-fn stat_only(git: &Git, top: &Path, entry: &Entry, guard: &[String]) -> bool {
+/// The disk path and before blob of a working-tree `M` entry that may differ from that blob only
+/// in stat data (git no longer checks: diff.autoRefreshIndex=false).
+fn stat_candidate(entry: &Entry) -> Option<(&[u8], &str)> {
     let (Some((_, old_mode, old_oid)), Some((path, new_mode, new_oid))) = (&entry.old, &entry.new)
     else {
-        return false;
+        return None;
     };
-    if entry.status != "M"
-        || !is_zero(new_oid)
-        || old_mode != new_mode
-        || !matches!(old_mode.as_str(), "100644" | "100755")
-    {
-        return false;
+    (entry.status == "M"
+        && is_zero(new_oid)
+        && old_mode == new_mode
+        && matches!(old_mode.as_str(), "100644" | "100755"))
+    .then_some((path.as_slice(), old_oid.as_str()))
+}
+
+/// Paths per `git hash-object` call, well below the argument-length limit.
+const HASH_BATCH: usize = 500;
+
+/// Drops the entries that differ from their before blob only in stat data. Each candidate is read
+/// through rotter's own no-follow descriptor into a private scratch copy, and the copies are
+/// hashed without filters, many per git call; any doubt keeps the entry. Once `deadline` passes
+/// the remaining candidates are kept unchecked, so the run still ends near its deadline.
+fn drop_stat_only(
+    git: &Git,
+    top: &Path,
+    entries: &mut Vec<Entry>,
+    guard: &[String],
+    deadline: Option<Instant>,
+) -> Result<(), String> {
+    let candidates: Vec<(usize, &str)> = entries
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| stat_candidate(entry).map(|(_, oid)| (index, oid)))
+        .collect();
+    if candidates.is_empty() {
+        return Ok(());
     }
-    let Ok(Some(mut file)) = open_regular(&top.join(OsStr::from_bytes(path))) else {
-        return false;
-    };
-    let mut bytes = Vec::new();
-    if file.read_to_end(&mut bytes).is_err() {
-        return false;
+    let dir = git.scratch.diff_dir()?;
+    let passed = || deadline.is_some_and(|deadline| Instant::now() >= deadline);
+    let mut dropped = vec![false; entries.len()];
+    for batch in candidates.chunks(HASH_BATCH) {
+        if passed() {
+            break;
+        }
+        let mut copies: Vec<(usize, &str, PathBuf)> = Vec::new();
+        for (index, oid) in batch.iter() {
+            if passed() {
+                break;
+            }
+            let Some((path, _)) = stat_candidate(&entries[*index]) else {
+                continue;
+            };
+            let Ok(Some(mut file)) = open_regular(&top.join(OsStr::from_bytes(path))) else {
+                continue;
+            };
+            let mut bytes = Vec::new();
+            if file.read_to_end(&mut bytes).is_err() {
+                continue;
+            }
+            let name = index.to_string();
+            match write_new(&dir, &name, &bytes) {
+                Ok(copy) => copies.push((*index, oid, copy)),
+                // No copy (e.g. a full TMPDIR; a file-size limit gets here only while SIGXFSZ is
+                // ignored, else it kills rotter): hash these bytes on their own, from stdin, which
+                // needs no disk; any failure keeps the entry.
+                Err(_) => {
+                    let _ = fs::remove_file(dir.join(&name));
+                    let args = ["hash-object", "--no-filters", "--stdin"].map(OsStr::new);
+                    if call(git, top, &args, Some(&bytes), &[0], guard)
+                        .is_ok_and(|out| out.trim_ascii() == oid.as_bytes())
+                    {
+                        dropped[*index] = true;
+                    }
+                }
+            }
+        }
+        if copies.is_empty() {
+            continue;
+        }
+        let args: Vec<&OsStr> = ["hash-object", "--no-filters", "--"]
+            .iter()
+            .map(OsStr::new)
+            .chain(copies.iter().map(|(_, _, copy)| copy.as_os_str()))
+            .collect();
+        let Ok(out) = call(git, top, &args, None, &[0], guard) else {
+            continue;
+        };
+        let hashes: Vec<&[u8]> = out.split(|byte| *byte == b'\n').collect();
+        for (at, (index, oid, copy)) in copies.iter().enumerate() {
+            let _ = fs::remove_file(copy);
+            if hashes.get(at).is_some_and(|hash| *hash == oid.as_bytes()) {
+                dropped[*index] = true;
+            }
+        }
     }
-    let args = ["hash-object", "--no-filters", "--stdin"].map(OsStr::new);
-    call(git, top, &args, Some(&bytes), &[0], guard)
-        .is_ok_and(|out| out.trim_ascii() == old_oid.as_bytes())
+    let _ = fs::remove_dir_all(&dir);
+    let mut index = 0;
+    entries.retain(|_| {
+        index += 1;
+        !dropped[index - 1]
+    });
+    Ok(())
 }
 
 /// Private scratch directory under the trusted temp root for the index copy and diff inputs,
@@ -1461,7 +1537,7 @@ pub fn extract_with(git: &Git, dir: &Path, options: &Options) -> Result<Report, 
             guard,
         )?)?;
         if matches!(options.mode, Mode::Worktree | Mode::Base(_)) {
-            entries.retain(|entry| !stat_only(git, &top, entry, guard));
+            drop_stat_only(git, &top, &mut entries, guard, options.deadline)?;
         }
         entries
     };

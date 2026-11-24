@@ -621,6 +621,63 @@ fn untracked_nested_repository_is_not_covered_even_when_included() {
 }
 
 #[test]
+fn stat_only_check_stops_at_the_run_deadline() {
+    let repo = Repo::new();
+    repo.write("a.go", "package p\n");
+    repo.commit();
+    // Same content, other stat data: dropped as stat-only before the deadline.
+    fs::File::options()
+        .write(true)
+        .open(repo.0.join("a.go"))
+        .unwrap()
+        .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000))
+        .unwrap();
+    assert_eq!(
+        repo.extract(Mode::Worktree, false)
+            .json
+            .get("files")
+            .as_arr(),
+        []
+    );
+
+    let mut options = Options::new(Mode::Worktree);
+    options.deadline = Some(std::time::Instant::now());
+    let report = extract(&repo.0, &options).unwrap();
+    assert!(!report.complete, "kept unchecked once the deadline passed");
+    assert_eq!(
+        report.json.get("files").as_arr()[0]
+            .get("new_path")
+            .as_str(),
+        Some("a.go")
+    );
+}
+
+#[test]
+fn stat_only_check_needs_no_room_in_tmpdir() {
+    let repo = Repo::new();
+    repo.write("a.go", &format!("package p\n{}", "// x\n".repeat(20_000)));
+    repo.commit();
+    fs::File::options()
+        .write(true)
+        .open(repo.0.join("a.go"))
+        .unwrap()
+        .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000))
+        .unwrap();
+    // Files rotter writes are capped at 16 blocks, far below a.go; SIGXFSZ is ignored so a write
+    // past the cap fails with EFBIG instead of killing rotter.
+    let output = Command::new("/bin/sh")
+        .arg("-c")
+        .arg("trap '' XFSZ; ulimit -f 16; exec \"$0\" extract --worktree")
+        .arg(env!("CARGO_BIN_EXE_rotter"))
+        .current_dir(&repo.0)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["files"], serde_json::json!([]), "{report}");
+}
+
+#[test]
 fn inter_hunk_context_from_git_config_does_not_widen_hunks() {
     let repo = Repo::new();
     let source = |a: u8, c: u8| {
