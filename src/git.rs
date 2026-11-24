@@ -833,6 +833,9 @@ fn diff_in(
         "--no-textconv",
         "--text",
         "-U0",
+        // `-U0` does not cover `diff.interHunkContext`, which would merge nearby hunks and
+        // report the unchanged lines between them as changed.
+        "--inter-hunk-context=0",
         "--",
     ]
     .iter()

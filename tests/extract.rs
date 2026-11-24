@@ -581,6 +581,38 @@ fn untracked_files_are_listed_unless_explicitly_included() {
 }
 
 #[test]
+fn inter_hunk_context_from_git_config_does_not_widen_hunks() {
+    let repo = Repo::new();
+    let source = |a: u8, c: u8| {
+        format!(
+            "package p\n\nfunc A() int {{\n\treturn {a}\n}}\n\nfunc B() int {{\n\treturn 2\n}}\n\n\
+             func C() int {{\n\treturn {c}\n}}\n"
+        )
+    };
+    repo.write("a.go", &source(1, 3));
+    repo.commit();
+    repo.write("a.go", &source(4, 5));
+    let config = repo.0.join(".git/user-config");
+    fs::write(&config, "[diff]\n\tinterHunkContext = 10\n").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_rotter"))
+        .args(["extract", "--worktree"])
+        .current_dir(&repo.0)
+        .env("GIT_CONFIG_GLOBAL", &config)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        report["files"][0]["hunks"],
+        serde_json::json!([
+            { "before": [4, 1], "after": [4, 1] },
+            { "before": [12, 1], "after": [12, 1] }
+        ])
+    );
+}
+
+#[test]
 fn unicode_crlf_and_special_file_names_keep_exact_ranges() {
     let repo = Repo::new();
     repo.write(
