@@ -131,6 +131,15 @@ fn repo(root: &Path, files: &[(&str, &str)]) -> PathBuf {
     repo
 }
 
+/// Under `cargo llvm-cov` the rotter binary needs `LLVM_PROFILE_FILE` to put its profile where
+/// the report reads it; a command that clears the environment passes that one variable back.
+/// It is unset in ordinary test runs, so the environment under test is unchanged.
+fn keep_coverage(command: &mut Command) {
+    if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
+        command.env("LLVM_PROFILE_FILE", profile);
+    }
+}
+
 /// A test world: pinned config, cache, HOME and a cleared environment for every run.
 struct World {
     root: PathBuf,
@@ -184,6 +193,7 @@ impl World {
             .env_clear()
             .envs(&self.env)
             .current_dir(&self.root);
+        keep_coverage(&mut command);
         command
     }
 
@@ -204,6 +214,7 @@ impl World {
             .env_clear()
             .envs(&self.env)
             .current_dir(&self.root);
+        keep_coverage(&mut command);
         command.output().unwrap()
     }
 
