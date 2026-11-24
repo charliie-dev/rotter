@@ -230,6 +230,39 @@ fn untrusted_or_repository_config_is_ignored_with_a_note() {
 }
 
 #[test]
+fn relative_language_paths_are_relative_to_the_config_directory() {
+    // Like home-manager: the config directory holds a link to a file kept elsewhere.
+    let store = temp("store");
+    let stored = store.join("cfg.toml");
+    fs::write(&stored, LUA2).unwrap();
+    fs::set_permissions(&stored, fs::Permissions::from_mode(0o644)).unwrap();
+    let xdg = temp("xdg");
+    fs::create_dir(xdg.join("rotter")).unwrap();
+    symlink(&stored, xdg.join("rotter/config.toml")).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_rotter"))
+        .args(["parser", "list"])
+        .env("XDG_CONFIG_HOME", &xdg)
+        .env("XDG_CACHE_HOME", &xdg)
+        .output()
+        .unwrap();
+    let list: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let lua2 = list["parsers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|parser| parser["name"] == "lua2")
+        .unwrap_or_else(|| panic!("{list}"));
+    assert_eq!(
+        lua2["source"],
+        xdg.join("rotter/lua-src").display().to_string(),
+        "{lua2}"
+    );
+    for dir in [store, xdg] {
+        fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[test]
 fn relative_xdg_config_home_is_ignored() {
     let repo = repo(&[("a.lua2", "-- A.\nlocal a = 1\n")]);
     let home = temp("home");

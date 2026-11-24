@@ -217,7 +217,9 @@ pub fn load(repo: Option<&Path>, sources: &Sources) -> Result<Loaded, String> {
     }
     let text = fs::read_to_string(&resolved)
         .map_err(|error| format!("cannot read {}: {error}", resolved.display()))?;
-    let base = resolved.parent().unwrap_or(Path::new("/"));
+    // Relative paths are relative to the config directory the user knows, not to wherever a
+    // linked config file (e.g. one in /nix/store) really lives.
+    let base = path.parent().unwrap_or(Path::new("/"));
     let repo = repo.map(|repo| fs::canonicalize(repo).unwrap_or_else(|_| repo.to_owned()));
     let config = parse_in(&text, base, repo.as_deref(), sources.cache.as_deref())
         .map_err(|error| format!("{}: {error}", path.display()))?;
