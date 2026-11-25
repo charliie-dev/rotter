@@ -192,8 +192,8 @@ pub fn load(repo: Option<&Path>, sources: &Sources) -> Result<Loaded, String> {
             "no config location (HOME and XDG_CONFIG_HOME are unset or relative)".to_owned(),
         ));
     };
-    let resolved = match trusted_file(&path, user(), &lstat) {
-        Ok(resolved) => resolved,
+    let (resolved, entered) = match trusted_file_entered(&path, user(), &lstat) {
+        Ok(found) => found,
         Err(Untrusted::Missing) => return Ok(Loaded::default()),
         // No file at all: nothing is disabled, so an untrusted ancestor is not worth a note.
         Err(Untrusted::Refused(_))
@@ -211,12 +211,10 @@ pub fn load(repo: Option<&Path>, sources: &Sources) -> Result<Loaded, String> {
     };
     if let Some(repo) = repo {
         let canonical = fs::canonicalize(repo).unwrap_or_else(|_| repo.to_owned());
-        if link_hops(&path)
-            .iter()
-            .any(|hop| through_repository(hop, &canonical))
-        {
+        if through_repository(&entered, &canonical) {
             return Ok(Loaded::off(format!(
-                "config {} is inside the repository {}; it is off for this repository",
+                "config {} is inside the repository {} or reached through it; it is off for this \
+                 repository",
                 path.display(),
                 repo.display()
             )));
@@ -233,29 +231,14 @@ pub fn load(repo: Option<&Path>, sources: &Sources) -> Result<Loaded, String> {
     Ok(Loaded { config, note: None })
 }
 
-/// `path` and every link it leads through (each link target made absolute), at most 40.
-fn link_hops(path: &Path) -> Vec<PathBuf> {
-    let mut hops = vec![path.to_owned()];
-    while hops.len() <= 40 {
-        let last = hops.last().expect("hops starts with path");
-        let Ok(target) = fs::read_link(last) else {
-            break;
-        };
-        // A relative target is relative to the link's directory; join keeps an absolute one.
-        let next = match last.parent() {
-            Some(parent) => parent.join(target),
-            None => target,
-        };
-        hops.push(next);
-    }
-    hops
-}
-
-/// Whether `path` is reached through `repo` (canonical): `path` or a directory on its way is,
-/// once canonical, `repo` or inside it. Whoever controls that directory chooses what `path` is,
-/// also when `path` names it through an alias such as a link to the repository from outside.
-fn through_repository(path: &Path, repo: &Path) -> bool {
-    path.ancestors()
+/// Whether a path was reached through `repo` (canonical): one of the directories
+/// [`resolve_trusted_entered`] entered on the way to it is `repo` or inside it. Whoever controls
+/// that directory chooses where the path leads, also through a link from outside or an alias.
+/// The directories hold no links, so canonicalizing them only settles letter case on a
+/// case-insensitive file system and cannot fail on a link chain.
+pub(crate) fn through_repository(entered: &[PathBuf], repo: &Path) -> bool {
+    entered
+        .iter()
         .any(|dir| fs::canonicalize(dir).is_ok_and(|dir| dir.starts_with(repo)))
 }
 
@@ -755,6 +738,16 @@ pub(crate) fn resolve_trusted(
     user: u32,
     lstat: &dyn Fn(&Path) -> io::Result<Meta>,
 ) -> Result<PathBuf, Untrusted> {
+    resolve_trusted_entered(path, user, lstat).map(|(resolved, _)| resolved)
+}
+
+/// [`resolve_trusted`], with every directory it entered below `/`, in order: the directories
+/// on `path` and on every link target it followed, each without links.
+pub(crate) fn resolve_trusted_entered(
+    path: &Path,
+    user: u32,
+    lstat: &dyn Fn(&Path) -> io::Result<Meta>,
+) -> Result<(PathBuf, Vec<PathBuf>), Untrusted> {
     let refuse = |at: &Path, why: &str| Untrusted::Refused(format!("{}: {why}", at.display()));
     if !path.is_absolute() {
         return Err(refuse(path, "not an absolute path"));
@@ -789,6 +782,7 @@ pub(crate) fn resolve_trusted(
     };
     check_dir(&resolved, stat(&resolved)?)?;
     push(&mut pending, path);
+    let mut entered = Vec::new();
     let mut hops = 0;
     while let Some(name) = pending.pop() {
         if name == ".." {
@@ -817,13 +811,14 @@ pub(crate) fn resolve_trusted(
             }
             Kind::Dir => {
                 check_dir(&next, meta)?;
+                entered.push(next.clone());
                 resolved = next;
             }
             _ if pending.is_empty() => resolved = next,
             _ => return Err(refuse(&next, "not a directory")),
         }
     }
-    Ok(resolved)
+    Ok((resolved, entered))
 }
 
 /// [`resolve_trusted`], then the file itself: regular, owned by the user or root, not writable by
@@ -833,7 +828,16 @@ pub(crate) fn trusted_file(
     user: u32,
     lstat: &dyn Fn(&Path) -> io::Result<Meta>,
 ) -> Result<PathBuf, Untrusted> {
-    let resolved = resolve_trusted(path, user, lstat)?;
+    trusted_file_entered(path, user, lstat).map(|(resolved, _)| resolved)
+}
+
+/// [`trusted_file`], with the directories [`resolve_trusted_entered`] entered on the way.
+fn trusted_file_entered(
+    path: &Path,
+    user: u32,
+    lstat: &dyn Fn(&Path) -> io::Result<Meta>,
+) -> Result<(PathBuf, Vec<PathBuf>), Untrusted> {
+    let (resolved, entered) = resolve_trusted_entered(path, user, lstat)?;
     let meta = lstat(&resolved)
         .map_err(|error| Untrusted::Refused(format!("{}: {error}", resolved.display())))?;
     if meta.kind != Kind::File {
@@ -848,7 +852,7 @@ pub(crate) fn trusted_file(
             resolved.display()
         )));
     }
-    Ok(resolved)
+    Ok((resolved, entered))
 }
 
 #[cfg(test)]

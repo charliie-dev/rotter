@@ -275,6 +275,45 @@ fn a_repository_link_reached_through_an_alias_of_the_repository_turns_the_config
 }
 
 #[test]
+fn a_directory_link_in_the_repository_anywhere_on_the_way_turns_the_config_off() {
+    let repo = repo(&[("a.lua2", "-- A.\nlocal a = 1\n")]);
+    // The config is outside and trusted; each path reaches it through a link kept in the
+    // repository that is not on the path itself, only on a link target.
+    let outside = temp("outside");
+    write_config(&outside, LUA2);
+    let links = temp("links");
+    // XDG_CONFIG_HOME is a link to the repository's link to the config home.
+    symlink(&outside, repo.join("cfglink")).unwrap();
+    symlink(repo.join("cfglink"), links.join("home")).unwrap();
+    // `rotter` is a link to the repository's link to the config directory.
+    symlink(outside.join("rotter"), repo.join("rotter-cfg")).unwrap();
+    fs::create_dir(links.join("dir")).unwrap();
+    symlink(repo.join("rotter-cfg"), links.join("dir/rotter")).unwrap();
+    // The same through 35 links, more than macOS resolves in one realpath (32). Relative
+    // targets inside the repository, so an alias such as /var on macOS is followed only on the
+    // first and last hop and the chain stays within the 40 links rotter follows.
+    fs::create_dir(links.join("chain")).unwrap();
+    symlink(outside.join("rotter"), repo.join("c34")).unwrap();
+    for hop in 1..34 {
+        symlink(format!("c{}", hop + 1), repo.join(format!("c{hop}"))).unwrap();
+    }
+    symlink(repo.join("c1"), links.join("chain/rotter")).unwrap();
+    for xdg in ["home", "dir", "chain"].map(|name| links.join(name)) {
+        let run = extract_cli(&repo, &[], &xdg_env(&xdg), &repo);
+        assert!(
+            run.stderr.contains("reached through it"),
+            "{}: {}",
+            xdg.display(),
+            run.stderr
+        );
+        assert_eq!(run.status("a.lua2"), "not_in_scope", "{}", xdg.display());
+    }
+    for dir in [repo, outside, links] {
+        fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[test]
 fn a_link_kept_in_the_repository_on_the_way_to_the_config_turns_it_off() {
     let repo = repo(&[("a.lua2", "-- A.\nlocal a = 1\n")]);
     // The config directory and the final file are outside; only the middle link is inside.
