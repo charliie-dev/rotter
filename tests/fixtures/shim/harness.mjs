@@ -65,7 +65,7 @@ if (host === "pi") {
       async messages() {
         if (scenario === "messagesthrowing") throw new Error("host API failure");
         const done = { created: 1, completed: 2 };
-        const ended = { role: "assistant", time: done, finish: "stop" };
+        const ended = { role: "assistant", parentID: "u1", time: done, finish: "stop" };
         const last = {
           cancelled: {
             ...ended,
@@ -77,16 +77,20 @@ if (host === "pi") {
           // A cancelled subtask, or a cancel between two steps: completed, no error.
           subtask: { ...ended, finish: "tool-calls" },
           unknownfinish: { ...ended, finish: "unknown" },
-          nofinish: { role: "assistant", time: done },
+          nofinish: { role: "assistant", parentID: "u1", time: done },
+          // An answer to an older user message: OpenCode's loop goes on to the newer one.
+          otherparent: { ...ended, parentID: "u0" },
         }[scenario] ?? ended;
-        const tool = (metadata) => ({ type: "tool", tool: "bash", metadata });
+        const tool = (metadata, state) => ({ type: "tool", tool: "bash", metadata, state });
         const parts = {
           // A step that said "stop" but called a tool: OpenCode's loop goes on.
-          toolcall: [tool(undefined)],
+          toolcall: [tool(undefined, { status: "completed" })],
           // A tool the provider ran itself is part of a turn that ended.
-          providertool: [tool({ providerExecuted: true })],
+          providertool: [tool({ providerExecuted: true }, { status: "completed" })],
+          // A tool call left over from a retry, which cleanup() marks interrupted: not pending.
+          orphantool: [tool(undefined, { status: "error", metadata: { interrupted: true } })],
         }[scenario] ?? [];
-        const user = { info: { role: "user", time: { created: 0 } }, parts: [] };
+        const user = { info: { id: "u1", role: "user", time: { created: 0 } }, parts: [] };
         return { data: scenario === "nomessages" ? [] : [user, { info: last, parts }] };
       },
       async promptAsync({ path, body }) {

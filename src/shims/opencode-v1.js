@@ -136,11 +136,13 @@ export const RotterReview = async (input) => {
           if (info === null || typeof info !== "object" || info.parentID != null) return;
           // A cancelled or failed turn ends in session.idle too, and a cancelled subtask or step
           // leaves no error. Ask only when the last message is an assistant message that ended
-          // the turn as OpenCode's own loop does: completed, no error, a final finish reason and
-          // no tool call of its own.
+          // the turn: it completed with no error, and it meets the four conditions of OpenCode's
+          // loop exit (prompt.ts): a finish reason other than "tool-calls" or "unknown"; no tool
+          // part that the provider did not run, apart from the interrupted ones cleanup() marks
+          // after a retry; and a parentID that names the last user message.
           const listed = await client.session.messages({ path: { id } });
-          const messages = listed?.data;
-          const entry = Array.isArray(messages) ? messages[messages.length - 1] : null;
+          const messages = Array.isArray(listed?.data) ? listed.data : [];
+          const entry = messages[messages.length - 1];
           const last = entry?.info;
           if (last === null || typeof last !== "object" || last.role !== "assistant") return;
           if (last.error != null || typeof last.time?.completed !== "number") return;
@@ -148,9 +150,13 @@ export const RotterReview = async (input) => {
             return;
           }
           const own = Array.isArray(entry.parts) ? entry.parts : [];
-          if (own.some((part) => part?.type === "tool" && !part.metadata?.providerExecuted)) {
-            return;
-          }
+          const orphan = (part) =>
+            part.state?.status === "error" && part.state?.metadata?.interrupted === true;
+          const pending = (part) =>
+            part?.type === "tool" && !part.metadata?.providerExecuted && !orphan(part);
+          if (own.some(pending)) return;
+          const user = messages.findLast((message) => message?.info?.role === "user")?.info;
+          if (typeof user?.id !== "string" || last.parentID !== user.id) return;
           const text = await review(id, directory);
           if (text === null) return;
           const parts = [{ type: "text", text }];
