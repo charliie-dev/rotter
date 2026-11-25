@@ -627,6 +627,30 @@ fn cache_inside_the_analysed_repository_is_not_loaded() {
 }
 
 #[test]
+fn cache_reached_through_a_link_in_the_analysed_repository_is_not_loaded() {
+    let mut world = World::new("repocachelink");
+    let src = world.root.join("lua-src");
+    copy_lua(&src);
+    world.write_config(&lua2(&src));
+    ok(&world.install(&["lua2"]));
+    let repo = repo(&world.root, &[("a.lua2", LUA_FILE)]);
+    // The installed cache stays outside; only the link that chooses it is in the repository.
+    symlink(&world.cache, repo.join("cachehop")).unwrap();
+    let via = world.root.join("via");
+    symlink(repo.join("cachehop"), &via).unwrap();
+    world.set("XDG_CACHE_HOME", via);
+    let side = world.side(&repo, "a.lua2", &[]);
+    assert_eq!(side["status"], "parser_not_installed", "{side}");
+    assert!(
+        side["detail"]
+            .as_str()
+            .unwrap()
+            .contains("reached through it"),
+        "{side}"
+    );
+}
+
+#[test]
 fn library_inside_the_analysed_repository_is_not_loaded() {
     let world = World::new("repolib");
     let src = world.root.join("lua-src");

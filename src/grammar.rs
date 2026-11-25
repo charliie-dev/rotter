@@ -2,7 +2,10 @@
 //! cache and dlopens a library; fetching and building live in `install.rs` alone.
 
 use crate::Language;
-use crate::config::{Kind, Meta, Untrusted, check_symbol, lstat, resolve_trusted, user};
+use crate::config::{
+    Kind, Meta, Untrusted, check_symbol, lstat, resolve_trusted, resolve_trusted_entered,
+    through_repository, user,
+};
 use std::fmt;
 use std::fs;
 use std::io::Read;
@@ -295,22 +298,27 @@ pub(crate) fn private_dir(path: &Path) -> Result<(), String> {
 
 /// The canonical cache base (`Sources::cache`), through [`resolve_trusted`].
 pub(crate) fn trusted_cache_base(base: Option<&Path>) -> Result<PathBuf, String> {
+    cache_base_entered(base).map(|(resolved, _)| resolved)
+}
+
+/// [`trusted_cache_base`], with the directories [`resolve_trusted_entered`] entered on the way.
+fn cache_base_entered(base: Option<&Path>) -> Result<(PathBuf, Vec<PathBuf>), String> {
     let base = base.ok_or("no cache location (HOME and XDG_CACHE_HOME are unset or relative)")?;
-    match resolve_trusted(base, user(), &lstat) {
-        Ok(resolved) => Ok(resolved),
-        Err(Untrusted::Missing) => Err(format!("{} does not exist", base.display())),
-        Err(Untrusted::Refused(why)) => Err(format!("cache {} refused: {why}", base.display())),
-    }
+    resolve_trusted_entered(base, user(), &lstat).map_err(|error| match error {
+        Untrusted::Missing => format!("{} does not exist", base.display()),
+        Untrusted::Refused(why) => format!("cache {} refused: {why}", base.display()),
+    })
 }
 
 /// `<canonical base>/rotter/parsers`, with `rotter/` and `parsers/` checked by [`private_dir`].
+/// `repo` is canonical; a cache reached through it is refused, as the repository would choose it.
 fn parsers_dir(cache: Option<&Path>, repo: Option<&Path>) -> Result<PathBuf, String> {
-    let base = trusted_cache_base(cache)?;
+    let (base, entered) = cache_base_entered(cache)?;
     if let Some(repo) = repo
-        && base.starts_with(repo)
+        && through_repository(&entered, repo)
     {
         return Err(format!(
-            "cache {} is inside the repository {}",
+            "cache {} is inside the repository {} or reached through it",
             base.display(),
             repo.display()
         ));
