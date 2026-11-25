@@ -287,7 +287,9 @@ pub(crate) fn private_dir(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// The canonical cache base (`Sources::cache`), through [`resolve_trusted`].
+/// The cache base (`Sources::cache`) through [`resolve_trusted`]: free of symlinks, but possibly
+/// still a firmlink or letter-case spelling, so compare it with a repository by identity
+/// ([`through_repository`]), never by prefix.
 pub(crate) fn trusted_cache_base(base: Option<&Path>) -> Result<PathBuf, String> {
     cache_base_entered(base).map(|(resolved, _)| resolved)
 }
@@ -301,7 +303,7 @@ fn cache_base_entered(base: Option<&Path>) -> Result<(PathBuf, Vec<PathBuf>), St
     })
 }
 
-/// `<canonical base>/rotter/parsers`, with `rotter/` and `parsers/` checked by [`private_dir`].
+/// `<base>/rotter/parsers` ([`trusted_cache_base`]), with `rotter/` and `parsers/` checked by [`private_dir`].
 /// Refused when `repo` is on the way to `parsers/` or is `parsers/` itself, as the repository
 /// would choose which libraries are loaded.
 fn parsers_dir(cache: Option<&Path>, repo: Option<&Path>) -> Result<PathBuf, String> {
