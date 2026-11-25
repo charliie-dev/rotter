@@ -184,15 +184,6 @@ impl Grammar {
         let file = library_file(&self.name, &key(source, symbol)?);
         let parsers = parsers_dir(self.cache.as_deref(), self.repo.as_deref())?;
         let path = parsers.join(file);
-        if let Some(repo) = &self.repo
-            && path.starts_with(repo)
-        {
-            return Err(format!(
-                "library {} is inside the repository {}",
-                path.display(),
-                repo.display()
-            ));
-        }
         let meta = lstat(&path).map_err(|error| format!("{}: {error}", path.display()))?;
         if meta.kind != Kind::File || meta.uid != user() || meta.mode & 0o022 != 0 {
             return Err(format!(
@@ -311,22 +302,24 @@ fn cache_base_entered(base: Option<&Path>) -> Result<(PathBuf, Vec<PathBuf>), St
 }
 
 /// `<canonical base>/rotter/parsers`, with `rotter/` and `parsers/` checked by [`private_dir`].
-/// `repo` is canonical; a cache reached through it is refused, as the repository would choose it.
+/// Refused when `repo` is on the way to `parsers/` or is `parsers/` itself, as the repository
+/// would choose which libraries are loaded.
 fn parsers_dir(cache: Option<&Path>, repo: Option<&Path>) -> Result<PathBuf, String> {
-    let (base, entered) = cache_base_entered(cache)?;
-    if let Some(repo) = repo
-        && through_repository(&entered, repo)
-    {
-        return Err(format!(
-            "cache {} is inside the repository {} or reached through it",
-            base.display(),
-            repo.display()
-        ));
-    }
+    let (base, mut entered) = cache_base_entered(cache)?;
     let rotter = base.join("rotter");
     private_dir(&rotter)?;
     let parsers = rotter.join("parsers");
     private_dir(&parsers)?;
+    entered.extend([rotter, parsers.clone()]);
+    if let Some(repo) = repo
+        && through_repository(&entered, repo)
+    {
+        return Err(format!(
+            "parsers {} are inside the repository {} or reached through it",
+            parsers.display(),
+            repo.display()
+        ));
+    }
     Ok(parsers)
 }
 

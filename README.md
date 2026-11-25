@@ -236,8 +236,8 @@ library 放到 `$XDG_CACHE_HOME/rotter/parsers/<名稱>-<key>.{dylib,so}`（預�
 repo 內容（包含歷史中的舊版本）會交給它的 scanner 處理，所以 scanner 的記憶體安全錯誤就是以
 使用者身分執行程式碼；library 的 constructor 在載入時就會執行。更新釘選的 revision 應視為
 code review 事件。載入前檢查快取的每一層目錄與 library 的擁有者與權限，但不檢查 macOS
-extended ACL（與 OpenSSH 相同）。快取位於受檢 repo 內、或 `parsers/`／library 本身在 repo 內時，
-不會載入。
+extended ACL（與 OpenSSH 相同）。快取位於受檢 repo 內、通往 `parsers/` 的路徑途中（包含任何
+symlink 的目標）經過受檢 repo，或 `parsers/` 本身就是 repo 時，不會載入。
 
 解析時限：每個檔案以 `parse_timeout_seconds` 為上限，逾時狀態為 `parse_timeout`，報告其餘部分照常。
 時限只在 parser 步驟之間檢查：卡在 external scanner 自身 C 迴圈的情形不會被中斷，宿主的 hook
