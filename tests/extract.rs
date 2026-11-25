@@ -1209,15 +1209,24 @@ fn unmerged_paths_are_reported_even_without_a_diff_record() {
         repo.git(&["checkout", "-q", "main"]);
         repo.write("a.go", "package p\n\nfunc F() int { return 3 }\n");
         repo.commit();
+        // The identity the helper gives every commit: without one (no global config, a host
+        // name git cannot make an address of) merge stops before it merges anything.
         let merge = Command::new("git")
             .args(["-C"])
             .arg(&repo.0)
-            .args(["merge", "-q", "other"])
+            .args(["merge", "other"])
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
             .output()
             .unwrap();
+        // Failed because of the conflict, not for any other reason.
         assert!(!merge.status.success());
+        let said = String::from_utf8_lossy(&merge.stdout);
+        assert!(said.contains("CONFLICT"), "{said}");
         match resolution {
             "ours" => repo.write("a.go", &repo.git(&["show", "HEAD:a.go"])),
             _ => fs::remove_file(repo.0.join("a.go")).unwrap(),
