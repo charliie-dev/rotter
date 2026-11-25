@@ -862,7 +862,7 @@ fn trusted_file_entered(
 mod tests {
     use super::{
         ERANGE, Kind, Meta, Untrusted, home_from, lstat, parse, passwd_home, resolve_trusted,
-        trusted_file, user,
+        through_repository, trusted_file, user,
     };
     use crate::Detected;
     use std::fs;
@@ -1357,6 +1357,19 @@ units = ["x"]
                 root.join("file").display()
             )))
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_directory_or_repository_that_cannot_be_stated_counts_as_the_repository() {
+        let root = temp();
+        let repo = root.join("repo");
+        fs::create_dir(&repo).unwrap();
+        let outside = vec![root.clone()];
+        assert!(!through_repository(&outside, &repo));
+        assert!(through_repository(&[root.clone(), repo.clone()], &repo));
+        assert!(through_repository(&[root.join("gone")], &repo));
+        assert!(through_repository(&outside, &root.join("gone")));
         fs::remove_dir_all(root).unwrap();
     }
 
