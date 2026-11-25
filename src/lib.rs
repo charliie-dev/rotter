@@ -165,11 +165,11 @@ fn basename(word: &str) -> &str {
 }
 
 /// The command `env` runs: the first word that is neither an option nor a NAME=VALUE assignment.
-/// The operand of `-u`/`--unset` and `-C`/`--chdir` goes with its option; words after `-S` are
-/// read like any other.
+/// The operand of `-u`/`--unset`, `-C`/`--chdir` and BSD's `-P` (altpath) goes with its option;
+/// words after `-S` are read like any other.
 fn env_command<'a>(words: &mut impl Iterator<Item = &'a str>) -> Option<&'a str> {
     while let Some(word) = words.next() {
-        if matches!(word, "-u" | "--unset" | "-C" | "--chdir") {
+        if matches!(word, "-u" | "--unset" | "-C" | "--chdir" | "-P") {
             words.next();
         } else if !word.starts_with('-') && !word.contains('=') {
             return Some(word);
@@ -224,8 +224,9 @@ impl Languages {
         }
         if interpreter == Some("busybox") {
             // BusyBox runs the applet its first argument names; only its shells are shell scripts.
+            // Its `bash` applet is ash too (BASH_IS_ASH).
             return match words.next().map(basename) {
-                Some("sh" | "ash") => self.supported(Language::Bash, "ash-parsed-as-bash"),
+                Some("sh" | "ash" | "bash") => self.supported(Language::Bash, "ash-parsed-as-bash"),
                 _ => self.detect_external(path),
             };
         }
@@ -458,6 +459,10 @@ mod tests {
             content("x", "#!/bin/busybox ash"),
             "bash/ash-parsed-as-bash"
         );
+        assert_eq!(
+            content("x", "#!/bin/busybox bash"),
+            "bash/ash-parsed-as-bash"
+        );
         // BusyBox's other applets are not shells, and BusyBox alone runs nothing.
         assert_eq!(
             content("x", "#!/usr/bin/env -S busybox awk -f"),
@@ -483,6 +488,10 @@ mod tests {
         assert_eq!(
             content("x", "#!/usr/bin/env -u FOO sh"),
             "bash/sh-parsed-as-bash"
+        );
+        assert_eq!(
+            content("x", "#!/usr/bin/env -P /usr/local/bin bash"),
+            "bash/bash"
         );
         assert_eq!(content("x", "#!/usr/bin/env -u"), "not in scope");
         // A shebang names the same unsupported shells as an extension, and mksh.
