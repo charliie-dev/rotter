@@ -504,6 +504,7 @@ fn opencode_asks_only_after_a_turn_that_completed() {
             "toolcall",
             "otherparent",
             "noid",
+            "noagent",
         ] {
             let run = run("opencode", "rotter-review.js", engine, "reply", scenario);
             let [(answer, _)] = run.answers.as_slice() else {

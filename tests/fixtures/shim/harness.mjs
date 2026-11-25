@@ -70,14 +70,17 @@ if (host === "pi") {
         if (scenario === "messagesthrowing") throw new Error("host API failure");
         const done = { created: 1, completed: 2 };
         const ended = { id: "a1", role: "assistant", parentID: "u1", time: done, finish: "stop" };
+        // The turn ran as the read-only plan agent: the re-prompt must keep it and the model.
+        const asked = { agent: "plan", model: { providerID: "p", modelID: "m" } };
+        const first = scenario === "noagent" ? { model: asked.model } : asked;
         if (listings > 1 && scenario === "laterthrowing") throw new Error("host API failure");
         if (listings > 1 && scenario === "laterturn") {
           const aborted = { name: "MessageAbortedError", data: { message: "Aborted" } };
           return {
             data: [
-              { info: { id: "u1", role: "user", time: { created: 0 } }, parts: [] },
+              { info: { id: "u1", role: "user", time: { created: 0 }, ...asked }, parts: [] },
               { info: ended, parts: [] },
-              { info: { id: "u2", role: "user", time: { created: 3 } }, parts: [] },
+              { info: { id: "u2", role: "user", time: { created: 3 }, ...asked }, parts: [] },
               { info: { ...ended, id: "a2", parentID: "u2", error: aborted }, parts: [] },
             ],
           };
@@ -108,12 +111,15 @@ if (host === "pi") {
           // A tool call left over from a retry, which cleanup() marks interrupted: not pending.
           orphantool: [tool(undefined, { status: "error", metadata: { interrupted: true } })],
         }[scenario] ?? [];
-        const user = { info: { id: "u1", role: "user", time: { created: 0 } }, parts: [] };
+        const user = { info: { id: "u1", role: "user", time: { created: 0 }, ...first }, parts: [] };
         return { data: scenario === "nomessages" ? [] : [user, { info: last, parts }] };
       },
       async promptAsync({ path, body }) {
         const [part, ...extra] = body.parts;
-        prompts.push(part.type === "text" && extra.length === 0 ? part.text : { bad: body });
+        const same =
+          body.agent === "plan" && body.model?.providerID === "p" && body.model?.modelID === "m";
+        const plain = same && part.type === "text" && extra.length === 0;
+        prompts.push(plain ? part.text : { bad: body });
         if (scenario === "rejecting") throw new Error("prompt failed");
         if (scenario === "chain") {
           // The injected prompt is a new user message; its turn ends with the next idle, both
