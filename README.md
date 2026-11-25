@@ -175,9 +175,15 @@ U+FEFF）顯示為 `\u{…}`；單行欄位的換行與 tab 也跳脫，程式�
 
 設定檔位置：`$XDG_CONFIG_HOME/rotter/config.toml`（`XDG_CONFIG_HOME` 未設或為相對路徑時用
 `$HOME/.config`；`HOME` 也未設時沒有設定檔，外部語言停用）。不會從 repo 或目前目錄讀取；
-設定檔位於受檢 repo 內、路徑途中（包含任何 symlink 的目標）經過受檢 repo，或信任檢查失敗（見上方規則；檔案本身須為一般檔案、屬於使用者或 root、
-不可被群組／他人寫入）時，會提示並停用外部語言。home-manager 連到 `/nix/store` 的 root 擁有
-唯讀檔可通過。hook 的環境可能與執行 install 的 shell 不同。
+設定檔位於受檢 repo 內、路徑途中（包含任何 symlink 的目標）經過受檢 repo，或信任檢查失敗
+（見上方規則；檔案本身須為一般檔案、屬於使用者或 root、不可被群組／他人寫入）時，會提示並停用
+外部語言。home-manager 連到 `/nix/store` 的 root 擁有唯讀檔可通過。hook 的環境可能與執行
+install 的 shell 不同。
+
+殘留風險：「受檢 repo」只指 git 回報的最內層頂層。在巢狀 repo（例如 submodule）內執行時，位於
+外層 repo 內的設定檔與快取（下方）不會因此停用；不要把 `XDG_CONFIG_HOME`、`XDG_CACHE_HOME`
+指進任何 checkout。只比對最內層是刻意的：`~/.git` 這類 dotfiles repo 若也算，`~/.config` 與
+`~/.cache` 會在 home 下每個 repo 中停用。
 
 ```toml
 parse_timeout_seconds = 60        # 每個檔案的解析上限（內建與外部語言皆適用），1..=3600，預設 60
@@ -237,7 +243,8 @@ repo 內容（包含歷史中的舊版本）會交給它的 scanner 處理，所
 使用者身分執行程式碼；library 的 constructor 在載入時就會執行。更新釘選的 revision 應視為
 code review 事件。載入前檢查快取的每一層目錄與 library 的擁有者與權限，但不檢查 macOS
 extended ACL（與 OpenSSH 相同）。快取位於受檢 repo 內、通往 `parsers/` 的路徑途中（包含任何
-symlink 的目標）經過受檢 repo，或 `parsers/` 本身就是 repo 時，不會載入。
+symlink 的目標）經過受檢 repo，或 `parsers/` 本身就是 repo 時，不會載入（巢狀 repo 的殘留風險
+見上方設定檔一節）。
 
 解析時限：每個檔案以 `parse_timeout_seconds` 為上限，逾時狀態為 `parse_timeout`，報告其餘部分照常。
 時限只在 parser 步驟之間檢查：卡在 external scanner 自身 C 迴圈的情形不會被中斷，宿主的 hook
