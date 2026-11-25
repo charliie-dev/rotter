@@ -371,7 +371,9 @@ rotter 寫入一個自己擁有的小程式（shim）：Pi 為 `$PI_CODING_AGENT
 rotter 的；其他內容是「foreign code at rotter's path」，install／uninstall 都以退出碼 2 結束並保留原檔。
 
 shim 在 Pi 的 `agent_before_settle`（只在執行 `completed` 時）、Letta 的 `turn_end`（只在
-`stopReason` 為 `end_turn` 時）或 OpenCode 的 `session.idle`（只處理沒有 `parentID` 的頂層 session）以 `child_process.spawn` 直接執行 `rotter hook <host> --timeout <n>`
+`stopReason` 為 `end_turn` 時）或 OpenCode 的 `session.idle`（只處理沒有 `parentID` 的頂層
+session，而且最後一則訊息是正常結束回合的 assistant 訊息：沒有 error、已完成，並符合 OpenCode
+結束迴圈的條件，見 [docs/hosts.md](docs/hosts.md)）以 `child_process.spawn` 直接執行 `rotter hook <host> --timeout <n>`
 （不經 shell、不用 `exec`／`spawnSync`），stdin 只有 `session_id` 與 `cwd`，環境只有 PATH 與
 LANG（不傳 `process.env`），stdout 超過 64 KiB、非 JSON、`continue` 不是字串、逾時（殺掉整個
 process group）或任何錯誤都靜默結束，同時只跑一次；每個 session 連續要求的上限由 rotter 本身負責。rotter 回
