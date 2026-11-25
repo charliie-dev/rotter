@@ -1112,7 +1112,7 @@ fn change_kind(status: &str) -> (&'static str, Option<u32>) {
         ("A", _) => ("added", None),
         ("D", _) => ("deleted", None),
         ("R", score) => ("renamed", score.parse::<u32>().ok()),
-        ("C", score) => ("copied", score.parse::<u32>().ok()),
+        // No "C": `-M` in diff_args overrides diff.renames=copies, so git never reports a copy.
         ("T", _) => ("type_changed", None),
         ("U", _) => ("unmerged", None),
         ("?", _) => ("untracked_added", None),
