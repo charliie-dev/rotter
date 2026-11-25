@@ -65,18 +65,29 @@ if (host === "pi") {
       async messages() {
         if (scenario === "messagesthrowing") throw new Error("host API failure");
         const done = { created: 1, completed: 2 };
+        const ended = { role: "assistant", time: done, finish: "stop" };
         const last = {
           cancelled: {
-            role: "assistant",
-            time: done,
+            ...ended,
             error: { name: "MessageAbortedError", data: { message: "Aborted" } },
           },
-          errored: { role: "assistant", time: done, error: { name: "APIError", data: { message: "x" } } },
+          errored: { ...ended, error: { name: "APIError", data: { message: "x" } } },
           running: { role: "assistant", time: { created: 1 } },
           usertail: { role: "user", time: { created: 1 } },
-        }[scenario] ?? { role: "assistant", time: done };
+          // A cancelled subtask, or a cancel between two steps: completed, no error.
+          subtask: { ...ended, finish: "tool-calls" },
+          unknownfinish: { ...ended, finish: "unknown" },
+          nofinish: { role: "assistant", time: done },
+        }[scenario] ?? ended;
+        const tool = (metadata) => ({ type: "tool", tool: "bash", metadata });
+        const parts = {
+          // A step that said "stop" but called a tool: OpenCode's loop goes on.
+          toolcall: [tool(undefined)],
+          // A tool the provider ran itself is part of a turn that ended.
+          providertool: [tool({ providerExecuted: true })],
+        }[scenario] ?? [];
         const user = { info: { role: "user", time: { created: 0 } }, parts: [] };
-        return { data: scenario === "nomessages" ? [] : [user, { info: last, parts: [] }] };
+        return { data: scenario === "nomessages" ? [] : [user, { info: last, parts }] };
       },
       async promptAsync({ path, body }) {
         const [part, ...extra] = body.parts;

@@ -134,13 +134,23 @@ export const RotterReview = async (input) => {
           const found = await client.session.get({ path: { id } });
           const info = found?.data;
           if (info === null || typeof info !== "object" || info.parentID != null) return;
-          // A cancelled or failed turn ends in session.idle too. Ask only when the last message
-          // is an assistant message that completed without an error.
+          // A cancelled or failed turn ends in session.idle too, and a cancelled subtask or step
+          // leaves no error. Ask only when the last message is an assistant message that ended
+          // the turn as OpenCode's own loop does: completed, no error, a final finish reason and
+          // no tool call of its own.
           const listed = await client.session.messages({ path: { id } });
           const messages = listed?.data;
-          const last = Array.isArray(messages) ? messages[messages.length - 1]?.info : null;
+          const entry = Array.isArray(messages) ? messages[messages.length - 1] : null;
+          const last = entry?.info;
           if (last === null || typeof last !== "object" || last.role !== "assistant") return;
           if (last.error != null || typeof last.time?.completed !== "number") return;
+          if (typeof last.finish !== "string" || ["tool-calls", "unknown"].includes(last.finish)) {
+            return;
+          }
+          const own = Array.isArray(entry.parts) ? entry.parts : [];
+          if (own.some((part) => part?.type === "tool" && !part.metadata?.providerExecuted)) {
+            return;
+          }
           const text = await review(id, directory);
           if (text === null) return;
           const parts = [{ type: "text", text }];
