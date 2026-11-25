@@ -290,20 +290,28 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
 }
 
 /// Checks `rev-parse --git-common-dir` and `--git-dir` right after init: both, resolved against
-/// `src` and canonicalised, must lie inside `staging` (compared by components); a path that
-/// cannot be canonicalised is refused. Returns the canonical git dir.
+/// `src` and canonicalised, must lie inside the canonical `staging` (compared by components), so
+/// a staging path spelled through a link or in another letter case on a case-insensitive file
+/// system still matches; a path that cannot be canonicalised is refused. Returns the canonical
+/// git dir.
 fn check_git_dirs(
     staging: &Path,
     src: &Path,
     rev_parse: impl Fn(&str) -> Result<String, String>,
 ) -> Result<PathBuf, String> {
+    let staging = fs::canonicalize(staging).map_err(|error| {
+        format!(
+            "refusing to install: the staging directory {} cannot be resolved: {error}",
+            staging.display()
+        )
+    })?;
     let mut git_dir = PathBuf::new();
     for flag in ["--git-common-dir", "--git-dir"] {
         let printed = rev_parse(flag)?;
         let canonical = fs::canonicalize(src.join(&printed)).map_err(|error| {
             format!("refusing to install: {flag} is {printed:?}, which cannot be resolved: {error}")
         })?;
-        if !canonical.starts_with(staging) {
+        if !canonical.starts_with(&staging) {
             return Err(format!(
                 "refusing to install: {flag} is {} outside the staging directory {}",
                 canonical.display(),
@@ -421,7 +429,9 @@ fn ensure_private_dir(path: &Path) -> Result<(), String> {
     private_dir(path)
 }
 
-/// The canonical `<base>/rotter`, with `rotter/`, `build/` and `parsers/` in place and checked.
+/// `<base>/rotter`, with `rotter/`, `build/` and `parsers/` in place and checked. `<base>` comes
+/// from [`trusted_cache_base`]: free of symlinks, but possibly still a firmlink or letter-case
+/// spelling, so it is not canonical.
 fn prepare_cache(base: Option<&Path>) -> Result<PathBuf, String> {
     let base = base.ok_or("no cache location: set HOME or an absolute XDG_CACHE_HOME")?;
     create_base(base)?;
@@ -768,6 +778,19 @@ mod tests {
         assert_eq!(
             check_git_dirs(&staging, &src, rev_parse(&src)).unwrap(),
             src.join(".git")
+        );
+        // The staging path spelled through a link: the git dirs are still inside it.
+        let alias = root.join("alias");
+        std::os::unix::fs::symlink(&staging, &alias).unwrap();
+        assert_eq!(
+            check_git_dirs(&alias, &src, rev_parse(&src)).unwrap(),
+            src.join(".git")
+        );
+        let missing_staging =
+            check_git_dirs(&root.join("gone"), &src, rev_parse(&src)).unwrap_err();
+        assert!(
+            missing_staging.contains("staging directory"),
+            "{missing_staging}"
         );
         let canary = root.join("canary");
         fs::create_dir_all(&canary).unwrap();
