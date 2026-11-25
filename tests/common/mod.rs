@@ -149,7 +149,7 @@ pub fn rotter(
     input: &str,
     env: &[(&str, Option<&std::ffi::OsStr>)],
 ) -> std::process::Output {
-    use std::io::Write;
+    use std::io::{Read, Write};
     use std::process::Stdio;
     let mut command = Command::new(env!("CARGO_BIN_EXE_rotter"));
     command
@@ -178,16 +178,34 @@ pub fn rotter(
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
+    // Read both pipes while rotter runs: a full pipe would block it, and that would look like a
+    // hang.
+    let drain = |mut pipe: Box<dyn Read + Send>| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            pipe.read_to_end(&mut bytes).unwrap();
+            bytes
+        })
+    };
+    let stdout = drain(Box::new(child.stdout.take().unwrap()));
+    let stderr = drain(Box::new(child.stderr.take().unwrap()));
     let _ = child.stdin.take().unwrap().write_all(input.as_bytes());
     let started = std::time::Instant::now();
-    while child.try_wait().unwrap().is_none() {
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
         if started.elapsed() > std::time::Duration::from_secs(30) {
             let _ = child.kill();
             panic!("rotter {args:?} hangs");
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    std::process::Output {
+        status,
+        stdout: stdout.join().unwrap(),
+        stderr: stderr.join().unwrap(),
     }
-    child.wait_with_output().unwrap()
 }
 
 /// Claude Code's Stop input.
