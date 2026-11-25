@@ -226,6 +226,14 @@ fn comment_only_change_maps_to_the_documented_unit() {
         [Json::Num(2), Json::Num(5)]
     );
     assert_eq!(comment(add, "/// Adds two."), ("leading", true, None));
+    // The unit starts at its attribute, right after the comment.
+    assert!(
+        add.get("text")
+            .as_str()
+            .unwrap()
+            .starts_with("#[inline]\nfn add"),
+        "{add}"
+    );
 }
 
 #[test]
@@ -1619,4 +1627,299 @@ fn fifo_index_fails_fast() {
     fs::remove_file(&index).unwrap();
     fs::remove_dir_all(home).unwrap();
     fs::remove_dir_all(tmp).unwrap();
+}
+
+/// Commits `before` at `path`, writes `after` there and extracts the work tree.
+fn changed(path: &str, before: &str, after: &str) -> (Repo, Report) {
+    let repo = Repo::new();
+    repo.write(path, before);
+    repo.commit();
+    repo.write(path, after);
+    let report = repo.extract(Mode::Worktree, false);
+    (repo, report)
+}
+
+fn unit_names(side: &Json) -> Vec<&str> {
+    side.get("units")
+        .as_arr()
+        .iter()
+        .map(|unit| unit.get("name").as_str().unwrap())
+        .collect()
+}
+
+fn lines(values: &[u64]) -> Vec<Json> {
+    values.iter().map(|&value| Json::Num(value as _)).collect()
+}
+
+#[test]
+fn leading_comments_reach_past_stacked_attributes() {
+    let source = |ty: &str| {
+        format!(
+            "/// Docs.\n#[derive(Debug)]\n// Layout.\n#[repr(C)]\n#[allow(dead_code)]\nstruct S {{ n: {ty} }}\n"
+        )
+    };
+    let (_repo, report) = changed("a.rs", &source("u8"), &source("u16"));
+    let after = file(&report.json, "a.rs").get("after");
+    assert_eq!(unit_names(after), ["S"]);
+    let s = unit(after, "S");
+    assert_eq!(comment(s, "/// Docs."), ("leading", false, None));
+    assert_eq!(comment(s, "// Layout."), ("leading", false, None));
+}
+
+#[test]
+fn a_change_inside_a_function_selects_the_function_not_its_declarations() {
+    let source = |value: &str| {
+        format!("package p\n\n// F doc.\nfunc F() int {{\n\tvar x = {value}\n\treturn x\n}}\n")
+    };
+    let (_repo, report) = changed("a.go", &source("1"), &source("2"));
+    let after = file(&report.json, "a.go").get("after");
+    assert_eq!(unit_names(after), ["F"]);
+    let f = unit(after, "F");
+    assert_eq!(f.get("kind").as_str(), Some("function_declaration"));
+    assert_eq!(comment(f, "// F doc."), ("leading", false, None));
+}
+
+#[test]
+fn full_mode_keeps_block_and_doc_comment_styles() {
+    let repo = Repo::new();
+    repo.write(
+        "a.rs",
+        "/* Adds\n   one. */\nfn add() -> u8 { 1 }\n\n/// Doubles.\nfn double() -> u8 { 2 }\n",
+    );
+    repo.commit();
+    let report = repo.extract(Mode::Full, false);
+    let after = file(&report.json, "a.rs").get("after");
+    assert_eq!(unit_names(after), ["add", "double"]);
+    let style = |name: &str, text: &str| {
+        unit(after, name)
+            .get("comments")
+            .as_arr()
+            .iter()
+            .find(|comment| comment.get("text").as_str() == Some(text))
+            .unwrap_or_else(|| panic!("no comment {text:?} on {name}"))
+            .get("style")
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    assert_eq!(style("add", "/* Adds\n   one. */"), "block");
+    assert_eq!(style("double", "/// Doubles.\n"), "doc_outer");
+}
+
+#[test]
+fn a_two_letter_name_pulls_in_its_users_but_a_comment_change_does_not() {
+    let source =
+        |value: &str| format!("package p\n\nconst ab = {value}\n\nfunc U() {{ _ = ab }}\n");
+    let (_repo, report) = changed("a.go", &source("1"), &source("2"));
+    let after = file(&report.json, "a.go").get("after");
+    assert_eq!(unit_names(after), ["ab", "U"]);
+    let user = unit(after, "U");
+    assert_eq!(user.get("selected_by").as_str(), Some("reference"));
+    assert_eq!(user.get("referenced_name").as_str(), Some("ab"));
+
+    let source = |doc: &str| {
+        format!("package p\n\n// Limit {doc}.\nconst Limit = 3\n\nfunc U() {{ _ = Limit }}\n")
+    };
+    let (_repo, report) = changed("b.go", &source("caps retries"), &source("caps tries"));
+    let after = file(&report.json, "b.go").get("after");
+    assert_eq!(unit_names(after), ["Limit"]);
+}
+
+#[test]
+fn users_on_one_line_are_each_pulled_in() {
+    for (path, calls) in [("a.rs", ["bar", "foo"]), ("b.rs", ["foo", "bar"])] {
+        let source = |value: &str| {
+            format!(
+                "pub fn foo() -> u8 {{ {value} }}\npub fn bar() -> u8 {{ {value} }}\nfn u() -> u8 {{ {}() }}fn v() -> u8 {{ {}() }}\n",
+                calls[0], calls[1]
+            )
+        };
+        let (_repo, report) = changed(path, &source("1"), &source("2"));
+        let after = file(&report.json, path).get("after");
+        let mut names = unit_names(after);
+        names.sort_unstable();
+        assert_eq!(names, ["bar", "foo", "u", "v"], "{path}");
+        for name in ["foo", "bar"] {
+            assert_eq!(
+                unit(after, name).get("omitted_reference_units").as_u64(),
+                Some(0),
+                "{path} {name}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_shell_function_pulls_in_its_callers_but_not_a_string_that_names_it() {
+    let source = |word: &str| {
+        format!(
+            "greet() {{\n  echo {word}\n}}\ncaller() {{\n  greet\n}}\nquoted() {{\n  echo \"greet\"\n}}\n"
+        )
+    };
+    let (_repo, report) = changed("a.sh", &source("hi"), &source("bye"));
+    let after = file(&report.json, "a.sh").get("after");
+    assert_eq!(unit_names(after), ["greet", "caller"]);
+    let caller = unit(after, "caller");
+    assert_eq!(caller.get("selected_by").as_str(), Some("reference"));
+    assert_eq!(caller.get("referenced_name").as_str(), Some("greet"));
+}
+
+#[test]
+fn a_change_across_a_header_and_its_body_is_one_unit() {
+    let (_repo, report) = changed(
+        "a.rs",
+        "struct S {\n    n: u8,\n}\n",
+        "pub struct S {\n    n: u16,\n}\n",
+    );
+    let after = file(&report.json, "a.rs").get("after");
+    assert_eq!(unit_names(after), ["S"]);
+    assert_eq!(
+        unit(after, "S").get("changed_lines").as_arr(),
+        lines(&[1, 2])
+    );
+}
+
+#[test]
+fn an_added_blank_line_inside_a_function_selects_the_function() {
+    let (_repo, report) = changed(
+        "a.go",
+        "package p\n\n// F doc.\nfunc F() int {\n\tx := 1\n\treturn x\n}\n",
+        "package p\n\n// F doc.\nfunc F() int {\n\tx := 1\n\n\treturn x\n}\n",
+    );
+    let after = file(&report.json, "a.go").get("after");
+    assert_eq!(unit_names(after), ["F"]);
+    assert_eq!(unit(after, "F").get("changed_lines").as_arr(), lines(&[6]));
+}
+
+#[test]
+fn removed_lines_select_the_enclosing_unit_not_the_next_member() {
+    let (_repo, report) = changed(
+        "a.go",
+        "// a\npackage p\n\nfunc F() {}\n",
+        "package p\n\nfunc F() {}\n",
+    );
+    assert!(report.complete, "{}", report.json);
+    assert_eq!(
+        unit_names(file(&report.json, "a.go").get("after")),
+        Vec::<&str>::new()
+    );
+
+    let (_repo, report) = changed(
+        "a.rs",
+        "struct S {\n    a: u8,\n    b: u8,\n    c: u8,\n}\n",
+        "struct S {\n    a: u8,\n    c: u8,\n}\n",
+    );
+    let after = file(&report.json, "a.rs").get("after");
+    assert_eq!(unit_names(after), ["S"]);
+    assert_eq!(
+        unit(after, "S").get("gaps_between_lines").as_arr(),
+        [Json::Arr(lines(&[2, 3]))]
+    );
+}
+
+#[test]
+fn a_symlink_replaced_by_a_file_is_a_type_change_with_the_link_side_skipped() {
+    let repo = Repo::new();
+    repo.write("a.go", "package p\n");
+    std::os::unix::fs::symlink("a.go", repo.0.join("l.go")).unwrap();
+    repo.commit();
+    fs::remove_file(repo.0.join("l.go")).unwrap();
+    repo.write("l.go", "package p\n\nfunc L() {}\n");
+    let report = repo.extract(Mode::Worktree, false);
+    let entry = file(&report.json, "l.go");
+    assert_eq!(
+        entry.get("change").as_str(),
+        Some("type_changed"),
+        "{entry}"
+    );
+    assert_eq!(
+        entry.get("before").get("status").as_str(),
+        Some("skipped_symlink")
+    );
+    assert_eq!(entry.get("after").get("status").as_str(), Some("ok"));
+    assert!(report.complete, "{}", report.json);
+}
+
+#[test]
+fn a_submodule_entry_is_skipped_on_both_sides() {
+    let repo = Repo::new();
+    repo.write("a.go", "package p\n");
+    repo.commit();
+    let first = repo.git(&["rev-parse", "HEAD"]).trim().to_owned();
+    repo.git(&[
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        &format!("160000,{first},sub"),
+    ]);
+    repo.git(&["commit", "-q", "-m", "sub"]);
+    let second = repo.git(&["rev-parse", "HEAD"]).trim().to_owned();
+    repo.git(&[
+        "update-index",
+        "--cacheinfo",
+        &format!("160000,{second},sub"),
+    ]);
+    let report = repo.extract(Mode::Staged, false);
+    let entry = file(&report.json, "sub");
+    for side in ["before", "after"] {
+        assert_eq!(
+            entry.get(side).get("status").as_str(),
+            Some("skipped_submodule"),
+            "{side}: {entry}"
+        );
+    }
+    assert!(report.complete, "{}", report.json);
+}
+
+#[test]
+fn a_shebang_is_decided_from_the_first_4096_bytes() {
+    // "#!" and 4090 spaces leave room for "/xyz" or "/zsh" of the interpreter path.
+    let pad = " ".repeat(4090);
+    for (interpreter, status) in [
+        ("/xyz/bash", "not_in_scope"),
+        ("/zsh/bash", "unsupported_dialect"),
+    ] {
+        let line = format!("#!{pad}{interpreter}\n");
+        let (_repo, report) = changed(
+            "script",
+            &format!("{line}echo 1\n"),
+            &format!("{line}echo 2\n"),
+        );
+        let after = file(&report.json, "script").get("after");
+        assert_eq!(after.get("status").as_str(), Some(status), "{interpreter}");
+    }
+}
+
+#[test]
+fn an_empty_or_option_like_base_revision_is_refused() {
+    let repo = Repo::new();
+    repo.write("a.go", "package p\n");
+    repo.commit();
+    for revision in ["", "-x", "--output=x"] {
+        let options = Options::new(Mode::Base(revision.to_owned()));
+        let error = extract(&repo.0, &options).err().unwrap();
+        assert!(
+            error.contains("invalid base revision"),
+            "{revision:?}: {error}"
+        );
+    }
+}
+
+#[test]
+fn a_renamed_file_with_only_a_new_mtime_is_still_reported() {
+    let repo = Repo::new();
+    repo.write("a.toml", "k = 1\n");
+    repo.commit();
+    repo.git(&["mv", "a.toml", "b.toml"]);
+    let moved = fs::File::options()
+        .write(true)
+        .open(repo.0.join("b.toml"))
+        .unwrap();
+    moved
+        .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(60))
+        .unwrap();
+    let report = repo.extract(Mode::Worktree, false);
+    let entry = file(&report.json, "b.toml");
+    assert_eq!(entry.get("change").as_str(), Some("renamed"), "{entry}");
+    assert_eq!(entry.get("old_path").as_str(), Some("a.toml"));
 }

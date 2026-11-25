@@ -394,8 +394,16 @@ pub fn names() -> String {
 mod tests {
     use super::{
         CLAUDE, CODEX, COPILOT, DROID, GROK, HOSTS, Install, LETTA, OPENCODE, PI, UNSUPPORTED,
-        by_hook, by_id,
+        by_hook, by_id, names,
     };
+
+    #[test]
+    fn usage_names_add_the_hook_name_only_where_it_differs() {
+        assert_eq!(
+            names(),
+            "claude (claude-stop), grok (grok-stop), codex, copilot, droid, pi, letta, opencode"
+        );
+    }
 
     #[test]
     fn hook_names_and_ids_map_to_one_host() {

@@ -463,3 +463,20 @@ fn extract_command(args: &[String], show: Show<'_>) -> ExitCode {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::size_note;
+
+    #[test]
+    fn only_a_report_over_five_mib_gets_a_size_note() {
+        assert_eq!(size_note(0), None);
+        assert_eq!(size_note(5 << 20), None);
+        let note = size_note((5 << 20) + 1).unwrap();
+        assert_eq!(
+            note,
+            "report is 5 MiB; consider limiting it with -- <pathspec>"
+        );
+        assert!(size_note(7 << 20).unwrap().starts_with("report is 7 MiB;"));
+    }
+}

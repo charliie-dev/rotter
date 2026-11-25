@@ -58,9 +58,21 @@ fn grok(input: &str, state: &Path, env: &[(&str, &str)]) -> (String, String) {
 /// `rotter hook <name>` in `cwd` with HOME, XDG dirs, Claude settings, Grok's home and the state
 /// directory pinned under `state` unless `env` sets them.
 fn run_hook(name: &str, input: &str, state: &Path, cwd: &Path, env: &[(&str, &str)]) -> Output {
+    run_hook_args(&[name], input, state, cwd, env)
+}
+
+/// [`run_hook`] with `rotter hook <args>`.
+fn run_hook_args(
+    args: &[&str],
+    input: &str,
+    state: &Path,
+    cwd: &Path,
+    env: &[(&str, &str)],
+) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_rotter"));
     command
-        .args(["hook", name])
+        .arg("hook")
+        .args(args)
         .current_dir(cwd)
         .env("HOME", state.join("home"))
         .env("ROTTER_STATE_DIR", state)
@@ -1600,6 +1612,66 @@ fn grok_run_budget_comes_from_rotter_json() {
             .success()
     );
     assert!(is_block(&grok(&input, &state, &[]).0));
+    fs::remove_dir_all(&repo).unwrap();
+    fs::remove_dir_all(&state).unwrap();
+}
+
+#[test]
+fn only_a_host_that_runs_the_hook_in_the_project_falls_back_to_its_directory() {
+    let repo = changed_repo("cwd-fallback");
+    let state = temp("cwd-fallback-state");
+    // Claude Code runs the hook in the project: without a cwd key, the process's directory.
+    let blocked = hook_in(r#"{"session_id": "nf"}"#, &state, &repo, &[]);
+    assert!(blocked.contains(r#""decision":"block""#), "{blocked}");
+    // A relative cwd is refused, not resolved against the process's directory.
+    let relative = hook_in(r#"{"session_id": "rel", "cwd": "."}"#, &state, &repo, &[]);
+    assert_eq!(relative, "");
+    // So is an absolute one with a control character, though it names a changed repository.
+    let control = changed_repo("cwd-\u{1}-control");
+    let input = serde_json::json!({ "session_id": "ctl", "cwd": control }).to_string();
+    assert_eq!(hook_in(&input, &state, &repo, &[]), "");
+    fs::remove_dir_all(&control).unwrap();
+    // Grok Build does not, so without a cwd there is nothing to review.
+    let input = grok_input(
+        "nr",
+        &repo,
+        serde_json::json!({ "cwd": null, "workspaceRoot": null }),
+    );
+    let output = run_hook("grok-stop", &input, &state, &repo, &[]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "");
+    fs::remove_dir_all(&repo).unwrap();
+    fs::remove_dir_all(&state).unwrap();
+}
+
+#[test]
+fn a_shim_timeout_of_one_second_leaves_no_budget_and_zero_is_ignored() {
+    let repo = changed_repo("shim-timeout");
+    let state = temp("shim-timeout-state");
+    let input = |session: &str| {
+        format!(
+            r#"{{"session_id": "{session}", "cwd": "{}"}}"#,
+            repo.display()
+        )
+    };
+    let run = |session: &str, extra: &[&str]| {
+        let mut args = vec!["claude-stop"];
+        args.extend(extra);
+        let output = run_hook_args(&args, &input(session), &state, &state, &[]);
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+        String::from_utf8(output.stdout).unwrap()
+    };
+    // One second minus what the hook keeps for itself: nothing is parsed, so nothing blocks.
+    let short = run("one", &["--timeout", "1"]);
+    assert!(!short.contains(r#""decision":"block""#), "{short}");
+    assert!(short.contains("could not be analysed"), "{short}");
+    for (session, extra) in [("plain", &[][..]), ("zero", &["--timeout", "0"])] {
+        let stdout = run(session, extra);
+        assert!(
+            stdout.contains(r#""decision":"block""#),
+            "{extra:?}: {stdout}"
+        );
+    }
     fs::remove_dir_all(&repo).unwrap();
     fs::remove_dir_all(&state).unwrap();
 }

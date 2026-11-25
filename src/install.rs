@@ -676,10 +676,51 @@ pub fn list(config: &Config) -> Vec<ParserEntry> {
 
 #[cfg(test)]
 mod tests {
-    use super::{check_git_dirs, check_tree};
+    use super::{check_git_dirs, check_sources, check_tree, ensure_private_dir};
     use std::fs;
+    use std::os::unix::fs::symlink;
     use std::path::{Path, PathBuf};
     use std::process::Command;
+
+    #[test]
+    fn grammar_sources_are_regular_files_in_real_directories() {
+        let dir = temp("sources");
+        fs::write(dir.join("parser.c"), "").unwrap();
+        assert_eq!(check_sources(&dir), Ok(vec!["parser.c"]));
+        // A header that is a directory.
+        fs::create_dir_all(dir.join("tree_sitter/extra.h")).unwrap();
+        let error = check_sources(&dir).unwrap_err();
+        assert!(error.ends_with("extra.h is not a regular file"), "{error}");
+        // Other directories in there are not headers.
+        fs::remove_dir(dir.join("tree_sitter/extra.h")).unwrap();
+        fs::create_dir(dir.join("tree_sitter/sub")).unwrap();
+        assert_eq!(check_sources(&dir), Ok(vec!["parser.c"]));
+        // The header directory itself must not be a link.
+        let headers = temp("sources-headers");
+        fs::write(headers.join("parser.h"), "").unwrap();
+        fs::remove_dir_all(dir.join("tree_sitter")).unwrap();
+        symlink(&headers, dir.join("tree_sitter")).unwrap();
+        let error = check_sources(&dir).unwrap_err();
+        assert!(error.ends_with("tree_sitter is not a directory"), "{error}");
+        // A file where the directory should be: its own error, not "has no parser.c".
+        let file = dir.join("parser.c");
+        let error = check_sources(&file).unwrap_err();
+        assert!(
+            error.contains("parser.c/parser.c: Not a directory"),
+            "{error}"
+        );
+        for dir in [dir, headers] {
+            fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_private_directory_is_created_only_below_an_existing_one() {
+        let root = temp("private-dir");
+        let error = ensure_private_dir(&root.join("missing/x")).unwrap_err();
+        assert!(error.starts_with("cannot create"), "{error}");
+        fs::remove_dir_all(root).unwrap();
+    }
 
     fn temp(name: &str) -> PathBuf {
         let path =

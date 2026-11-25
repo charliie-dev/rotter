@@ -536,6 +536,22 @@ fn loader_refuses_unsafe_cache_layouts() {
     refused(&world, "group-writable library");
     fs::set_permissions(&library, fs::Permissions::from_mode(0o700)).unwrap();
 
+    // A private directory where the library belongs is refused before anything loads it.
+    let saved = world.root.join("saved-library");
+    fs::rename(&library, &saved).unwrap();
+    fs::create_dir(&library).unwrap();
+    fs::set_permissions(&library, fs::Permissions::from_mode(0o700)).unwrap();
+    let side = world.side(&repo, "a.lua2", &[]);
+    assert!(
+        side["detail"]
+            .as_str()
+            .unwrap()
+            .contains("is not a regular file owned by you"),
+        "{side}"
+    );
+    fs::remove_dir(&library).unwrap();
+    fs::rename(&saved, &library).unwrap();
+
     let elsewhere = world.root.join("elsewhere");
     fs::create_dir_all(&elsewhere).unwrap();
     fs::rename(&library, elsewhere.join("lib")).unwrap();
@@ -573,6 +589,20 @@ fn loader_refuses_unsafe_cache_layouts() {
     let wrong = parsers.join(format!("lua2-0000000000000000.{EXT}"));
     fs::rename(&library, &wrong).unwrap();
     refused(&world, "wrong key");
+}
+
+#[test]
+fn a_tool_on_path_that_is_not_executable_is_skipped() {
+    let mut world = World::new("tool-mode");
+    let src = world.root.join("lua-src");
+    copy_lua(&src);
+    world.write_config(&lua2(&src));
+    let bin = world.root.join("bin");
+    fs::create_dir(&bin).unwrap();
+    fs::write(bin.join("cc"), "#!/bin/sh\nexit 1\n").unwrap();
+    fs::set_permissions(bin.join("cc"), fs::Permissions::from_mode(0o644)).unwrap();
+    world.set("PATH", path_with(&bin));
+    ok(&world.install(&["lua2"]));
 }
 
 #[test]

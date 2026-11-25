@@ -186,6 +186,13 @@ mod tests {
     use super::Json;
 
     #[test]
+    fn an_empty_object_is_written_inline() {
+        assert_eq!(Json::Obj(vec![]).to_string(), "{}");
+        let nested = Json::Obj(vec![("a", Json::Obj(vec![]))]);
+        assert_eq!(nested.to_string(), "{\n  \"a\": {}\n}");
+    }
+
+    #[test]
     fn escapes_strings_and_nests() {
         let value = Json::Obj(vec![
             ("text", "a\"b\\c\nd\re\tf\u{1}é".into()),

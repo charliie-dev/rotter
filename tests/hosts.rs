@@ -1039,6 +1039,18 @@ fn droid_never_hides_hooks_declared_in_its_settings() {
         "{text}"
     );
     fs::remove_dir_all(root).unwrap();
+
+    // Hooks given as an array count as declared unless the array is empty.
+    let root = temp("droid-array");
+    let dir = root.join("home/.factory");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("settings.json"), r#"{"hooks": [{"x": 1}]}"#).unwrap();
+    let (code, text) = integration(&root, &["install", "droid"], &[]);
+    assert_eq!((code, text.contains("declares hooks")), (2, true), "{text}");
+    fs::write(dir.join("settings.json"), r#"{"hooks": []}"#).unwrap();
+    let (code, text) = integration(&root, &["install", "droid"], &[]);
+    assert_eq!(code, 0, "{text}");
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -1239,4 +1251,60 @@ fn status_names_every_in_scope_host_exactly_once() {
         );
     }
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn status_and_uninstall_never_create_an_owned_files_directory() {
+    let root = temp("copilot-dirs");
+    // COPILOT_HOME, as the helper sets it.
+    let home = root.join("copilot");
+    fs::create_dir_all(&home).unwrap();
+    set_mode(&home, 0o700);
+    let (code, text) = integration(&root, &["status"], &[]);
+    assert_eq!(code, 0, "{text}");
+    assert_eq!(
+        status_host(&text, "copilot")["state"],
+        "not_installed",
+        "{text}"
+    );
+    let (code, text) = integration(&root, &["uninstall", "copilot"], &[]);
+    assert_eq!(
+        (code, result(&text).as_str()),
+        (0, "not_installed"),
+        "{text}"
+    );
+    assert!(!home.join("hooks").exists());
+    // A home that cannot be searched: its hooks directory cannot even be looked up.
+    set_mode(&home, 0o600);
+    let (code, text) = integration(&root, &["uninstall", "copilot"], &[]);
+    set_mode(&home, 0o700);
+    assert_eq!(code, 2, "{text}");
+    assert!(text.contains("Permission denied"), "{text}");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_git_entry_above_the_host_dir_is_outside_only_when_git_says_not_a_repository() {
+    // An empty `.git` directory is no repository to git; a `.git` file it cannot read is an
+    // error, so whether the host dir is in a work tree is unknown.
+    for (gitfile, code) in [(None, 0), (Some("garbage\n"), 2)] {
+        let root = temp("gitfile");
+        let parent = root.join("parent");
+        fs::create_dir_all(parent.join("claude")).unwrap();
+        match gitfile {
+            Some(text) => fs::write(parent.join(".git"), text).unwrap(),
+            None => fs::create_dir(parent.join(".git")).unwrap(),
+        }
+        let dir = parent.join("claude").into_os_string();
+        let (got, text) = integration(
+            &root,
+            &["install", "claude"],
+            &[("CLAUDE_CONFIG_DIR", Some(dir.as_os_str()))],
+        );
+        assert_eq!(got, code, "{gitfile:?}: {text}");
+        if code == 2 {
+            assert!(text.contains("cannot tell"), "{text}");
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
 }

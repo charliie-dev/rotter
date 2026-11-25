@@ -587,7 +587,8 @@ pub fn extract(report: &Json, color: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Color, clean, code_lines, color_on, extract, integration, parser_install, parsers, status,
+        Color, DIM, GREEN, RED, YELLOW, clean, code_lines, color_on, extract, integration,
+        parser_install, parsers, status, status_color,
     };
     use crate::install::{ParserEntry, ParserInstall, ParserResult};
     use crate::integration::{HostStatus, IntegrationResult, Status};
@@ -698,7 +699,9 @@ mod tests {
                 "{choice:?} {terminal} {no_color:?} {term:?}"
             );
         }
+        assert_eq!(Color::parse("auto"), Some(Color::Auto));
         assert_eq!(Color::parse("always"), Some(Color::Always));
+        assert_eq!(Color::parse("never"), Some(Color::Never));
         assert_eq!(Color::parse("Always"), None);
     }
 
@@ -792,7 +795,12 @@ executable   /bin/rotter   refusing to register /bin/rotter
             colored.contains("\u{1b}[32minstalled\u{1b}[0m"),
             "{colored}"
         );
+        assert!(colored.contains("\u{1b}[33mfound\u{1b}[0m"), "{colored}");
         assert_eq!(strip_sgr(&colored), text);
+        let mut unknown = sample_status("");
+        unknown.compat_state = "unknown";
+        let colored = status(&unknown, true);
+        assert!(colored.contains("\u{1b}[31munknown\u{1b}[0m"), "{colored}");
         check_injection(|value, color| status(&sample_status(value), color));
     }
 
@@ -817,6 +825,8 @@ claude  removed  /h/.claude/settings.json
     fn integration_renders_its_result_and_notes() {
         let text = integration(&sample_integration(""), false);
         assert_eq!(text, INTEGRATION);
+        let colored = integration(&sample_integration(""), true);
+        assert!(colored.contains("\u{1b}[32mremoved\u{1b}[0m"), "{colored}");
         check_injection(|value, color| integration(&sample_integration(value), color));
     }
 
@@ -909,11 +919,22 @@ Note: an installed grammar is C code.
     fn parser_install_renders_results_and_the_notice() {
         let text = parser_install(&sample_install(""), false);
         assert_eq!(text, INSTALL);
+        let colored = parser_install(&sample_install(""), true);
+        assert!(
+            colored.contains("\u{1b}[32minstalled\u{1b}[0m"),
+            "{colored}"
+        );
+        assert!(colored.contains("\u{1b}[31mfailed\u{1b}[0m"), "{colored}");
         check_injection(|value, color| parser_install(&sample_install(value), color));
     }
 
     /// A report with `value` in every string field and `code` as the unit's text.
     fn report(value: &str, code: &str) -> Json {
+        json(report_value(value, code))
+    }
+
+    /// [`report`] before its conversion, for tests that change a field.
+    fn report_value(value: &str, code: &str) -> serde_json::Value {
         let text = |base: &str| format!("{base}{value}");
         let range = |first: u64, last: u64| {
             serde_json::json!({ "lines": [first, last],
@@ -941,7 +962,7 @@ Note: an installed grammar is C code.
             "change": text("renamed"), "similarity": 90, "old_path": text("old.go"),
             "new_path": text("new.go"), "complete": false, "hunks": [],
             "before": side("old.go", text("read_error"), "cannot read"), "after": after });
-        json(serde_json::json!({
+        serde_json::json!({
             "tool": "rotter", "schema": "rotter.extract.poc/0", "stage": "extraction",
             "semantic_verification": "not_performed", "mode": text("base"),
             "repository": text("/repo"),
@@ -950,7 +971,41 @@ Note: an installed grammar is C code.
             "pathspec": [text("src")], "after": text("worktree"),
             "untracked": { "included": false, "not_covered": [text("new.txt")] },
             "complete": false, "files": [file]
-        }))
+        })
+    }
+
+    #[test]
+    fn side_statuses_take_their_colour() {
+        for (status, sgr) in [
+            ("ok", GREEN),
+            ("not_in_scope", DIM),
+            ("skipped_symlink", DIM),
+            ("skipped_submodule", DIM),
+            ("partial", YELLOW),
+            ("read_error", RED),
+        ] {
+            assert_eq!(status_color(status), sgr, "{status}");
+        }
+    }
+
+    #[test]
+    fn a_comment_away_from_its_unit_is_set_off_and_a_complete_file_is_green() {
+        let mut value = report_value("", "func F() {\n}");
+        let unit = &mut value["files"][0]["after"]["units"][0];
+        unit["range"]["lines"] = serde_json::json!([5, 6]);
+        unit["changed_lines"] = serde_json::json!([6]);
+        unit["gaps_between_lines"] = serde_json::json!([]);
+        unit["comments"][0]["range"]["lines"] = serde_json::json!([2, 2]);
+        let text = extract(&json(value.clone()), false);
+        assert!(
+            text.contains("      2~│ // F\n        ┆\n      5 │ func F() {"),
+            "{text}"
+        );
+        let colored = extract(&json(value.clone()), true);
+        assert!(colored.contains("\u{1b}[33m■\u{1b}[0m"), "{colored}");
+        value["files"][0]["complete"] = serde_json::json!(true);
+        let colored = extract(&json(value), true);
+        assert!(colored.contains("\u{1b}[32m■\u{1b}[0m"), "{colored}");
     }
 
     const EXTRACT: &str = "\

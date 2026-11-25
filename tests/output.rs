@@ -667,6 +667,30 @@ fn status_document_covers_every_state() {
             .unwrap()
             .starts_with("git version ")
     );
+    // Only the chosen git's directory on PATH: nothing skipped, so nothing named. A
+    // group-writable directory before it is skipped and named.
+    let git_dir = git.parent().unwrap().to_owned();
+    let shared = root.join("shared-bin");
+    fs::create_dir(&shared).unwrap();
+    common::set_mode(&shared, 0o775);
+    let git_detail = |dirs: &[&Path]| {
+        let path = std::env::join_paths(dirs).unwrap();
+        let output = integration(&["status"], &[("PATH", Some(path.as_os_str()))]);
+        document(&output, "rotter.status/1")["git"]["detail"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let detail = git_detail(&[&git_dir]);
+    assert!(!detail.contains("untrusted PATH"), "{detail}");
+    let detail = git_detail(&[&shared, &git_dir]);
+    assert!(
+        detail.contains(&format!(
+            "; untrusted PATH entries before it were skipped: PATH entry {}",
+            shared.display()
+        )),
+        "{detail}"
+    );
     assert_eq!(
         status["executable"],
         serde_json::json!({ "path": exe, "trusted": true, "detail": "safe to register" })
@@ -791,6 +815,22 @@ fn integration_and_parser_list_documents() {
     assert!(text.starts_with("name "), "{text}");
     assert!(text.contains("\npython      available  -\n"), "{text}");
     fs::remove_dir_all(root).unwrap();
+}
+
+/// A write that fails for another reason than a closed reader (here ENOSPC) is an error.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_full_stdout_is_an_error() {
+    let full = fs::File::options().write(true).open("/dev/full").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_rotter"))
+        .arg("--skill")
+        .stdout(full)
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("cannot write output"), "{stderr}");
 }
 
 #[test]

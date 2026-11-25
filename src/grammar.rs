@@ -533,8 +533,44 @@ impl Languages {
 
 #[cfg(test)]
 mod tests {
-    use super::{git_key, inputs_key, trusted_input};
+    use super::{git_key, inputs_key, open_regular, private_dir, trusted_input};
     use crate::config::{Kind, Meta, user};
+    use crate::{Grammar, Language};
+    use std::fs;
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    #[test]
+    fn a_grammar_debugs_as_its_name() {
+        let go = Grammar::builtin(Language::Go);
+        assert_eq!(format!("{go:?}"), "Grammar { name: \"go\", .. }");
+    }
+
+    #[test]
+    fn only_a_private_directory_and_a_regular_file_are_accepted() {
+        let root = std::env::temp_dir().join(format!("rotter-grammar-open-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(private_dir(&root), Ok(()));
+        let file = root.join("file");
+        fs::write(&file, "x").unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(private_dir(&file).is_err(), "a file with mode 0700");
+
+        assert!(open_regular(&file).unwrap().is_some());
+        assert!(open_regular(&root.join("missing")).unwrap().is_none());
+        // Below a file: not missing, an error.
+        assert!(open_regular(&file.join("x")).is_err());
+        let link = root.join("link");
+        symlink(&file, &link).unwrap();
+        let error = open_regular(&link).unwrap_err();
+        assert!(error.contains("is a symbolic link"), "{error}");
+        let socket = root.join("socket");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let error = open_regular(&socket).unwrap_err();
+        assert!(error.ends_with("is not a regular file"), "{error}");
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn inputs_must_be_regular_owned_and_not_writable_by_others() {

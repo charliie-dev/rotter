@@ -141,6 +141,14 @@ fn shims_install_exactly_their_render_and_leave_foreign_code_alone() {
             detail.starts_with("foreign code at rotter's path, auto-loaded by"),
             "{detail}"
         );
+        // Bytes that are not UTF-8 are foreign code too, not a read error.
+        fs::write(&shim, b"\xff\xfe").unwrap();
+        let (state, detail) = status_of(&root, host);
+        assert_eq!(state, "foreign", "{detail}");
+        let (code, text) = integration(&root, &["uninstall", host]);
+        assert_eq!(code, 2, "{text}");
+        assert!(text.contains("foreign code at rotter's path"), "{text}");
+        assert_eq!(fs::read(&shim).unwrap(), b"\xff\xfe");
         // Unsafe permissions and a symlink are refused and left as they are.
         fs::write(&shim, &rendered).unwrap();
         set_mode(&shim, 0o622);

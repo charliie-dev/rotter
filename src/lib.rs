@@ -387,8 +387,99 @@ fn parse_until(
 
 #[cfg(test)]
 mod tests {
-    use super::{Grammar, Language, ParseError, glob_match, parse_with_deadline, parse_with_stop};
+    use super::{
+        Grammar, Language, ParseError, glob_match, parse_until, parse_with_deadline,
+        parse_with_stop,
+    };
     use std::time::Duration;
+
+    /// A detection as `language/dialect`, `unsupported <dialect>`, or the variant's name.
+    fn label(detected: super::Detected) -> String {
+        match detected {
+            super::Detected::Supported(grammar, dialect) => format!("{}/{dialect}", grammar.name()),
+            super::Detected::UnsupportedDialect(dialect) => format!("unsupported {dialect}"),
+            super::Detected::NotInScope => "not in scope".to_owned(),
+            super::Detected::NeedsContent => "needs content".to_owned(),
+        }
+    }
+
+    #[test]
+    fn shell_extensions_and_shebangs_choose_the_bash_grammar_or_an_unsupported_dialect() {
+        let languages = super::Languages::default();
+        let path = |name: &str| label(languages.detect_path(std::path::Path::new(name)));
+        assert_eq!(path("a.bash"), "bash/bash");
+        assert_eq!(path("a.dash"), "bash/dash-parsed-as-bash");
+        for dialect in ["zsh", "ksh", "fish", "csh", "tcsh"] {
+            assert_eq!(
+                path(&format!("a.{dialect}")),
+                format!("unsupported {dialect}")
+            );
+        }
+        assert_eq!(path("a.sh"), "needs content");
+        let content = |name: &str, line: &str| {
+            label(languages.detect_content(std::path::Path::new(name), line))
+        };
+        // Only a .sh file without a shebang is assumed Bash; another name is not in scope.
+        assert_eq!(content("a.sh", "echo hi"), "bash/bash-assumed");
+        assert_eq!(content("a.txt", "echo hi"), "not in scope");
+        assert_eq!(content("x", "#!/bin/dash"), "bash/dash-parsed-as-bash");
+        assert_eq!(content("x", "#!/bin/ash"), "bash/ash-parsed-as-bash");
+        assert_eq!(content("x", "#!/bin/busybox sh"), "bash/ash-parsed-as-bash");
+        // env's options and assignments are not the interpreter.
+        assert_eq!(content("x", "#!/usr/bin/env -S bash -e"), "bash/bash");
+        assert_eq!(content("x", "#!/usr/bin/env FOO=1 bash"), "bash/bash");
+    }
+
+    #[test]
+    fn every_builtin_name_is_a_lang_value() {
+        for language in [
+            Language::Go,
+            Language::Lua,
+            Language::Nix,
+            Language::Bash,
+            Language::Yaml,
+            Language::Toml,
+            Language::Rust,
+        ] {
+            let dialect = format!("{}-by-override", language.name());
+            assert_eq!(
+                Language::from_name(language.name()),
+                Some((language, dialect.as_str())),
+            );
+        }
+    }
+
+    #[test]
+    fn a_parse_stopped_by_its_deadline_is_a_timeout_and_a_parse_without_a_tree_is_not() {
+        let go = Grammar::builtin(Language::Go);
+        let source = format!("package p\n{}", "var x = 1\n".repeat(2000));
+        // Not passed before the parse, passed at the first progress check.
+        let mut calls = 0;
+        let stopped = parse_until(&go, &source, || {
+            calls += 1;
+            calls > 1
+        });
+        assert!(matches!(stopped, Err(ParseError::Timeout)), "{stopped:?}");
+        // A grammar that cannot load gives no tree, and no deadline has passed.
+        let missing = Grammar::external(crate::grammar::Definition {
+            name: "missing".to_owned(),
+            source: crate::grammar::ExternalSource::Path("/nonexistent".into()),
+            symbol: "tree_sitter_missing".to_owned(),
+            unit_kinds: Vec::new(),
+            function_kinds: Vec::new(),
+            value_kinds: Vec::new(),
+            attribute_kinds: Vec::new(),
+            comment_kinds: Vec::new(),
+            directives: Vec::new(),
+            references: false,
+            extensions: Vec::new(),
+            filenames: Vec::new(),
+            repo: None,
+            cache: None,
+        });
+        let none = parse_until(&missing, &source, || false);
+        assert!(matches!(none, Err(ParseError::NoTree)), "{none:?}");
+    }
 
     #[test]
     fn parse_errors_say_what_failed() {

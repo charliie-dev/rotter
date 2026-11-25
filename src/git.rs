@@ -1805,12 +1805,13 @@ fn report_json(
 mod tests {
     use super::{
         Change, Git, GitClass, Hunk, changes, classify, diff, guard_args, identity, linux_native,
-        macos_native, parse_raw, select, temp_root, walk, write_new,
+        macos_native, parse_raw, select, temp_root, timeout_detail, walk, write_new,
     };
     use std::ffi::OsString;
     use std::fs;
     use std::os::unix::fs::{PermissionsExt, symlink};
     use std::path::{Path, PathBuf};
+    use std::time::Duration;
 
     fn temp(name: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!("rotter-git-{name}-{}", std::process::id()));
@@ -1831,6 +1832,29 @@ mod tests {
         let error = write_new(&dir, "before", b"payload").unwrap_err();
         assert!(error.contains("exists"), "{error}");
         assert_eq!(fs::read_to_string(&canary).unwrap(), "canary");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_timeout_names_the_run_budget_only_when_it_was_shorter_than_the_limit() {
+        let detail =
+            |budget, limit| timeout_detail(Duration::from_secs(budget), Duration::from_secs(limit));
+        assert_eq!(
+            detail(1, 60),
+            "stopped: the run's time budget ran out during this file"
+        );
+        assert!(detail(60, 60).starts_with("stopped after 60 s;"));
+        assert!(detail(90, 60).starts_with("stopped after 60 s;"));
+    }
+
+    #[test]
+    fn the_work_tree_probe_gives_up_after_its_limit() {
+        let root = temp("probe");
+        let git = Git::cli(&root).unwrap();
+        // No git answers before it has even started.
+        let error = git.work_tree(&root, Duration::ZERO).unwrap_err();
+        assert!(error.contains("timed out"), "{error}");
+        assert_eq!(git.work_tree(&root, Duration::from_secs(60)), Ok(None));
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -2140,7 +2164,7 @@ mod tests {
     fn guard_args_reset_exact_filter_and_hook_names() {
         let keys = b"filter.x=y.clean\0filter.a.b.process\0filter.X.smudge\0filter.x=y.required\0\
 filter..clean\0filter.clean\0hook.Pre.Commit.event\0hook.Pre.Commit.command\0hook.noevent.command\0\
-hook.command\0";
+hook.command\0hook.Pre.Commit.event\0";
         let reset = |key: &str| format!("--config-env={key}=ROTTER_EMPTY_VALUE");
         let filter = |name: &str| {
             ["clean", "smudge", "process", "required"]
@@ -2150,6 +2174,7 @@ hook.command\0";
         for name in ["x=y", "a.b", "X", ""] {
             expected.extend(filter(name));
         }
+        // Once, though the hook's event key is listed twice.
         expected.push(reset("hook.Pre.Commit.event"));
         assert_eq!(guard_args(keys).unwrap(), expected);
         assert_eq!(guard_args(b"").unwrap(), Vec::<String>::new());

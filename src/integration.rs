@@ -2099,11 +2099,13 @@ mod tests {
         render_template, replace_file, reset_requests, respond, rewritable, run_budget, session,
         shim_timeout, shim_values, shortened, temporary_path, trusted_home, verdict,
     };
-    use crate::config::{Meta, Sources, lstat, user};
+    use super::{StrictVisitor, host_dir, private_file, shim_status};
+    use crate::config::{Kind, Meta, Sources, lstat, user};
     use crate::hosts::{CLAUDE, COPILOT, DROID, GROK, Host, Install, LETTA, OPENCODE, PI};
+    use serde::de::Visitor;
     use serde_json::{Value, json};
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
     use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2525,8 +2527,13 @@ mod tests {
         };
         let asks: Vec<bool> = (0..7).map(|_| ask(&state, &CLAUDE, "s")).collect();
         assert_eq!(asks, [true, true, false, true, true, false, true]);
-        // A Stop without a request resets; the counter is per host and session.
+        // A Stop without a request resets (to an empty file); the counter is per host and
+        // session.
         reset_requests(&state, &CLAUDE, "s");
+        assert_eq!(
+            fs::read_to_string(state.join("claude-stop-count/s")).unwrap(),
+            ""
+        );
         assert!(ask(&state, &CLAUDE, "s") && ask(&state, &CLAUDE, "s"));
         assert!(ask(&state, &GROK, "s") && ask(&state, &CLAUDE, "t"));
         let count = state.join("claude-stop-count/s");
@@ -2536,8 +2543,14 @@ mod tests {
             0o600
         );
         // Fail closed: corrupt content, a directory in the way, an unwritable state dir.
-        fs::write(&count, "x\n").unwrap();
-        assert_eq!(allow_request(&state, &CLAUDE, "s"), Ok(false));
+        for corrupt in ["x\n", "+1\n", "1"] {
+            fs::write(&count, corrupt).unwrap();
+            assert_eq!(
+                allow_request(&state, &CLAUDE, "s"),
+                Ok(false),
+                "{corrupt:?}"
+            );
+        }
         reset_requests(&state, &CLAUDE, "s");
         assert!(ask(&state, &CLAUDE, "s"), "a reset repairs it");
         // Errors (reported by the hook) when the counter cannot be opened at all.
@@ -2551,8 +2564,20 @@ mod tests {
         let locked = temp();
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o500)).unwrap();
         assert!(allow_request(&locked.join("state"), &CLAUDE, "s").is_err());
+        let denied = allow_request(&locked, &CLAUDE, "s").unwrap_err();
+        assert!(
+            denied.contains("Permission denied"),
+            "not a permission error"
+        );
+        // Not even searchable: the count directory cannot be looked up.
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o600)).unwrap();
         assert!(allow_request(&locked, &CLAUDE, "s").is_err());
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+        // A state directory that is a dangling link of the user's.
+        let dangling = temp().join("state");
+        std::os::unix::fs::symlink(temp().join("gone"), &dangling).unwrap();
+        let vanished = allow_request(&dangling, &CLAUDE, "s").unwrap_err();
+        assert!(vanished.contains("vanished"), "not reported as vanished");
         let shared = temp();
         fs::set_permissions(&shared, fs::Permissions::from_mode(0o770)).unwrap();
         let refused = allow_request(&shared, &CLAUDE, "s").unwrap_err();
@@ -2561,6 +2586,37 @@ mod tests {
         let fresh = temp().join("state");
         reset_requests(&fresh, &CLAUDE, "s");
         assert!(!fresh.exists());
+    }
+
+    #[test]
+    fn a_state_file_is_a_regular_file_of_the_user_that_others_cannot_write() {
+        let meta = |kind, uid, mode| Meta { kind, uid, mode };
+        assert!(private_file(meta(Kind::File, 7, 0o100644), 7));
+        for (case, (kind, uid, mode)) in [
+            (Kind::Dir, 7, 0o40700),
+            (Kind::Other, 7, 0o10600),
+            (Kind::File, 0, 0o100600),
+            (Kind::File, 8, 0o100600),
+            (Kind::File, 7, 0o100620),
+            (Kind::File, 7, 0o100602),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert!(!private_file(meta(kind, uid, mode), 7), "case {case}");
+        }
+    }
+
+    #[test]
+    fn a_strict_value_of_another_type_names_what_was_expected() {
+        let error = StrictVisitor
+            .visit_bytes::<serde_json::Error>(b"x")
+            .err()
+            .unwrap();
+        assert!(
+            error.to_string().contains("expected a JSON value"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -2859,6 +2915,47 @@ mod tests {
                 .any(|message| message.contains("could not be analysed")),
             "{outcome:?}"
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_shim_rendered_from_an_older_template_is_a_mismatch() {
+        const OLD: &str = include_str!("shims/pi-v1.ts");
+        const NEW: &str = concat!("// v2\n", include_str!("shims/pi-v1.ts"));
+        let host = Host {
+            install: Install::OwnedShim {
+                dir: "extensions",
+                file: "rotter-review.ts",
+                templates: &[NEW, OLD],
+                max_timeout: Some(120),
+            },
+            ..PI
+        };
+        let root = temp();
+        let sources = Sources {
+            config: None,
+            cache: None,
+            state: None,
+            temp: root.clone(),
+            path: None,
+            vars: Vec::new(),
+            home: Some(root.join("home")),
+        };
+        let dir = host_dir(&host, &sources).unwrap().join("extensions");
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&dir)
+            .unwrap();
+        for (template, expected) in [(OLD, "mismatch"), (NEW, "installed")] {
+            let shim = dir.join("rotter-review.ts");
+            fs::write(&shim, render_template(template, "/opt/rotter", 90).unwrap()).unwrap();
+            fs::set_permissions(&shim, fs::Permissions::from_mode(0o600)).unwrap();
+            let Ok((state, detail, _)) = shim_status(&host, &sources, "/opt/rotter", 90) else {
+                panic!("status refused");
+            };
+            assert_eq!(state, expected, "{detail}");
+        }
         fs::remove_dir_all(root).unwrap();
     }
 

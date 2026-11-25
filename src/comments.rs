@@ -790,8 +790,33 @@ fn directive<'g>(grammar: &'g Grammar, text: &str) -> Option<&'g str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Json, error_lines, full_units, touches};
+    use super::{Change, Json, error_lines, full_units, last_row_of, touches, units};
     use crate::{Grammar, Language, parse_partial};
+    use tree_sitter::Point;
+
+    #[test]
+    fn a_grammar_without_references_never_pulls_in_users() {
+        let source = "greet() {\n  echo hi\n}\ncaller() {\n  greet\n}\n";
+        let tree = parse_partial(Language::Bash, source).unwrap();
+        let count = |grammar: &Grammar| match units(grammar, source, &tree, &[Change::Rows(1..2)]) {
+            Json::Arr(units) => units.len(),
+            other => panic!("{other}"),
+        };
+        let mut grammar = Grammar::builtin(Language::Bash);
+        assert_eq!(count(&grammar), 2, "greet and its caller");
+        grammar.references = false;
+        assert_eq!(count(&grammar), 1, "greet alone");
+    }
+
+    #[test]
+    fn a_node_ending_at_column_zero_of_a_later_row_ends_on_the_row_before() {
+        let at = |row, column| Point { row, column };
+        assert_eq!(last_row_of(at(2, 4), at(3, 0)), 2);
+        assert_eq!(last_row_of(at(2, 4), at(5, 0)), 4);
+        // Ending later on a row, or empty at column 0 where it starts: its own end row.
+        assert_eq!(last_row_of(at(2, 4), at(3, 1)), 3);
+        assert_eq!(last_row_of(at(2, 0), at(2, 0)), 2);
+    }
 
     #[test]
     fn deeply_nested_files_do_not_exhaust_the_stack() {

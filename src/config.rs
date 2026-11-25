@@ -853,12 +853,67 @@ pub(crate) fn trusted_file(
 
 #[cfg(test)]
 mod tests {
-    use super::{Kind, Meta, Untrusted, lstat, parse, resolve_trusted, trusted_file, user};
+    use super::{
+        ERANGE, Kind, Meta, Untrusted, home_from, lstat, parse, passwd_home, resolve_trusted,
+        trusted_file, user,
+    };
     use crate::Detected;
     use std::fs;
     use std::os::unix::fs::{PermissionsExt, symlink};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// `home_from` over scripted lookups: the home and the buffer sizes it asked with.
+    fn scripted(
+        answer: impl Fn(usize) -> Result<Option<Vec<u8>>, i32>,
+    ) -> (Option<PathBuf>, Vec<usize>) {
+        let mut sizes = Vec::new();
+        let home = home_from(|size| {
+            sizes.push(size);
+            answer(size)
+        });
+        (home, sizes)
+    }
+
+    #[test]
+    fn the_password_database_buffer_doubles_on_erange_up_to_one_mib() {
+        let home = |dir: &str| Ok(Some(dir.as_bytes().to_vec()));
+        let (found, sizes) = scripted(|size| {
+            if size < 1 << 16 {
+                Err(ERANGE)
+            } else {
+                home("/home/u")
+            }
+        });
+        assert_eq!(found, Some(PathBuf::from("/home/u")));
+        assert_eq!(sizes, [1 << 14, 1 << 15, 1 << 16]);
+        let (found, sizes) = scripted(|_| Err(ERANGE));
+        assert_eq!(found, None);
+        assert_eq!(
+            sizes,
+            [
+                1 << 14,
+                1 << 15,
+                1 << 16,
+                1 << 17,
+                1 << 18,
+                1 << 19,
+                1 << 20
+            ]
+        );
+        // Another error, no entry, or a relative directory: no home, after one call.
+        for answer in [Err(5), Ok(None), home("home/u"), home("")] {
+            let (found, sizes) = scripted(|_| answer.clone());
+            assert_eq!(found, None, "{answer:?}");
+            assert_eq!(sizes, [1 << 14], "{answer:?}");
+        }
+    }
+
+    #[test]
+    fn the_password_database_gives_the_test_user_an_absolute_home() {
+        let home = passwd_home().expect("the user running the tests has a passwd entry");
+        assert!(home.is_absolute(), "{}", home.display());
+    }
 
     const LUA2: &str = r#"
 [language.lua2]
@@ -967,6 +1022,14 @@ units = ["function_declaration"]
         assert_eq!(config.parse_timeout_seconds, 5);
         let names: Vec<&str> = config.externals.iter().map(|g| g.name()).collect();
         assert_eq!(names, ["lua2", "alpha"]);
+        // References are on unless a language turns them off.
+        assert!(config.externals[0].references);
+        let off = parse(
+            &language("path = \"p\"\nreferences = false"),
+            Path::new("/"),
+        )
+        .unwrap();
+        assert!(!off.externals[0].references);
         assert_eq!(
             config.overrides,
             [("z/*".into(), "lua2".into()), ("a/*".into(), "sh".into())]
@@ -1040,6 +1103,10 @@ units = ["function_declaration"]
             ),
             LUA2.replace("units = [\"function_declaration\"]", "units = []"),
             "[overrides]\n\"*.x\" = \"python\"".to_owned(),
+            LUA2.replace("lua2]", "_lua2]"),
+            language("path = \"\""),
+            language("path = \"p\"\ndirectives = { \"#\" = \"aB\" }"),
+            language("path = \"p\"\ndirectives = { \"\" = \"todo\" }"),
         ];
         for case in cases {
             assert!(parse(&case, Path::new("/")).is_err(), "accepted: {case}");
@@ -1259,6 +1326,34 @@ units = ["x"]
     }
 
     #[test]
+    fn up_to_forty_links_are_followed_and_a_file_is_never_a_directory() {
+        let root = temp();
+        fs::write(root.join("file"), "").unwrap();
+        // l0 -> l1 -> ... -> l40 -> file: l1 to l40 take 40 hops, l0 one more.
+        symlink(root.join("file"), root.join("l40")).unwrap();
+        for n in (0..40).rev() {
+            symlink(root.join(format!("l{}", n + 1)), root.join(format!("l{n}"))).unwrap();
+        }
+        assert_eq!(
+            resolve_trusted(&root.join("l1"), user(), &real()),
+            Ok(root.join("file"))
+        );
+        assert!(matches!(
+            resolve_trusted(&root.join("l0"), user(), &real()),
+            Err(Untrusted::Refused(why)) if why.contains("too many symbolic links")
+        ));
+        let under = root.join("file/x");
+        assert_eq!(
+            resolve_trusted(&under, user(), &real()),
+            Err(Untrusted::Refused(format!(
+                "{}: not a directory",
+                root.join("file").display()
+            )))
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn config_file_must_be_regular_and_not_writable_by_others() {
         let root = temp();
         fs::create_dir_all(root.join("store")).unwrap();
@@ -1276,6 +1371,12 @@ units = ["x"]
             (root.join("store/payload.toml"), 0, 0o100444),
         ]);
         assert!(trusted_file(&config, user(), &sticky_store).is_ok());
+        // Root-owned but writable by everyone without the sticky bit: refused.
+        let open_store = with(vec![
+            (root.join("store"), 0, 0o40777),
+            (root.join("store/payload.toml"), 0, 0o100444),
+        ]);
+        assert!(trusted_file(&config, user(), &open_store).is_err());
         let foreign = with(vec![(root.join("store/payload.toml"), 4242, 0o100444)]);
         assert!(trusted_file(&config, user(), &foreign).is_err());
 

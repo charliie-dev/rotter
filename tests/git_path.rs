@@ -492,3 +492,34 @@ fn developer_dir_never_reaches_the_apple_git_stub() {
     }
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn git_is_refused_when_the_work_tree_it_reports_holds_its_path_entry() {
+    // The `.git` walk finds `other`; GIT_DIR and GIT_WORK_TREE make git report `repo`, which
+    // holds the PATH entry the chosen git came from.
+    let root = temp("reported-top");
+    let other = root.join("other");
+    changed_repo(&other);
+    let repo = root.join("repo");
+    changed_repo(&repo);
+    let bin = repo.join("bin");
+    native_git(&bin, &[("real", &real_git().display().to_string())]);
+    let path = path_with(&[&bin]);
+    let git_dir = repo.join(".git");
+    let output = rotter(
+        &root,
+        &["extract", "--worktree", "-C", other.to_str().unwrap()],
+        &root,
+        "",
+        &[
+            ("PATH", Some(path.as_os_str())),
+            ("GIT_DIR", Some(git_dir.as_os_str())),
+            ("GIT_WORK_TREE", Some(repo.as_os_str())),
+        ],
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "{stderr}");
+    assert!(stderr.contains("refusing to run git: "), "{stderr}");
+    assert!(stderr.contains("is inside the repository"), "{stderr}");
+    fs::remove_dir_all(root).unwrap();
+}
