@@ -252,6 +252,29 @@ fn a_config_directory_linked_into_the_repository_is_off() {
 }
 
 #[test]
+fn a_repository_link_reached_through_an_alias_of_the_repository_turns_the_config_off() {
+    let repo = repo(&[("a.lua2", "-- A.\nlocal a = 1\n")]);
+    // The repository's `cfglink` chooses the config directory, which is outside and trusted;
+    // the config path names the repository only through `alias`, a link from outside.
+    let outside = temp("outside");
+    write_config(&outside, LUA2);
+    symlink(&outside, repo.join("cfglink")).unwrap();
+    let aliases = temp("alias");
+    let alias = aliases.join("repo");
+    symlink(&repo, &alias).unwrap();
+    let run = extract_cli(&repo, &[], &xdg_env(&alias.join("cfglink")), &repo);
+    assert!(
+        run.stderr.contains("inside the repository"),
+        "{}",
+        run.stderr
+    );
+    assert_eq!(run.status("a.lua2"), "not_in_scope");
+    for dir in [repo, outside, aliases] {
+        fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[test]
 fn a_link_kept_in_the_repository_on_the_way_to_the_config_turns_it_off() {
     let repo = repo(&[("a.lua2", "-- A.\nlocal a = 1\n")]);
     // The config directory and the final file are outside; only the middle link is inside.

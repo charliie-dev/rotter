@@ -211,12 +211,9 @@ pub fn load(repo: Option<&Path>, sources: &Sources) -> Result<Loaded, String> {
     };
     if let Some(repo) = repo {
         let canonical = fs::canonicalize(repo).unwrap_or_else(|_| repo.to_owned());
-        if path.starts_with(repo)
-            || path.starts_with(&canonical)
-            || resolved.starts_with(&canonical)
-            || link_hops(&path)
-                .iter()
-                .any(|hop| canonical_parent(hop).is_some_and(|dir| dir.starts_with(&canonical)))
+        if link_hops(&path)
+            .iter()
+            .any(|hop| through_repository(hop, &canonical))
         {
             return Ok(Loaded::off(format!(
                 "config {} is inside the repository {}; it is off for this repository",
@@ -253,9 +250,12 @@ fn link_hops(path: &Path) -> Vec<PathBuf> {
     hops
 }
 
-/// The canonical directory holding `path`: whoever controls it chooses what `path` is.
-fn canonical_parent(path: &Path) -> Option<PathBuf> {
-    fs::canonicalize(path.parent()?).ok()
+/// Whether `path` is reached through `repo` (canonical): `path` or a directory on its way is,
+/// once canonical, `repo` or inside it. Whoever controls that directory chooses what `path` is,
+/// also when `path` names it through an alias such as a link to the repository from outside.
+fn through_repository(path: &Path, repo: &Path) -> bool {
+    path.ancestors()
+        .any(|dir| fs::canonicalize(dir).is_ok_and(|dir| dir.starts_with(repo)))
 }
 
 #[derive(Deserialize)]

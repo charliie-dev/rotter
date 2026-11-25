@@ -4,7 +4,7 @@
 # re-examined rather than staying excluded by accident.
 exclude_re = [
   # Path::join with an absolute target returns that target, exactly like the other branch.
-  '^src/config\.rs:248:29: replace match guard target\.is_relative\(\) with true in link_hops$',
+  '^src/config\.rs:245:29: replace match guard target\.is_relative\(\) with true in link_hops$',
   # O_NOFOLLOW and O_NONBLOCK share no bits, so `^` equals `|`.
   '^src/grammar\.rs:335:47: replace \| with \^$',
   # NotFound handling in `counter`: with `create` the file is opened with O_CREAT, so NotFound
