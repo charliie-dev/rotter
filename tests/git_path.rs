@@ -201,12 +201,24 @@ fn script_dispatchers_are_skipped_before_any_probe() {
     )
     .unwrap();
     set_mode(&shims.join("git"), 0o755);
-    // Positive control: run from the repository, the dispatcher runs the repository's git.
-    let control = std::process::Command::new(shims.join("git"))
-        .arg("version")
-        .current_dir(&repo)
-        .output()
-        .unwrap();
+    // Positive control: run from the repository, the dispatcher runs the repository's git. A
+    // fork in a concurrent test can still hold the script's write descriptor until it execs
+    // (ETXTBSY on Linux), so the first runs may be refused.
+    let control = (0..100)
+        .find_map(|_| {
+            match std::process::Command::new(shims.join("git"))
+                .arg("version")
+                .current_dir(&repo)
+                .output()
+            {
+                Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    None
+                }
+                other => Some(other.unwrap()),
+            }
+        })
+        .expect("the script stayed busy");
     assert!(marker.exists(), "positive control: {control:?}");
     fs::remove_file(&marker).unwrap();
     let outputs = every_mode(&root, &repo, &path_with(&[&shims]), &[]);
