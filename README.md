@@ -175,7 +175,7 @@ U+FEFF）顯示為 `\u{…}`；單行欄位的換行與 tab 也跳脫，程式�
 
 設定檔位置：`$XDG_CONFIG_HOME/rotter/config.toml`（`XDG_CONFIG_HOME` 未設或為相對路徑時用
 `$HOME/.config`；`HOME` 也未設時沒有設定檔，外部語言停用）。不會從 repo 或目前目錄讀取；
-設定檔位於受檢 repo 內、或信任檢查失敗（見上方規則；檔案本身須為一般檔案、屬於使用者或 root、
+設定檔位於受檢 repo 內、路徑途中（包含任何 symlink 的目標）經過受檢 repo，或信任檢查失敗（見上方規則；檔案本身須為一般檔案、屬於使用者或 root、
 不可被群組／他人寫入）時，會提示並停用外部語言。home-manager 連到 `/nix/store` 的 root 擁有
 唯讀檔可通過。hook 的環境可能與執行 install 的 shell 不同。
 

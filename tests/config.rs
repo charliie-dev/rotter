@@ -276,12 +276,14 @@ fn a_repository_link_reached_through_an_alias_of_the_repository_turns_the_config
 
 #[test]
 fn a_directory_link_in_the_repository_anywhere_on_the_way_turns_the_config_off() {
-    let repo = repo(&[("a.lua2", "-- A.\nlocal a = 1\n")]);
+    // Canonical, so that no alias of the temporary directory (/var on macOS) adds links to the
+    // 35-link chain below.
+    let repo = fs::canonicalize(repo(&[("a.lua2", "-- A.\nlocal a = 1\n")])).unwrap();
     // The config is outside and trusted; each path reaches it through a link kept in the
     // repository that is not on the path itself, only on a link target.
-    let outside = temp("outside");
+    let outside = fs::canonicalize(temp("outside")).unwrap();
     write_config(&outside, LUA2);
-    let links = temp("links");
+    let links = fs::canonicalize(temp("links")).unwrap();
     // XDG_CONFIG_HOME is a link to the repository's link to the config home.
     symlink(&outside, repo.join("cfglink")).unwrap();
     symlink(repo.join("cfglink"), links.join("home")).unwrap();
@@ -289,9 +291,8 @@ fn a_directory_link_in_the_repository_anywhere_on_the_way_turns_the_config_off()
     symlink(outside.join("rotter"), repo.join("rotter-cfg")).unwrap();
     fs::create_dir(links.join("dir")).unwrap();
     symlink(repo.join("rotter-cfg"), links.join("dir/rotter")).unwrap();
-    // The same through 35 links, more than macOS resolves in one realpath (32). Relative
-    // targets inside the repository, so an alias such as /var on macOS is followed only on the
-    // first and last hop and the chain stays within the 40 links rotter follows.
+    // The same through 35 links, more than macOS resolves in one realpath (32) and within the
+    // 40 links rotter follows.
     fs::create_dir(links.join("chain")).unwrap();
     symlink(outside.join("rotter"), repo.join("c34")).unwrap();
     for hop in 1..34 {
@@ -311,6 +312,25 @@ fn a_directory_link_in_the_repository_anywhere_on_the_way_turns_the_config_off()
     for dir in [repo, outside, links] {
         fs::remove_dir_all(dir).unwrap();
     }
+}
+
+/// /System/Volumes/Data on macOS is a firmlink, not a symlink: no path comparison sees the
+/// repository through it, only the directory's identity.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_config_in_the_repository_named_through_a_firmlink_is_off() {
+    let repo = fs::canonicalize(repo(&[("a.lua2", "-- A.\nlocal a = 1\n")])).unwrap();
+    write_config(&repo.join(".config"), LUA2);
+    let data = Path::new("/System/Volumes/Data");
+    let xdg = data.join(repo.strip_prefix("/").unwrap()).join(".config");
+    let run = extract_cli(&repo, &[], &xdg_env(&xdg), &repo);
+    assert!(
+        run.stderr.contains("inside the repository"),
+        "{}",
+        run.stderr
+    );
+    assert_eq!(run.status("a.lua2"), "not_in_scope");
+    fs::remove_dir_all(repo).unwrap();
 }
 
 #[test]

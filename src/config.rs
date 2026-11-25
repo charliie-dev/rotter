@@ -209,16 +209,15 @@ pub fn load(repo: Option<&Path>, sources: &Sources) -> Result<Loaded, String> {
             )));
         }
     };
-    if let Some(repo) = repo {
-        let canonical = fs::canonicalize(repo).unwrap_or_else(|_| repo.to_owned());
-        if through_repository(&entered, &canonical) {
-            return Ok(Loaded::off(format!(
-                "config {} is inside the repository {} or reached through it; it is off for this \
-                 repository",
-                path.display(),
-                repo.display()
-            )));
-        }
+    if let Some(repo) = repo
+        && through_repository(&entered, repo)
+    {
+        return Ok(Loaded::off(format!(
+            "config {} is inside the repository {} or reached through it; it is off for this \
+             repository",
+            path.display(),
+            repo.display()
+        )));
     }
     let text = fs::read_to_string(&resolved)
         .map_err(|error| format!("cannot read {}: {error}", resolved.display()))?;
@@ -231,15 +230,19 @@ pub fn load(repo: Option<&Path>, sources: &Sources) -> Result<Loaded, String> {
     Ok(Loaded { config, note: None })
 }
 
-/// Whether a path was reached through `repo` (canonical): one of the directories
-/// [`resolve_trusted_entered`] entered on the way to it is `repo` or inside it. Whoever controls
-/// that directory chooses where the path leads, also through a link from outside or an alias.
-/// The directories hold no links, so canonicalizing them only settles letter case on a
-/// case-insensitive file system and cannot fail on a link chain.
+/// Whether a path was reached through `repo`: one of the directories [`resolve_trusted_entered`]
+/// entered on the way to it is `repo` itself, compared by `(st_dev, st_ino)` so that any
+/// spelling counts (a link from outside, a firmlink such as /System/Volumes/Data on macOS, a
+/// letter-case variant). A walk into the repository enters its root before anything inside it.
+/// Whoever controls that directory chooses where the path leads. A directory or `repo` that
+/// cannot be stat'ed counts as the repository.
 pub(crate) fn through_repository(entered: &[PathBuf], repo: &Path) -> bool {
-    entered
-        .iter()
-        .any(|dir| fs::canonicalize(dir).is_ok_and(|dir| dir.starts_with(repo)))
+    let identity = |path: &Path| fs::metadata(path).map(|meta| (meta.dev(), meta.ino()));
+    let repo = identity(repo);
+    entered.iter().any(|dir| match (identity(dir), &repo) {
+        (Ok(dir), Ok(repo)) => dir == *repo,
+        _ => true,
+    })
 }
 
 #[derive(Deserialize)]
