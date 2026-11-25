@@ -52,8 +52,13 @@ fn shown(name: &str) -> String {
 
 /// Last row that holds text of `node`; Rust doc comments end at column 0 of the next row.
 fn last_row(node: Node<'_>) -> usize {
-    let end = node.end_position();
-    if end.column == 0 && end.row > node.start_position().row {
+    last_row_of(node.start_position(), node.end_position())
+}
+
+/// [`last_row`] for a node spanning `start..end`: an end at column 0 of a later row belongs to
+/// the row before, and a node ending where it starts keeps its own row.
+fn last_row_of(start: Point, end: Point) -> usize {
+    if end.column == 0 && end.row > start.row {
         end.row - 1
     } else {
         end.row

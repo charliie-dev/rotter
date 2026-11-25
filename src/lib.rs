@@ -363,12 +363,23 @@ pub fn parse_with_deadline(
 ) -> Result<tree_sitter::Tree, ParseError> {
     // An overflowing deadline means none.
     let deadline = Instant::now().checked_add(limit);
-    let passed = || deadline.is_some_and(|deadline| Instant::now() >= deadline);
+    parse_until(grammar, source, || {
+        deadline.is_some_and(|deadline| Instant::now() >= deadline)
+    })
+}
+
+/// [`parse_with_stop`] cancelled with [`ParseError::Timeout`] once `passed` says the deadline
+/// has passed: before parsing, or when the parse stopped without a tree.
+fn parse_until(
+    grammar: &Grammar,
+    source: &str,
+    mut passed: impl FnMut() -> bool,
+) -> Result<tree_sitter::Tree, ParseError> {
     // Progress is only checked every 100 operations, so a small file could outrun a zero limit.
     if passed() {
         return Err(ParseError::Timeout);
     }
-    match parse_with_stop(grammar, source, passed) {
+    match parse_with_stop(grammar, source, &mut passed) {
         Err(ParseError::NoTree) if passed() => Err(ParseError::Timeout),
         result => result,
     }

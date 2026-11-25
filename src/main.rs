@@ -72,6 +72,19 @@ type LangArgs = Vec<(String, String)>;
 /// even when it looks like one (`-C --pretty` names a directory).
 const VALUE_OPTIONS: [&str; 3] = ["--base", "--lang", "-C"];
 
+/// A report larger than this (5 MiB) gets a note on stderr suggesting a pathspec.
+const LARGE_REPORT: usize = 5 << 20;
+
+/// The note for a report of `len` bytes, when it is larger than [`LARGE_REPORT`].
+fn size_note(len: usize) -> Option<String> {
+    (len > LARGE_REPORT).then(|| {
+        format!(
+            "report is {} MiB; consider limiting it with -- <pathspec>",
+            len >> 20
+        )
+    })
+}
+
 /// Indexes of extract's arguments in flag position: after `extract`, before the first `--` that
 /// is not an option's value, and not an option's value themselves.
 ///
@@ -439,11 +452,8 @@ fn extract_command(args: &[String], show: Show<'_>) -> ExitCode {
     match extract_with(&git, &dir, &options) {
         Ok(report) => {
             let text = show(&report.json, &|color| render::extract(&report.json, color));
-            if text.len() > 5 << 20 {
-                eprintln!(
-                    "rotter: report is {} MiB; consider limiting it with -- <pathspec>",
-                    text.len() >> 20
-                );
+            if let Some(note) = size_note(text.len()) {
+                eprintln!("rotter: {note}");
             }
             emit(&text, ExitCode::from(if report.complete { 0 } else { 1 }))
         }

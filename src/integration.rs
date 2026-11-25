@@ -24,6 +24,8 @@ const HOOK_RESERVE: u64 = 15;
 /// Most consecutive review requests per host and session; the next Stop that would ask is silent
 /// instead, and that silent Stop resets the count.
 const MAX_REQUESTS: u32 = 2;
+/// How long the install work-tree probe (`git rev-parse --show-toplevel`) may take.
+const WORK_TREE_LIMIT: Duration = Duration::from_secs(10);
 
 /// `'<exe>' hook <name> || true` with the host's canonical hook name: a missing or older binary
 /// can never exit 2 and so never forces continuations.
@@ -501,73 +503,74 @@ fn evaluate(
 /// `<state>/<hook>-count/<session>`, the host+session request count, opened under the resolved
 /// state directory without following links and locked with flock(2) (released when the
 /// descriptor closes, also if rotter dies). The count is updated in place on this descriptor,
-/// never renamed or unlinked, so the lock and the count share one inode. With `create`, missing
-/// directories are made 0700 one at a time below a trusted ancestor and a missing file is
-/// created; without, a missing one is None (nothing to reset).
-fn counter(
-    state: &Path,
-    host: &Host,
-    session: &str,
-    create: bool,
-) -> Result<Option<fs::File>, String> {
-    let name = format!("{}-count", host.hook);
-    let Some(dir) = state_dir(state, OsStr::new(&name), create)? else {
-        return Ok(None);
-    };
-    let path = dir.join(session);
+/// never renamed or unlinked, so the lock and the count share one inode. Missing directories are
+/// made 0700 one at a time below a trusted ancestor and a missing file is created.
+fn counter(state: &Path, host: &Host, session: &str) -> Result<fs::File, String> {
+    let dir = state_dir(state, &counter_dir(host))?;
+    lock_count(&dir.join(session), true)
+}
+
+/// [`counter`] when its directories and file already exist and pass the same checks; None
+/// otherwise (nothing to reset).
+fn existing_counter(state: &Path, host: &Host, session: &str) -> Option<fs::File> {
+    let dir = existing_state_dir(state, &counter_dir(host))?;
+    lock_count(&dir.join(session), false).ok()
+}
+
+fn counter_dir(host: &Host) -> std::ffi::OsString {
+    format!("{}-count", host.hook).into()
+}
+
+/// Opens the count file at `path` (created with `create`) without following a link, checks it
+/// is [`private_file`] and locks it.
+fn lock_count(path: &Path, create: bool) -> Result<fs::File, String> {
     let fail = |error: io::Error| format!("{}: {error}", path.display());
-    let file = match fs::OpenOptions::new()
+    let file = fs::OpenOptions::new()
         .read(true)
         .write(true)
         .create(create)
         .mode(0o600)
         .custom_flags(O_NOFOLLOW)
-        .open(&path)
-    {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound && !create => return Ok(None),
-        Err(error) => return Err(fail(error)),
-    };
-    let meta = file.metadata().map_err(fail)?;
-    if !meta.is_file() || meta.uid() != user() || meta.mode() & 0o022 != 0 {
+        .open(path)
+        .map_err(fail)?;
+    if !private_file(Meta::of(&file.metadata().map_err(fail)?), user()) {
         return Err(format!(
             "{} must be a regular file owned by you that others cannot write",
             path.display()
         ));
     }
     file.lock().map_err(fail)?;
-    Ok(Some(file))
+    Ok(file)
 }
 
 /// `<state>/<name>`: the state directory resolved through [`resolve_trusted`] and `<name>` a
-/// directory owned by the user. With `create`, missing directories are made 0700 one at a time
-/// below a trusted ancestor; without, a missing one is None.
-fn state_dir(state: &Path, name: &OsStr, create: bool) -> Result<Option<PathBuf>, String> {
-    if create {
-        crate::install::create_base(state)?;
-    }
+/// directory owned by the user; missing directories are made 0700 one at a time below a trusted
+/// ancestor.
+fn state_dir(state: &Path, name: &OsStr) -> Result<PathBuf, String> {
+    crate::install::create_base(state)?;
     let state = match resolve_trusted(state, user(), &lstat) {
         Ok(resolved) => resolved,
-        Err(Untrusted::Missing) if !create => return Ok(None),
         Err(Untrusted::Missing) => return Err(format!("{} vanished", state.display())),
         Err(Untrusted::Refused(why)) => return Err(why),
     };
     let dir = state.join(name);
     let fail = |error: io::Error| format!("{}: {error}", dir.display());
-    match lstat(&dir) {
-        Ok(meta) => owned_dir(&dir, meta, user())?,
-        Err(error) if error.kind() == io::ErrorKind::NotFound && create => {
-            match fs::DirBuilder::new().mode(0o700).create(&dir) {
-                Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-                Err(error) => return Err(fail(error)),
-            }
-            owned_dir(&dir, lstat(&dir).map_err(fail)?, user())?;
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+    // mkdir first: whatever already has the name (a directory, a link, a file) is then checked
+    // with lstat, and an error lstat would hit (EACCES, ELOOP, …) mkdir hits too.
+    match fs::DirBuilder::new().mode(0o700).create(&dir) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
         Err(error) => return Err(fail(error)),
     }
-    Ok(Some(dir))
+    owned_dir(&dir, lstat(&dir).map_err(fail)?, user())?;
+    Ok(dir)
+}
+
+/// [`state_dir`] when it already exists and passes the same checks; None otherwise.
+fn existing_state_dir(state: &Path, name: &OsStr) -> Option<PathBuf> {
+    let dir = resolve_trusted(state, user(), &lstat).ok()?.join(name);
+    owned_dir(&dir, lstat(&dir).ok()?, user()).ok()?;
+    Some(dir)
 }
 
 /// `path` (`<state>/<name>/<file>`) split for [`state_dir`].
@@ -577,37 +580,24 @@ fn state_parts(path: &Path) -> Option<(&Path, &OsStr, &OsStr)> {
 }
 
 /// Opens `<state>/<name>/<file>` without following links or blocking (a FIFO is refused, not
-/// waited on); only a regular file owned by the user that others cannot write is returned. With
-/// `create` the directories and file are created.
-fn state_file(path: &Path, create: bool) -> Result<Option<fs::File>, String> {
-    let Some((state, name, file)) = state_parts(path) else {
-        return Err(format!("{}: not a state file path", path.display()));
+/// waited on); only a [`private_file`] is returned. With `create` the directories and file are
+/// created. None when it cannot be opened: state is only ever a hint.
+fn state_file(path: &Path, create: bool) -> Option<fs::File> {
+    let (state, name, file) = state_parts(path)?;
+    let dir = if create {
+        state_dir(state, name).ok()?
+    } else {
+        existing_state_dir(state, name)?
     };
-    let Some(dir) = state_dir(state, name, create)? else {
-        return Ok(None);
-    };
-    let path = dir.join(file);
-    let fail = |error: io::Error| format!("{}: {error}", path.display());
-    let file = match fs::OpenOptions::new()
+    let file = fs::OpenOptions::new()
         .read(true)
         .write(create)
         .create(create)
         .mode(0o600)
         .custom_flags(OPEN_FLAGS)
-        .open(&path)
-    {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound && !create => return Ok(None),
-        Err(error) => return Err(fail(error)),
-    };
-    let meta = file.metadata().map_err(fail)?;
-    if !meta.is_file() || meta.uid() != user() || meta.mode() & 0o022 != 0 {
-        return Err(format!(
-            "{} must be a regular file owned by you that others cannot write",
-            path.display()
-        ));
-    }
-    Ok(Some(file))
+        .open(dir.join(file))
+        .ok()?;
+    private_file(Meta::of(&file.metadata().ok()?), user()).then_some(file)
 }
 
 /// The count in a locked counter file: empty is 0, else digits and a newline; None when it
@@ -638,9 +628,7 @@ fn write_count(file: &fs::File, count: u32) -> io::Result<()> {
 /// cap is reached, which resets the count, or when the count cannot be read or written; an error
 /// when the counter cannot be opened (e.g. an untrusted state directory).
 fn allow_request(state: &Path, host: &Host, session: &str) -> Result<bool, String> {
-    let Some(mut file) = counter(state, host, session, true)? else {
-        return Ok(false);
-    };
+    let mut file = counter(state, host, session)?;
     let Some(count) = read_count(&mut file) else {
         return Ok(false);
     };
@@ -653,7 +641,7 @@ fn allow_request(state: &Path, host: &Host, session: &str) -> Result<bool, Strin
 
 /// A Stop that asks nothing ends the host's chain: the count goes back to 0.
 fn reset_requests(state: &Path, host: &Host, session: &str) {
-    if let Ok(Some(file)) = counter(state, host, session, false) {
+    if let Some(file) = existing_counter(state, host, session) {
         let _ = write_count(&file, 0);
     }
 }
@@ -703,16 +691,13 @@ fn fingerprint(content: &str) -> String {
 
 fn seen(path: &Path) -> Option<String> {
     let mut text = String::new();
-    state_file(path, false)
-        .ok()??
-        .read_to_string(&mut text)
-        .ok()?;
+    state_file(path, false)?.read_to_string(&mut text).ok()?;
     Some(text.trim().to_owned())
 }
 
 /// Failing to record state only means the same content may be announced again.
 fn record(path: &Path, fingerprint: &str) {
-    if let Ok(Some(file)) = state_file(path, true) {
+    if let Some(file) = state_file(path, true) {
         let _ = file
             .set_len(0)
             .and_then(|()| file.write_all_at(format!("{fingerprint}\n").as_bytes(), 0));
@@ -775,54 +760,56 @@ struct Strict(Value);
 
 impl<'de> Deserialize<'de> for Strict {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserializer.deserialize_any(StrictVisitor).map(Strict)
+        deserializer.deserialize_any(StrictVisitor)
     }
 }
 
+/// Builds the [`Strict`] itself, not a bare Value: Strict has no Default, so no visitor method can
+/// be replaced by one that returns a default value.
 struct StrictVisitor;
 
 impl<'de> Visitor<'de> for StrictVisitor {
-    type Value = Value;
+    type Value = Strict;
 
     fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("a JSON value")
     }
 
-    fn visit_bool<E>(self, value: bool) -> Result<Value, E> {
-        Ok(value.into())
+    fn visit_bool<E>(self, value: bool) -> Result<Strict, E> {
+        Ok(Strict(value.into()))
     }
 
-    fn visit_i64<E>(self, value: i64) -> Result<Value, E> {
-        Ok(value.into())
+    fn visit_i64<E>(self, value: i64) -> Result<Strict, E> {
+        Ok(Strict(value.into()))
     }
 
-    fn visit_u64<E>(self, value: u64) -> Result<Value, E> {
-        Ok(value.into())
+    fn visit_u64<E>(self, value: u64) -> Result<Strict, E> {
+        Ok(Strict(value.into()))
     }
 
-    fn visit_f64<E: de::Error>(self, value: f64) -> Result<Value, E> {
+    fn visit_f64<E: de::Error>(self, value: f64) -> Result<Strict, E> {
         serde_json::Number::from_f64(value)
-            .map(Value::Number)
+            .map(|number| Strict(Value::Number(number)))
             .ok_or_else(|| E::custom("not a JSON number"))
     }
 
-    fn visit_str<E>(self, value: &str) -> Result<Value, E> {
-        Ok(value.into())
+    fn visit_str<E>(self, value: &str) -> Result<Strict, E> {
+        Ok(Strict(value.into()))
     }
 
-    fn visit_unit<E>(self) -> Result<Value, E> {
-        Ok(Value::Null)
+    fn visit_unit<E>(self) -> Result<Strict, E> {
+        Ok(Strict(Value::Null))
     }
 
-    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Value, A::Error> {
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Strict, A::Error> {
         let mut items = Vec::new();
         while let Some(Strict(item)) = seq.next_element()? {
             items.push(item);
         }
-        Ok(Value::Array(items))
+        Ok(Strict(Value::Array(items)))
     }
 
-    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Value, A::Error> {
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Strict, A::Error> {
         let mut object = serde_json::Map::new();
         while let Some(key) = map.next_key::<String>()? {
             if object.contains_key(&key) {
@@ -831,7 +818,7 @@ impl<'de> Visitor<'de> for StrictVisitor {
             let Strict(value) = map.next_value()?;
             object.insert(key, value);
         }
-        Ok(Value::Object(object))
+        Ok(Strict(Value::Object(object)))
     }
 }
 
@@ -908,7 +895,9 @@ fn faithful(path: &Path, value: &Value, text: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Removes a stale regular file at `path`; any other type is an error and is left alone.
+/// Removes a stale regular file at `path`; any other type is an error and is left alone. When
+/// lstat fails (missing, or ENAMETOOLONG, ELOOP, EIO) there is nothing to remove: the caller
+/// creates `path` next, which fails with the same error.
 fn remove_stale(path: &Path) -> Result<(), String> {
     match fs::symlink_metadata(path) {
         Ok(meta) if meta.is_file() => fs::remove_file(path)
@@ -917,8 +906,7 @@ fn remove_stale(path: &Path) -> Result<(), String> {
             "{} exists and is not a regular file; remove it yourself",
             path.display()
         )),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(format!("{}: {error}", path.display())),
+        Err(_) => Ok(()),
     }
 }
 
@@ -1093,6 +1081,11 @@ fn our_entries<'a>(host: &Host, settings: &'a Value, exe: &str) -> Vec<(Ours, &'
         .collect()
 }
 
+/// A regular file owned by the user (root is not accepted) that group and others cannot write.
+fn private_file(meta: Meta, user: u32) -> bool {
+    meta.kind == Kind::File && meta.uid == user && meta.mode & 0o022 == 0
+}
+
 /// A directory owned by the user (root is not accepted) that group and others cannot write.
 fn owned_dir(path: &Path, meta: Meta, user: u32) -> Result<(), String> {
     if meta.kind == Kind::Dir && meta.uid == user && meta.mode & 0o022 == 0 {
@@ -1158,7 +1151,7 @@ fn outside_work_tree(host: &Host, dir: &Path, sources: &Sources) -> Result<(), S
     }
     let scratch = Scratch::new(&sources.temp).map_err(refuse)?;
     let git = Git::new(&walk, scratch, sources, true).map_err(refuse)?;
-    match git.work_tree(dir).map_err(refuse)? {
+    match git.work_tree(dir, WORK_TREE_LIMIT).map_err(refuse)? {
         None => Ok(()),
         Some(top) => Err(format!(
             "refusing to install into {}: it is inside the git work tree {}, where a checkout or \
@@ -1416,13 +1409,10 @@ fn shim_installed(host: &Host, path: &Path) -> Result<Option<Shim>, Refusal> {
             path.display()
         )));
     }
-    let mut text = String::new();
-    match file.read_to_string(&mut text) {
-        // Not UTF-8 is not rotter's either.
-        Ok(_) => {}
-        Err(error) if error.kind() == io::ErrorKind::InvalidData => {}
-        Err(error) => return Err(fail(error).into()),
-    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).map_err(fail)?;
+    // Not UTF-8 is not rotter's either: no render matches an empty text.
+    let text = String::from_utf8(bytes).unwrap_or_default();
     templates
         .iter()
         .enumerate()

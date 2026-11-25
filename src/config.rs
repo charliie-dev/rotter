@@ -241,9 +241,10 @@ fn link_hops(path: &Path) -> Vec<PathBuf> {
         let Ok(target) = fs::read_link(last) else {
             break;
         };
+        // A relative target is relative to the link's directory; join keeps an absolute one.
         let next = match last.parent() {
-            Some(parent) if target.is_relative() => parent.join(target),
-            _ => target,
+            Some(parent) => parent.join(target),
+            None => target,
         };
         hops.push(next);
     }
@@ -611,22 +612,28 @@ pub(crate) struct Meta {
     pub mode: u32,
 }
 
+impl Meta {
+    /// The trust checks' view of metadata in hand: from `lstat`, or from an open descriptor.
+    pub(crate) fn of(meta: &fs::Metadata) -> Self {
+        let kind = meta.file_type();
+        Meta {
+            kind: if kind.is_symlink() {
+                Kind::Symlink
+            } else if kind.is_dir() {
+                Kind::Dir
+            } else if kind.is_file() {
+                Kind::File
+            } else {
+                Kind::Other
+            },
+            uid: meta.uid(),
+            mode: meta.mode(),
+        }
+    }
+}
+
 pub(crate) fn lstat(path: &Path) -> io::Result<Meta> {
-    let meta = fs::symlink_metadata(path)?;
-    let kind = meta.file_type();
-    Ok(Meta {
-        kind: if kind.is_symlink() {
-            Kind::Symlink
-        } else if kind.is_dir() {
-            Kind::Dir
-        } else if kind.is_file() {
-            Kind::File
-        } else {
-            Kind::Other
-        },
-        uid: meta.uid(),
-        mode: meta.mode(),
-    })
+    fs::symlink_metadata(path).map(|meta| Meta::of(&meta))
 }
 
 /// `struct passwd` from `<pwd.h>`; only `dir` is read, the other fields fix the layout.
@@ -669,36 +676,60 @@ pub(crate) fn user() -> u32 {
 /// The effective user's home from the password database (`getpwuid_r`), never `$HOME`; None
 /// when there is no entry or `pw_dir` is not absolute.
 fn passwd_home() -> Option<PathBuf> {
+    home_from(getpwuid_dir)
+}
+
+const ERANGE: i32 = 34;
+
+/// The home from `lookup` (a [`getpwuid_dir`]), asked with a 16 KiB buffer that doubles while the
+/// entry does not fit (ERANGE), up to 1 MiB; only an absolute directory counts. A fixed number
+/// of tries, so no change to the sizes can make it loop forever.
+fn home_from(mut lookup: impl FnMut(usize) -> Result<Option<Vec<u8>>, i32>) -> Option<PathBuf> {
     use std::os::unix::ffi::OsStrExt;
-    const ERANGE: i32 = 34;
-    let mut size = 1 << 14;
-    loop {
-        let mut buffer = vec![0 as std::ffi::c_char; size];
-        // SAFETY: all-null pointers and zero integers are a valid `struct passwd`.
-        let mut entry: Passwd = unsafe { std::mem::zeroed() };
-        let mut result: *mut Passwd = std::ptr::null_mut();
-        // SAFETY: the buffer and its length match, and the pointers live across the call.
-        let code = unsafe {
-            getpwuid_r(
-                user(),
-                &mut entry,
-                buffer.as_mut_ptr(),
-                buffer.len(),
-                &mut result,
-            )
-        };
-        if code == ERANGE && size < 1 << 20 {
-            size *= 2;
-            continue;
+    for shift in 14..=20 {
+        match lookup(1 << shift) {
+            Err(ERANGE) => {}
+            Err(_) => return None,
+            Ok(dir) => {
+                let dir = PathBuf::from(OsStr::from_bytes(&dir?));
+                return dir.is_absolute().then_some(dir);
+            }
         }
-        if code != 0 || result.is_null() || entry.dir.is_null() {
-            return None;
-        }
-        // SAFETY: on success pw_dir is a NUL-terminated string inside `buffer`.
-        let dir = unsafe { std::ffi::CStr::from_ptr(entry.dir) };
-        let dir = PathBuf::from(OsStr::from_bytes(dir.to_bytes()));
-        return dir.is_absolute().then_some(dir);
     }
+    None
+}
+
+/// One `getpwuid_r` call for the effective user with a `size`-byte buffer: its error code, or
+/// the entry's `pw_dir` (None without an entry or a directory).
+fn getpwuid_dir(size: usize) -> Result<Option<Vec<u8>>, i32> {
+    let mut buffer = vec![0 as std::ffi::c_char; size];
+    // SAFETY: all-null pointers and zero integers are a valid `struct passwd`.
+    let mut entry: Passwd = unsafe { std::mem::zeroed() };
+    let mut result: *mut Passwd = std::ptr::null_mut();
+    // SAFETY: the buffer and its length match, and the pointers live across the call.
+    let code = unsafe {
+        getpwuid_r(
+            user(),
+            &mut entry,
+            buffer.as_mut_ptr(),
+            buffer.len(),
+            &mut result,
+        )
+    };
+    match code {
+        0 => {}
+        code => return Err(code),
+    }
+    // Without an entry `result` stays null, whatever the call left in `entry`.
+    if result.is_null() {
+        return Ok(None);
+    }
+    Ok(std::ptr::NonNull::new(entry.dir).map(|dir| {
+        // SAFETY: with an entry, a non-null pw_dir is a NUL-terminated string inside `buffer`.
+        unsafe { std::ffi::CStr::from_ptr(dir.as_ptr()) }
+            .to_bytes()
+            .to_vec()
+    }))
 }
 
 #[derive(Debug, Eq, PartialEq)]

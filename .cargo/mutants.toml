@@ -3,15 +3,6 @@
 # moves, the name no longer matches, the mutant is tested again, and a survivor must be
 # re-examined rather than staying excluded by accident.
 exclude_re = [
-  # Path::join with an absolute target returns that target, exactly like the other branch.
-  '^src/config\.rs:245:29: replace match guard target\.is_relative\(\) with true in link_hops$',
   # O_NOFOLLOW and O_NONBLOCK share no bits, so `^` equals `|`.
   '^src/grammar\.rs:335:47: replace \| with \^$',
-  # NotFound handling in `counter`: with `create` the file is opened with O_CREAT, so NotFound
-  # cannot happen; without it, the one caller (`reset_requests`) does the same nothing for
-  # Ok(None) and for an error.
-  '^src/integration\.rs:528:23: replace match guard error\.kind\(\) == io::ErrorKind::NotFound && !create with false in counter$',
-  '^src/integration\.rs:528:36: replace == with != in counter$',
-  '^src/integration\.rs:528:63: replace && with \|\| in counter$',
-  '^src/integration\.rs:528:66: delete ! in counter$',
 ]

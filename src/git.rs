@@ -1,5 +1,5 @@
-use crate::config::{Kind, Sources, Untrusted, lstat, resolve_trusted, trusted_file, user};
-use crate::grammar::{create_private, open_regular};
+use crate::config::{Kind, Meta, Sources, Untrusted, lstat, resolve_trusted, trusted_file, user};
+use crate::grammar::{create_private, open_regular, trusted_input};
 use crate::json::Json;
 use crate::{
     Change, Detected, Grammar, Languages, ParseError, error_lines, full_units, parse_with_deadline,
@@ -236,11 +236,7 @@ fn candidate(dir: &Path, roots: &[Identity]) -> Result<Option<PathBuf>, String> 
         Ok(meta) => meta,
         Err(error) => return skip(&error.to_string()),
     };
-    if !meta.is_file()
-        || (meta.uid() != user() && meta.uid() != 0)
-        || meta.mode() & 0o022 != 0
-        || meta.mode() & 0o111 == 0
-    {
+    if !trusted_input(Meta::of(&meta), user()) || meta.mode() & 0o111 == 0 {
         return skip("not an executable owned by you or root that others cannot write");
     }
     let mut header = Vec::new();
@@ -426,26 +422,31 @@ impl Git {
         command
     }
 
-    /// `rev-parse --show-toplevel` for `dir` with a time limit, for the install work-tree probe:
+    /// `rev-parse --show-toplevel` for `dir` within `limit`, for the install work-tree probe:
     /// Ok(None) only for a clean "not a git repository", Ok(Some(top)) inside a work tree, and
     /// an error for anything else (a failure, a timeout, non-UTF-8 output).
-    pub(crate) fn work_tree(&self, dir: &Path) -> Result<Option<PathBuf>, String> {
+    pub(crate) fn work_tree(&self, dir: &Path, limit: Duration) -> Result<Option<PathBuf>, String> {
         self.class()?;
         let args = ["rev-parse", "--show-toplevel"].map(OsStr::new);
         let mut child = self
             .prepare(dir, &args, false, Private::Nothing, &[])
             .spawn()
             .map_err(|error| format!("cannot run git: {error}"))?;
-        let started = Instant::now();
-        while child
-            .try_wait()
-            .map_err(|error| format!("git failed: {error}"))?
-            .is_none()
-        {
-            if started.elapsed() > Duration::from_secs(10) {
+        let deadline = Instant::now() + limit;
+        // The deadline is checked before each poll, so a zero limit always times out, however
+        // fast git is.
+        loop {
+            if Instant::now().checked_duration_since(deadline).is_some() {
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err("git rev-parse --show-toplevel timed out".to_owned());
+            }
+            if child
+                .try_wait()
+                .map_err(|error| format!("git failed: {error}"))?
+                .is_some()
+            {
+                break;
             }
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -675,15 +676,24 @@ fn guard_args(keys: &[u8]) -> Result<Vec<String>, String> {
 /// The disk path and before blob of a working-tree `M` entry that may differ from that blob only
 /// in stat data (git no longer checks: diff.autoRefreshIndex=false).
 fn stat_candidate(entry: &Entry) -> Option<(&[u8], &str)> {
+    // Only a modification: for a rename git reads the file itself (detection needs its content),
+    // so it reports the file's real blob, never the zero id of an unread one.
+    if entry.status != "M" {
+        return None;
+    }
     let (Some((_, old_mode, old_oid)), Some((path, new_mode, new_oid))) = (&entry.old, &entry.new)
     else {
         return None;
     };
-    (entry.status == "M"
-        && is_zero(new_oid)
-        && old_mode == new_mode
-        && matches!(old_mode.as_str(), "100644" | "100755"))
-    .then_some((path.as_slice(), old_oid.as_str()))
+    // A blob git already hashed differs from the before blob: a real change.
+    if !is_zero(new_oid) {
+        return None;
+    }
+    // A mode change is a change too.
+    if old_mode != new_mode {
+        return None;
+    }
+    matches!(old_mode.as_str(), "100644" | "100755").then_some((path.as_slice(), old_oid.as_str()))
 }
 
 /// Paths per `git hash-object` call, well below the argument-length limit.
