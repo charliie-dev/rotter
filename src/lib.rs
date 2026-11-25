@@ -159,6 +159,25 @@ pub enum Detected {
     NeedsContent,
 }
 
+/// The last component of a shebang word: `/bin/bash` names `bash`.
+fn basename(word: &str) -> &str {
+    word.rsplit('/').next().unwrap_or(word)
+}
+
+/// The command `env` runs: the first word that is neither an option nor a NAME=VALUE assignment.
+/// The operand of `-u`/`--unset` and `-C`/`--chdir` goes with its option; words after `-S` are
+/// read like any other.
+fn env_command<'a>(words: &mut impl Iterator<Item = &'a str>) -> Option<&'a str> {
+    while let Some(word) = words.next() {
+        if matches!(word, "-u" | "--unset" | "-C" | "--chdir") {
+            words.next();
+        } else if !word.starts_with('-') && !word.contains('=') {
+            return Some(word);
+        }
+    }
+    None
+}
+
 impl Languages {
     fn supported(&self, language: Language, dialect: &str) -> Detected {
         Detected::Supported(self.builtin(language), dialect.to_owned())
@@ -199,15 +218,22 @@ impl Languages {
             };
         };
         let mut words = command.split_whitespace();
-        let mut interpreter = words.next().unwrap_or_default().rsplit('/').next();
+        let mut interpreter = words.next().map(basename);
         if interpreter == Some("env") {
-            interpreter = words.find(|word| !word.starts_with('-') && !word.contains('='));
+            interpreter = env_command(&mut words).map(basename);
+        }
+        if interpreter == Some("busybox") {
+            // BusyBox runs the applet its first argument names; only its shells are shell scripts.
+            return match words.next().map(basename) {
+                Some("sh" | "ash") => self.supported(Language::Bash, "ash-parsed-as-bash"),
+                _ => self.detect_external(path),
+            };
         }
         match interpreter.unwrap_or_default() {
             "bash" => self.supported(Language::Bash, "bash"),
             "sh" => self.supported(Language::Bash, "sh-parsed-as-bash"),
             "dash" => self.supported(Language::Bash, "dash-parsed-as-bash"),
-            "ash" | "busybox" => self.supported(Language::Bash, "ash-parsed-as-bash"),
+            "ash" => self.supported(Language::Bash, "ash-parsed-as-bash"),
             dialect @ ("zsh" | "ksh" | "mksh") => Detected::UnsupportedDialect(dialect.to_owned()),
             _ => self.detect_external(path),
         }
@@ -425,9 +451,40 @@ mod tests {
         assert_eq!(content("x", "#!/bin/dash"), "bash/dash-parsed-as-bash");
         assert_eq!(content("x", "#!/bin/ash"), "bash/ash-parsed-as-bash");
         assert_eq!(content("x", "#!/bin/busybox sh"), "bash/ash-parsed-as-bash");
-        // env's options and assignments are not the interpreter.
+        assert_eq!(
+            content("x", "#!/bin/busybox ash"),
+            "bash/ash-parsed-as-bash"
+        );
+        // BusyBox's other applets are not shells, and BusyBox alone runs nothing.
+        assert_eq!(
+            content("x", "#!/usr/bin/env -S busybox awk -f"),
+            "not in scope"
+        );
+        assert_eq!(content("x", "#!/bin/busybox"), "not in scope");
+        // env's options, their operands and assignments are not the interpreter.
         assert_eq!(content("x", "#!/usr/bin/env -S bash -e"), "bash/bash");
         assert_eq!(content("x", "#!/usr/bin/env FOO=1 bash"), "bash/bash");
+        assert_eq!(
+            content("x", "#!/usr/bin/env -S -u BASH_ENV bash"),
+            "bash/bash"
+        );
+        assert_eq!(
+            content("x", "#!/usr/bin/env --unset BASH_ENV bash"),
+            "bash/bash"
+        );
+        assert_eq!(content("x", "#!/usr/bin/env -C /tmp bash"), "bash/bash");
+        assert_eq!(
+            content("x", "#!/usr/bin/env --chdir /tmp bash"),
+            "bash/bash"
+        );
+        assert_eq!(
+            content("x", "#!/usr/bin/env -u FOO sh"),
+            "bash/sh-parsed-as-bash"
+        );
+        assert_eq!(content("x", "#!/usr/bin/env -u"), "not in scope");
+        // A path names its last component.
+        assert_eq!(content("x", "#!/usr/bin/env /bin/bash"), "bash/bash");
+        assert_eq!(content("x", "#!/usr/bin/env -S /bin/bash -eu"), "bash/bash");
     }
 
     #[test]
