@@ -74,16 +74,22 @@ const VALUE_OPTIONS: [&str; 3] = ["--base", "--lang", "-C"];
 
 /// Indexes of extract's arguments in flag position: after `extract`, before the first `--` that
 /// is not an option's value, and not an option's value themselves.
+///
+/// One pass over `args` with no index arithmetic, so no change to it can loop forever (a mutant
+/// that kept the index in place once filled a CI runner's memory).
 fn flag_positions(args: &[String]) -> Vec<usize> {
     let mut positions = Vec::new();
-    let mut index = 1;
-    while index < args.len() && args[index] != "--" {
+    let mut value_next = false;
+    for (index, arg) in args.iter().enumerate().skip(1) {
+        if value_next {
+            value_next = false;
+            continue;
+        }
+        if arg == "--" {
+            break;
+        }
         positions.push(index);
-        index += if VALUE_OPTIONS.contains(&args[index].as_str()) {
-            2
-        } else {
-            1
-        };
+        value_next = VALUE_OPTIONS.contains(&arg.as_str());
     }
     positions
 }
