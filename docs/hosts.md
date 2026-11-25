@@ -420,7 +420,7 @@ commit `fd889a2741891ee45116cb6131052d7fad220886`
 | 事件 | `session.idle`，`properties` 為 `{sessionID}`，由 `SessionStatus.set` 在狀態變成 idle 時發出；plugin 的 `event` hook 收到 `{event: {id, type, properties}}`，以 `void hook["event"]?.(...)` 呼叫，**不被等待**（因此 handler 絕不 reject，否則成為 OpenCode 的 unhandled rejection） |
 | session／cwd | `event.properties.sessionID`；cwd 為 plugin 輸入的 `directory`（該 instance 的目錄；事件只送給 `location.directory` 相同的 instance） |
 | 子 session | 以 `client.session.get({path:{id}})` 取得 session，`parentID` 存在（subagent）或取不到時不做事 |
-| 續跑判斷 | 沒有續跑旗標：只靠 rotter 的上限；注入的提示是新的使用者訊息，shim 不把任何使用者訊息當成歸零的訊號 |
+| 續跑判斷 | 沒有續跑旗標：只靠 rotter 的上限；注入的提示是新的使用者訊息，shim 不把任何使用者訊息當成歸零的訊號。取消（`SessionProcessor` 中斷時把 assistant 訊息的 `error` 設為 `MessageAbortedError`）與失敗的回合同樣以 `session.idle` 結束，所以 shim 以 `client.session.messages({path:{id}})` 讀最後一則訊息，只有它是 assistant、沒有 `error`、有 `time.completed` 時才詢問 rotter；讀取失敗或其他情況都不做事 |
 | 要求續跑 | `client.session.promptAsync({path:{id}, body:{parts:[{type:"text", text}]}})`（`POST /session/{id}/prompt_async`，立即返回），在「同時只跑一次」旗標放開之後才呼叫，所以注入的那一輪結束時的 `session.idle` 照常交給 rotter 計數；失敗被吞掉。這是使用者看得到的新訊息，內容是 rotter 的 `continue`：固定文字、數量、cwd（絕對路徑、無控制字元）與 shell 引用過的 binary 路徑，沒有報告內容或檔名 |
 | 提示管道 | 預設 stderr（shim 忽略；沒有使用 `client.app.log`） |
 | timeout | shim 內的 timeout；OpenCode 不等待 handler，不設 120 秒上限 |
@@ -429,7 +429,8 @@ commit `fd889a2741891ee45116cb6131052d7fad220886`
 | env-injectable 處理 | 是（shim 只傳 PATH 與 LANG，rotter 端的 HOME 取自密碼資料庫） |
 
 測試（Bun 1.4.4）另外驗證：模組只有一個函式 export；`session.get` 丟出例外時不執行 rotter；
-子 session 不執行 rotter；只有 rotter 要求審查時才呼叫 `promptAsync`（錯誤路徑全部靜默）；
+子 session 不執行 rotter；最後一則訊息是取消、失敗、尚未完成的 assistant 訊息或使用者訊息、沒有
+訊息，或 `session.messages` 丟出例外時，都不執行 rotter；只有 rotter 要求審查時才呼叫 `promptAsync`（錯誤路徑全部靜默）；
 `promptAsync` reject 時被吞掉；stub `promptAsync` 在返回之前就先發出新的使用者訊息事件與下一個
 `session.idle` 時，第二個 idle 仍會詢問 rotter（旗標沒有被注入的那一輪佔住，改成佔住時此案例
 失敗），stub 模擬 rotter 的上限時，第三個 idle 由 rotter 靜默而結束這串（共 3 個 idle、3 次 rotter、2 次 `promptAsync`）。
@@ -440,7 +441,11 @@ commit `fd889a2741891ee45116cb6131052d7fad220886`
 `packages/core/src/global.ts`（`xdg-basedir`、`Global.make`）、`packages/opencode/src/plugin/index.ts`
 （`PluginInput`、`getLegacyPlugins`、`void hook["event"]`）、`src/plugin/shared.ts`（`readV1Plugin`）、
 `src/session/status.ts`（`Event.Idle`）、`packages/plugin/src/index.ts`（`Hooks.event`）、
-`packages/sdk/js/src/gen/sdk.gen.ts`（`Session.get`、`promptAsync`）、
+`packages/sdk/js/src/gen/sdk.gen.ts`（`Session.get`、`promptAsync`、`messages`）、
 `packages/sdk/js/src/gen/types.gen.ts`（`Session.parentID`、`EventSessionIdle`、
-`SessionPromptAsyncData`）、`packages/opencode/script/build.ts`（`autoloadDotenv`）、根目錄
+`SessionPromptAsyncData`、`SessionMessagesResponses`、`AssistantMessage`）、
+`packages/opencode/script/build.ts`（`autoloadDotenv`）、根目錄
 `package.json`、`packages/web/src/content/docs/plugins.mdx`、`config.mdx`（`OPENCODE_CONFIG_DIR`）。
+取消與失敗的判斷（2026-11-26 查閱同一 commit）：`packages/opencode/src/session/processor.ts`
+（`Effect.onInterrupt` 呼叫 `halt(AbortError)` 設定 `error` 並把狀態設為 idle，`cleanup` 設定
+`time.completed`）、`src/session/message-v2.ts`（`fromError` 的 `AbortedError`）。

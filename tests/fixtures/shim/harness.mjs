@@ -61,6 +61,23 @@ if (host === "pi") {
         if (scenario === "throwing") throw new Error("host API failure");
         return { data: path.id === "child" ? { id: path.id, parentID: "parent" } : { id: path.id } };
       },
+      // The turn's messages: a user message, then the scenario's last message.
+      async messages() {
+        if (scenario === "messagesthrowing") throw new Error("host API failure");
+        const done = { created: 1, completed: 2 };
+        const last = {
+          cancelled: {
+            role: "assistant",
+            time: done,
+            error: { name: "MessageAbortedError", data: { message: "Aborted" } },
+          },
+          errored: { role: "assistant", time: done, error: { name: "APIError", data: { message: "x" } } },
+          running: { role: "assistant", time: { created: 1 } },
+          usertail: { role: "user", time: { created: 1 } },
+        }[scenario] ?? { role: "assistant", time: done };
+        const user = { info: { role: "user", time: { created: 0 } }, parts: [] };
+        return { data: scenario === "nomessages" ? [] : [user, { info: last, parts: [] }] };
+      },
       async promptAsync({ path, body }) {
         const [part, ...extra] = body.parts;
         prompts.push(part.type === "text" && extra.length === 0 ? part.text : { bad: body });

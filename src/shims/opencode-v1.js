@@ -134,6 +134,13 @@ export const RotterReview = async (input) => {
           const found = await client.session.get({ path: { id } });
           const info = found?.data;
           if (info === null || typeof info !== "object" || info.parentID != null) return;
+          // A cancelled or failed turn ends in session.idle too. Ask only when the last message
+          // is an assistant message that completed without an error.
+          const listed = await client.session.messages({ path: { id } });
+          const messages = listed?.data;
+          const last = Array.isArray(messages) ? messages[messages.length - 1]?.info : null;
+          if (last === null || typeof last !== "object" || last.role !== "assistant") return;
+          if (last.error != null || typeof last.time?.completed !== "number") return;
           const text = await review(id, directory);
           if (text === null) return;
           const parts = [{ type: "text", text }];

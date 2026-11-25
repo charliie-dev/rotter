@@ -484,6 +484,33 @@ fn opencode_re_prompts_are_capped_across_the_turns_they_start() {
     }
 }
 
+/// OpenCode sends `session.idle` also after a cancelled or failed turn: the shim asks rotter only
+/// when the last message is an assistant message that completed without an error.
+#[test]
+fn opencode_asks_only_after_a_turn_that_completed() {
+    for engine in engines("opencode") {
+        for scenario in [
+            "cancelled",
+            "errored",
+            "running",
+            "usertail",
+            "nomessages",
+            "messagesthrowing",
+        ] {
+            let run = run("opencode", "rotter-review.js", engine, "reply", scenario);
+            let [(answer, _)] = run.answers.as_slice() else {
+                panic!("{engine} {scenario}: {:?}", run.answers);
+            };
+            assert_eq!(answer, &Value::Null, "{engine} {scenario}");
+            assert!(run.calls.is_empty(), "{engine} {scenario}");
+            let _ = fs::remove_dir_all(run.stub.parent().unwrap());
+        }
+        let completed = run("opencode", "rotter-review.js", engine, "reply", "once");
+        assert_eq!(completed.answers[0].0, REQUEST, "{engine}");
+        let _ = fs::remove_dir_all(completed.stub.parent().unwrap());
+    }
+}
+
 #[test]
 fn shims_resolve_quietly_whatever_rotter_does() {
     // (stub mode, scenario, fastest, slowest) in ms; every answer is null, so OpenCode is never
