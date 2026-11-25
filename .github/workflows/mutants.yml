@@ -1,7 +1,7 @@
 # Mutation testing as a pull request gate: every mutant cargo-mutants makes of the code the pull
 # request changes must be caught by the tests (`mise run mutants`; equivalent mutants are excluded
-# in .cargo/mutants.toml). A missed mutant or a timeout fails the check, and the shard's
-# mutants.out is kept as an artifact.
+# in .cargo/mutants.toml). A missed mutant fails the check (a timeout counts as caught), and the
+# shard's mutants.out is kept as an artifact.
 #
 # The mutants are split over 8 jobs to stay within a job's 6 hours when a pull request changes most
 # of the code. Linux amd64 runners.
