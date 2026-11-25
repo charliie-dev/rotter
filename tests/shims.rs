@@ -503,6 +503,7 @@ fn opencode_asks_only_after_a_turn_that_completed() {
             "nofinish",
             "toolcall",
             "otherparent",
+            "noid",
         ] {
             let run = run("opencode", "rotter-review.js", engine, "reply", scenario);
             let [(answer, _)] = run.answers.as_slice() else {
@@ -516,6 +517,17 @@ fn opencode_asks_only_after_a_turn_that_completed() {
             let completed = run("opencode", "rotter-review.js", engine, "reply", scenario);
             assert_eq!(completed.answers[0].0, REQUEST, "{engine} {scenario}");
             let _ = fs::remove_dir_all(completed.stub.parent().unwrap());
+        }
+        // While rotter ran, the user started and cancelled another turn (or the second read
+        // failed): rotter was asked, but its request does not restart the session.
+        for scenario in ["laterturn", "laterthrowing"] {
+            let run = run("opencode", "rotter-review.js", engine, "reply", scenario);
+            let [(answer, _)] = run.answers.as_slice() else {
+                panic!("{engine} {scenario}: {:?}", run.answers);
+            };
+            assert_eq!(answer, &Value::Null, "{engine} {scenario}");
+            assert_eq!(run.calls.len(), 1, "{engine} {scenario}");
+            let _ = fs::remove_dir_all(run.stub.parent().unwrap());
         }
     }
 }

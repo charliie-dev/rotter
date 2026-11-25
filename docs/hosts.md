@@ -421,7 +421,7 @@ commit `fd889a2741891ee45116cb6131052d7fad220886`
 | session／cwd | `event.properties.sessionID`；cwd 為 plugin 輸入的 `directory`（該 instance 的目錄；事件只送給 `location.directory` 相同的 instance） |
 | 子 session | 以 `client.session.get({path:{id}})` 取得 session，`parentID` 存在（subagent）或取不到時不做事 |
 | 續跑判斷 | 沒有續跑旗標：只靠 rotter 的上限；注入的提示是新的使用者訊息，shim 不把任何使用者訊息當成歸零的訊號。取消與失敗的回合同樣以 `session.idle` 結束：一般步驟中斷時 `SessionProcessor` 把 assistant 訊息的 `error` 設為 `MessageAbortedError`，但 subtask 中斷（`handleSubtask`）與兩步之間的取消只留下 `finish: "tool-calls"`、沒有 `error`。所以 shim 以 `client.session.messages({path:{id}})` 讀最後一則訊息，只有它是 assistant、沒有 `error`、有 `time.completed`，並且符合 OpenCode 結束迴圈的三個條件時才詢問 rotter：`finish` 存在且不是 `tool-calls`／`unknown`；沒有非 provider 執行的 tool part（重試後由 `cleanup` 標為 `status: "error"`、`metadata.interrupted: true` 的殘留 tool part 不算）；`parentID` 是最後一則使用者訊息的 id。讀取失敗或其他情況都不做事 |
-| 要求續跑 | `client.session.promptAsync({path:{id}, body:{parts:[{type:"text", text}]}})`（`POST /session/{id}/prompt_async`，立即返回），在「同時只跑一次」旗標放開之後才呼叫，所以注入的那一輪結束時的 `session.idle` 照常交給 rotter 計數；失敗被吞掉。這是使用者看得到的新訊息，內容是 rotter 的 `continue`：固定文字、數量、cwd（絕對路徑、無控制字元）與 shell 引用過的 binary 路徑，沒有報告內容或檔名 |
+| 要求續跑 | `client.session.promptAsync({path:{id}, body:{parts:[{type:"text", text}]}})`（`POST /session/{id}/prompt_async`，立即返回），在「同時只跑一次」旗標放開之後才呼叫；呼叫前再讀一次 `session.messages`，最後一則仍是詢問 rotter 時的那則 assistant 訊息（同一個 `id`）才呼叫，否則（rotter 執行期間使用者又開始、或開始後取消了另一輪，或讀取失敗）不做事，以免把使用者已停止的 session 重新叫起。所以注入的那一輪結束時的 `session.idle` 照常交給 rotter 計數；失敗被吞掉。這是使用者看得到的新訊息，內容是 rotter 的 `continue`：固定文字、數量、cwd（絕對路徑、無控制字元）與 shell 引用過的 binary 路徑，沒有報告內容或檔名 |
 | 提示管道 | 預設 stderr（shim 忽略；沒有使用 `client.app.log`） |
 | timeout | shim 內的 timeout；OpenCode 不等待 handler，不設 120 秒上限 |
 | 引擎 | release binary 以 `Bun.build({compile})` 建置，macOS／Linux 用 Bun 1.4.4（根目錄 `package.json` 的 `packageManager: bun@1.4.4`，依 anomalyco/opencode commit `b47eb4ed2da71e940248c362d3f9ea175597f9b1`，2026-11-24 查核）；測試以 Bun 1.4.4 執行 |
@@ -431,8 +431,9 @@ commit `fd889a2741891ee45116cb6131052d7fad220886`
 測試（Bun 1.4.4）另外驗證：模組只有一個函式 export；`session.get` 丟出例外時不執行 rotter；
 子 session 不執行 rotter；最後一則訊息是取消、失敗、尚未完成、`finish` 為 `tool-calls`（subtask
 取消）／`unknown`／缺少、帶有待處理的 tool part，或 `parentID` 不是最後一則使用者訊息的 assistant
-訊息，或是使用者訊息、沒有訊息，或 `session.messages` 丟出例外時，都不執行 rotter（tool part 只有
-provider 執行的或重試後標為 interrupted 的殘留時照常詢問）；只有 rotter 要求審查時才呼叫 `promptAsync`（錯誤路徑全部靜默）；
+訊息，或是使用者訊息、沒有訊息、assistant 訊息沒有 `id`，或 `session.messages` 丟出例外時，都不執行
+rotter（tool part 只有 provider 執行的或重試後標為 interrupted 的殘留時照常詢問）；rotter 執行期間
+使用者又開始並取消另一輪，或 rotter 回覆後的第二次讀取失敗時，rotter 有被詢問，但不呼叫 `promptAsync`；只有 rotter 要求審查時才呼叫 `promptAsync`（錯誤路徑全部靜默）；
 `promptAsync` reject 時被吞掉；stub `promptAsync` 在返回之前就先發出新的使用者訊息事件與下一個
 `session.idle` 時，第二個 idle 仍會詢問 rotter（旗標沒有被注入的那一輪佔住，改成佔住時此案例
 失敗），stub 模擬 rotter 的上限時，第三個 idle 由 rotter 靜默而結束這串（共 3 個 idle、3 次 rotter、2 次 `promptAsync`）。

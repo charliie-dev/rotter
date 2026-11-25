@@ -55,17 +55,33 @@ if (host === "pi") {
   // OpenCode calls every export as a plugin and rejects a module with any other export.
   const plugins = Object.values(module);
   if (plugins.length !== 1 || typeof plugins[0] !== "function") fired.push("not one plugin");
+  let listings = 0;
   const client = {
     session: {
       async get({ path }) {
         if (scenario === "throwing") throw new Error("host API failure");
         return { data: path.id === "child" ? { id: path.id, parentID: "parent" } : { id: path.id } };
       },
-      // The turn's messages: a user message, then the scenario's last message.
+      // The turn's messages: a user message, then the scenario's last message. In "laterturn"
+      // and "laterthrowing", the user starts and cancels another turn while rotter runs: the
+      // second listing (after rotter answered) ends with that cancelled turn, or fails.
       async messages() {
+        listings += 1;
         if (scenario === "messagesthrowing") throw new Error("host API failure");
         const done = { created: 1, completed: 2 };
-        const ended = { role: "assistant", parentID: "u1", time: done, finish: "stop" };
+        const ended = { id: "a1", role: "assistant", parentID: "u1", time: done, finish: "stop" };
+        if (listings > 1 && scenario === "laterthrowing") throw new Error("host API failure");
+        if (listings > 1 && scenario === "laterturn") {
+          const aborted = { name: "MessageAbortedError", data: { message: "Aborted" } };
+          return {
+            data: [
+              { info: { id: "u1", role: "user", time: { created: 0 } }, parts: [] },
+              { info: ended, parts: [] },
+              { info: { id: "u2", role: "user", time: { created: 3 } }, parts: [] },
+              { info: { ...ended, id: "a2", parentID: "u2", error: aborted }, parts: [] },
+            ],
+          };
+        }
         const last = {
           cancelled: {
             ...ended,
@@ -77,7 +93,9 @@ if (host === "pi") {
           // A cancelled subtask, or a cancel between two steps: completed, no error.
           subtask: { ...ended, finish: "tool-calls" },
           unknownfinish: { ...ended, finish: "unknown" },
-          nofinish: { role: "assistant", parentID: "u1", time: done },
+          nofinish: { id: "a1", role: "assistant", parentID: "u1", time: done },
+          // A message without an id cannot be checked again after rotter answers.
+          noid: { role: "assistant", parentID: "u1", time: done, finish: "stop" },
           // An answer to an older user message: OpenCode's loop goes on to the newer one.
           otherparent: { ...ended, parentID: "u0" },
         }[scenario] ?? ended;

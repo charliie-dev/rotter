@@ -157,8 +157,15 @@ export const RotterReview = async (input) => {
           if (own.some(pending)) return;
           const user = messages.findLast((message) => message?.info?.role === "user")?.info;
           if (typeof user?.id !== "string" || last.parentID !== user.id) return;
+          const reviewed = last.id;
+          if (typeof reviewed !== "string") return;
           const text = await review(id, directory);
           if (text === null) return;
+          // rotter runs for seconds, and the user can start and stop another turn meanwhile.
+          // Re-prompt only while the message rotter was asked about is still the last one.
+          const again = await client.session.messages({ path: { id } });
+          const now = Array.isArray(again?.data) ? again.data : [];
+          if (now[now.length - 1]?.info?.id !== reviewed) return;
           const parts = [{ type: "text", text }];
           await client.session.promptAsync({ path: { id }, body: { parts } });
         } catch {}
