@@ -234,7 +234,10 @@ impl Languages {
             "sh" => self.supported(Language::Bash, "sh-parsed-as-bash"),
             "dash" => self.supported(Language::Bash, "dash-parsed-as-bash"),
             "ash" => self.supported(Language::Bash, "ash-parsed-as-bash"),
-            dialect @ ("zsh" | "ksh" | "mksh") => Detected::UnsupportedDialect(dialect.to_owned()),
+            // The shells detect_path refuses by extension, and mksh.
+            dialect @ ("zsh" | "ksh" | "mksh" | "fish" | "csh" | "tcsh") => {
+                Detected::UnsupportedDialect(dialect.to_owned())
+            }
             _ => self.detect_external(path),
         }
     }
@@ -482,6 +485,17 @@ mod tests {
             "bash/sh-parsed-as-bash"
         );
         assert_eq!(content("x", "#!/usr/bin/env -u"), "not in scope");
+        // A shebang names the same unsupported shells as an extension, and mksh.
+        for dialect in ["zsh", "ksh", "mksh", "fish", "csh", "tcsh"] {
+            assert_eq!(
+                content("script.sh", &format!("#!/usr/bin/env {dialect}")),
+                format!("unsupported {dialect}")
+            );
+            assert_eq!(
+                content("x", &format!("#!/bin/{dialect}")),
+                format!("unsupported {dialect}")
+            );
+        }
         // A path names its last component.
         assert_eq!(content("x", "#!/usr/bin/env /bin/bash"), "bash/bash");
         assert_eq!(content("x", "#!/usr/bin/env -S /bin/bash -eu"), "bash/bash");
