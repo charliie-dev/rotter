@@ -77,7 +77,9 @@ note to the user; do not edit their config or environment yourself.
 - `units[].comments[]`: related comments. `relation` is `leading` (directly above),
   `inside`, `trailing` (same line after the unit), `enclosing_leading` (above an
   enclosing unit, such as a struct or table), or `nearby` (full mode: no closer relation). `changed: false` marks comments the diff did
-  not touch; these are the main target.
+  not touch; these are the main target. `changed` covers a whole group of adjacent comment
+  lines: it is `true` when any line of the group is in the diff, so compare with the `before`
+  side to see which lines are new or changed.
 - `dialect` ending in `-parsed-as-bash` means a POSIX sh family script was parsed with the
   Bash grammar. Do not assume Bash-only behaviour (arrays, `[[ ]]`, `local` semantics) when
   judging its comments.
@@ -164,6 +166,8 @@ When a hook asked for this review of the working tree, remove the unnecessary co
 unnecessary parts of them, that are marked `changed: true` and that you added or changed in
 this task, then report what was removed. `changed: true` only means the comment is in the diff
 from HEAD, which also holds the user's own uncommitted edits: when you are not sure that you
-wrote a changed comment, report it instead. Do not touch code, unchanged comments, or comments
+wrote a changed comment, report it instead. Inside a changed group, remove only the lines you
+added or changed (compare with the `before` side) and keep the others; when they cannot be
+separated safely, do not edit, report. Do not touch code, unchanged comments, or comments
 that contradict the code; report those. In every other case do not edit comments or code
 unless the user asks; the review only reports.
