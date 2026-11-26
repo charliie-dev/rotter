@@ -398,7 +398,7 @@ process group）或任何錯誤都靜默結束，同時只跑一次；每個 ses
 
 `rotter hook claude-stop`／`grok-stop` 每次宿主要結束回合時，在 session 的工作目錄執行
 `rotter extract --worktree --include-untracked`；若有關聯到註解的變更單元，就回傳
-`decision: "block"`，請 agent 依 `rotter --skill` 審查。由 hook 造成的續跑（`stop_hook_active`／
+`decision: "block"`，請 agent 依 `rotter --skill` 審查：回報註解與程式的矛盾，並刪除這次變更新增或修改、但不必要的註解。由 hook 造成的續跑（`stop_hook_active`／
 `stopHookActive`）一律放行，所以每回合最多多一次審查；`reason` 存在且不是 `end_turn` 時（Grok
 session 結束時的 `channel_closed`／`shutdown`，其決定會被忽略）直接放行、不執行 git。Grok hook 的
 session 來自 `sessionId`，工作目錄來自 `cwd`，沒有時用 `workspaceRoot`，且須是絕對路徑、不含控制
