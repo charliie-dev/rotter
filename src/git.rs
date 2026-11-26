@@ -148,7 +148,6 @@ pub(crate) struct Walk {
     /// The topmost physical ancestor of the directory (itself included) that holds a `.git`
     /// entry.
     pub(crate) repository: Option<PathBuf>,
-    /// Identities of the physical directory and `repository`.
     roots: Vec<Identity>,
 }
 
@@ -191,8 +190,6 @@ fn linux_native(header: &[u8]) -> bool {
     header.starts_with(b"\x7fELF")
 }
 
-/// Whether the first bytes of a file are this OS's native executable magic; `#!` scripts and
-/// anything else are not.
 fn native(header: &[u8]) -> bool {
     if cfg!(target_os = "macos") {
         macos_native(header)
@@ -688,7 +685,6 @@ fn stat_candidate(entry: &Entry) -> Option<(&[u8], &str)> {
     if !is_zero(new_oid) {
         return None;
     }
-    // A mode change is a change too.
     if old_mode != new_mode {
         return None;
     }
@@ -790,7 +786,6 @@ pub(crate) struct Scratch {
     dir: PathBuf,
     /// The resolved temp root: the ceiling for `git diff --no-index`.
     root: PathBuf,
-    /// Numbers the per-diff `diff-<n>` subdirectories.
     diffs: Cell<usize>,
 }
 
@@ -825,7 +820,6 @@ fn temp_root(temp: &Path) -> Result<PathBuf, String> {
 }
 
 impl Scratch {
-    /// A fresh directory under the temp root `temp` (`Sources::temp`).
     pub(crate) fn new(temp: &Path) -> Result<Self, String> {
         let root = temp_root(temp)?;
         let nanos = SystemTime::now()
@@ -1073,7 +1067,6 @@ enum Unread {
     Error(String),
 }
 
-/// The status of a side in an unsupported shell dialect.
 fn unsupported(mut side: Side, dialect: String) -> Side {
     side.json.push(("dialect", dialect.into()));
     side.status(
@@ -1130,7 +1123,6 @@ fn change_kind(status: &str) -> (&'static str, Option<u32>) {
     }
 }
 
-/// `[{"before": [start, count], "after": [start, count]}, …]`.
 fn hunks_json(hunks: &[Hunk]) -> Json {
     Json::Arr(
         hunks
@@ -1145,7 +1137,6 @@ fn hunks_json(hunks: &[Hunk]) -> Json {
     )
 }
 
-/// The first line of `bytes`, invalid UTF-8 replaced.
 fn first_line(bytes: &[u8]) -> String {
     let line = bytes
         .split(|byte| *byte == b'\n')
@@ -1162,8 +1153,6 @@ struct Run<'a> {
 }
 
 impl Run<'_> {
-    /// The changed entries: every tracked file still on disk (full), else the diff against
-    /// `tree` without the files that differ only in stat data.
     fn changed(
         &self,
         dir: &Path,
@@ -1266,7 +1255,6 @@ impl Run<'_> {
         }
     }
 
-    /// The language of `display`: a `--lang`/`[overrides]` glob first, else the path.
     fn detect(&self, display: &str, relative: &Path) -> Detected {
         let override_language = self
             .options
@@ -1281,7 +1269,6 @@ impl Run<'_> {
         }
     }
 
-    /// A side's bytes, from its blob or from disk.
     fn read(
         &self,
         relative: &Path,
@@ -1326,7 +1313,6 @@ impl Run<'_> {
         Ok(bytes)
     }
 
-    /// Decides from the first line before reading the rest of the file.
     fn read_deciding(&self, file: &fs::File, relative: &Path) -> Result<Vec<u8>, Unread> {
         let mut first = Vec::new();
         file.take(4096)
@@ -1344,7 +1330,6 @@ impl Run<'_> {
         }
     }
 
-    /// The side's blob id: the one it was read from, or the hash of the disk bytes.
     fn blob_id(&self, source: Source<'_>, bytes: &[u8]) -> Result<String, String> {
         match source {
             Source::Blob(oid) => Ok(oid.to_owned()),
@@ -1428,8 +1413,6 @@ impl Run<'_> {
         self.load(path, mode, Source::Blob(oid))
     }
 
-    /// A side's document: parsed with its units when it has text and a language. A partial
-    /// parse, a timeout or a parse error clears `complete`.
     fn side_json(
         &self,
         side: Option<Side>,
@@ -1505,8 +1488,8 @@ pub fn extract_with(git: &Git, dir: &Path, options: &Options) -> Result<Report, 
         None => empty_tree(git, &top, guard)?,
     };
     // `git diff <tree>` would refresh stat data and rewrite the index even with
-    // GIT_OPTIONAL_LOCKS=0 (now off through diff.autoRefreshIndex), so every index read also
-    // goes through a private copy.
+    // GIT_OPTIONAL_LOCKS=0. `prepare` turns that off with diff.autoRefreshIndex=false, and every
+    // index read also goes through a private copy.
     let index = git.scratch.dir.join("index");
     let real_index = top.join(git_text(
         git,
@@ -1589,7 +1572,6 @@ pub fn extract_with(git: &Git, dir: &Path, options: &Options) -> Result<Report, 
     Ok(Report { json, complete })
 }
 
-/// `args`, then `--` and the pathspecs.
 fn args_with<'a>(args: &[&'a str], specs: &[&'a OsStr]) -> Vec<&'a OsStr> {
     args.iter()
         .map(|arg| OsStr::new(*arg))
@@ -1659,7 +1641,6 @@ fn empty_tree(git: &Git, top: &Path, guard: &[String]) -> Result<String, String>
     )
 }
 
-/// `git diff --raw` of `tree` against the index (staged) or the working tree.
 fn diff_args<'a>(mode: &Mode, tree: &'a str) -> Vec<&'a str> {
     let mut args = vec!["diff"];
     if matches!(mode, Mode::Staged) {
@@ -1710,7 +1691,6 @@ fn snapshot_entries(top: &Path, listed: &[u8]) -> Result<Vec<Entry>, String> {
     Ok(entries)
 }
 
-/// Marks the paths of `git ls-files --unmerged -z` output as conflicted (`U`).
 fn mark_unmerged(entries: &mut Vec<Entry>, listed: &[u8]) {
     let mut unmerged: Vec<Vec<u8>> = listed
         .split(|byte| *byte == 0)
@@ -1739,7 +1719,6 @@ fn mark_unmerged(entries: &mut Vec<Entry>, listed: &[u8]) {
     }
 }
 
-/// The non-empty NUL-separated paths of `listed`.
 fn paths(listed: &[u8]) -> Vec<Vec<u8>> {
     listed
         .split(|byte| *byte == 0)
@@ -1908,7 +1887,6 @@ mod tests {
         }
     }
 
-    /// `<dir>/git` holding `bytes` with `mode`.
     fn place(dir: &Path, bytes: &[u8], mode: u32) -> PathBuf {
         fs::create_dir_all(dir).unwrap();
         let git = dir.join("git");
@@ -2035,7 +2013,6 @@ mod tests {
         let error = select(Some(&joined(&[&good])), &[identity(&root).unwrap()]).unwrap_err();
         assert!(!error.contains("good"), "{error}");
         fs::remove_dir_all(other).unwrap();
-        // Relative entries and a missing PATH find nothing.
         assert!(select(Some(&OsString::from("good")), &[]).is_err());
         assert!(select(None, &[]).is_err());
         fs::set_permissions(
