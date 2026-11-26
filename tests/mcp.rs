@@ -203,6 +203,30 @@ fn mcp_reads_only_repositories_under_its_roots() {
         &allowed,
         &["worktree", "add", "-q", &inner.display().to_string()],
     );
+    // A worktree entry written by hand inside the root, pointing back at its `.git` file but with
+    // a `commondir` outside: no repository keeps it under its `worktrees/`.
+    let bypass = allowed.join("bypass");
+    let entry = allowed.join("entry");
+    fs::create_dir_all(&bypass).unwrap();
+    fs::create_dir_all(&entry).unwrap();
+    fs::write(
+        bypass.join(".git"),
+        format!("gitdir: {}\n", entry.display()),
+    )
+    .unwrap();
+    fs::write(
+        entry.join("gitdir"),
+        format!("{}\n", bypass.join(".git").display()),
+    )
+    .unwrap();
+    fs::write(
+        entry.join("commondir"),
+        format!("{}\n", other.join(".git").display()),
+    )
+    .unwrap();
+    for file in ["HEAD", "index"] {
+        fs::copy(other.join(".git").join(file), entry.join(file)).unwrap();
+    }
     let input = [
         call(1, &allowed),
         call(2, &other),
@@ -215,6 +239,7 @@ fn mcp_reads_only_repositories_under_its_roots() {
         call(9, &swapped),
         call(10, &forged),
         call(11, &inner),
+        call(12, &bypass),
     ]
     .concat();
     let allowed_arg = allowed.display().to_string();
@@ -263,6 +288,11 @@ fn mcp_reads_only_repositories_under_its_roots() {
         results[10].get("isError").is_none(),
         "a worktree of a repository inside the root: {}",
         results[10]
+    );
+    assert!(
+        refused(&results[11]),
+        "a worktree entry written by hand with a commondir outside: {}",
+        results[11]
     );
     fs::remove_dir_all(&root).unwrap();
 }

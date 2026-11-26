@@ -308,10 +308,11 @@ fn mcp_extract(
 fn check_repository(roots: &[PathBuf], git: &Git, top: &Path) -> Result<(), String> {
     within(roots, top)?;
     let git_dir = git_dir(git, top)?;
-    if registered_worktree(&git_dir, top) {
+    let common = common_dir(git, top)?;
+    if registered_worktree(&git_dir, &common, top) {
         return Ok(());
     }
-    for dir in [git_dir, common_dir(git, top)?] {
+    for dir in [git_dir, common] {
         if within(roots, &dir).is_err() {
             return Err(format!(
                 "the git directory {} of {} is outside the roots this server may read",
@@ -323,11 +324,18 @@ fn check_repository(roots: &[PathBuf], git: &Git, top: &Path) -> Result<(), Stri
     Ok(())
 }
 
-/// Git writes a linked worktree's `.git` path into the worktree entry's `gitdir` file; a `.git`
-/// file someone points at another repository has no such entry pointing back. Git writes that
-/// `.git` as a regular file, so a symlink in its place is not what git registered.
-fn registered_worktree(git_dir: &Path, top: &Path) -> bool {
-    let is_file = std::fs::symlink_metadata(top.join(".git")).is_ok_and(|meta| meta.is_file());
+/// Git keeps a linked worktree's entry in `<common git directory>/worktrees/` and writes the
+/// worktree's `.git` path into the entry's `gitdir` file. A `.git` file someone points at another
+/// repository has no entry pointing back, and an entry someone writes elsewhere, with a
+/// `commondir` of its choice, is not one a repository keeps. Git writes that `.git` as a regular
+/// file, so a symlink in its place is not what git registered.
+fn registered_worktree(git_dir: &Path, common: &Path, top: &Path) -> bool {
+    let kept = git_dir
+        .parent()
+        .map(canonical)
+        .is_some_and(|parent| parent.is_ok() && parent == canonical(&common.join("worktrees")));
+    let is_file =
+        kept && std::fs::symlink_metadata(top.join(".git")).is_ok_and(|meta| meta.is_file());
     let Ok(back) = std::fs::read_to_string(git_dir.join("gitdir")) else {
         return false;
     };
