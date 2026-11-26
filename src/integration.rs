@@ -2505,7 +2505,10 @@ mod tests {
         let shared = temp();
         fs::set_permissions(&shared, fs::Permissions::from_mode(0o770)).unwrap();
         let refused = allow_request(&shared, &CLAUDE, "s").unwrap_err();
-        assert!(refused.contains("writable by other users"), "{refused}");
+        assert!(
+            refused.contains("writable by other users"),
+            "a shared state directory is not refused as writable by others"
+        );
         let fresh = temp().join("state");
         reset_requests(&fresh, &CLAUDE, "s");
         assert!(!fresh.exists());
