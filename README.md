@@ -300,19 +300,30 @@ cargo install --path . --locked
 server，只支援協定 2026-07-28：沒有 `initialize` 握手，每個請求都要在 `_meta` 帶
 `io.modelcontextprotocol/protocolVersion` 與 `io.modelcontextprotocol/clientCapabilities`，
 版本不符時回 `-32022`（`data.supported` 列出可用版本）。只認得舊版 `initialize` 的 client
-會收到 `-32601`，錯誤訊息寫明支援的版本。stdout 只輸出 MCP 訊息，stdin 關閉即結束。
+會收到 `-32601`，錯誤訊息寫明支援的版本。stdout 只輸出 MCP 訊息；stdin 關閉後，回應完已讀入的請求即結束。
+
+MCP server 由 client 啟動，不受 host 的讀取限制與沙箱約束，所以 tool 只讀取頂層目錄位於
+`--root` 之內的 repo（可重複指定；未指定時為工作目錄所屬的 repo，連同它位在頂層之外的 git 目錄，
+例如 submodule 或 `--separate-git-dir`；git 在那裡找不到 repo 時則為工作目錄
+本身）。`directory` 先解析成實際路徑、確認在 root 內，才在那裡執行 git；repo 的 git 目錄也須在 root
+內，唯一的例外是 linked worktree：git 目錄在 root 外時，須是主 repo 為這個 worktree 登記的項目
+（其 `gitdir` 檔指回這個 worktree）。`--root` 指向 repo 的子目錄時，該 repo 不在範圍內。擷取時會
+確認讀到的仍是檢查過的那個 repo。這是防止模型讀到範圍外 repo 的界線，不是沙箱：能在 root 內同時
+改動檔案系統的程式，仍可能在檢查與讀取之間把路徑換掉；linked worktree 的共用 git 目錄也不在檢查範圍。
 
 | 功能 | 內容 |
 | --- | --- |
 | `server/discover` | 支援的版本、`tools` 與 `prompts` 能力、使用說明 |
-| tool `extract` | 唯讀；參數 `mode`（staged／worktree／base／full）、`base`、`directory`（預設為 server 的工作目錄）、`include_untracked`、`paths`、`lang`。與 `rotter extract` 走同一段程式；報告放在 `structuredContent`，同一份 JSON 也放在文字內容。參數或擷取錯誤以 `isError: true` 回傳 |
-| prompt `rotter-comment-review` | 與此 binary 相符的審查 skill（同 `rotter --skill`） |
+| tool `extract` | 唯讀；參數 `mode`（staged／worktree／base／full）、`base`、`directory`（預設為 server 的工作目錄）、`include_untracked`、`paths`、`lang`。與 `rotter extract` 走同一段程式；報告放在 `structuredContent`，同一份 JSON 也放在第一段文字內容，CLI 會印到 stderr 的提示接在後面。參數值或擷取錯誤以 `isError: true` 回傳 |
+| prompt `rotter-comment-review` | 與此 binary 相符的審查 skill（同 `rotter --skill`），前面加一段 CLI 與 tool 參數、結束碼與結果的對照 |
 
-清單結果附 `ttlMs`、`cacheScope: "public"`；取消（`notifications/cancelled`）的請求不再送出回應。
+清單與 discover 結果附 `ttlMs`、`cacheScope: "public"`。執行中或排隊中的請求被取消
+（`notifications/cancelled`）時不再回應：排隊中的不會執行，執行中的 extract 跳過還沒開始的檔案，
+只等目前這個檔案處理完；指向已回應或不存在請求的取消會被忽略。
 client 設定範例（client 須支援協定 2026-07-28）：
 
 ```json
-{ "mcpServers": { "rotter": { "command": "rotter", "args": ["mcp"] } } }
+{ "mcpServers": { "rotter": { "command": "rotter", "args": ["mcp", "--root", "/path/to/repo"] } } }
 ```
 
 ## Agent 整合

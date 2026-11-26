@@ -4,16 +4,17 @@
 //! protocol version and client capabilities in `_meta`. The server offers one read-only tool,
 //! `extract` (the CLI's `rotter extract`, run through the same code), and one prompt, the comment
 //! review skill. Messages are newline-delimited JSON-RPC 2.0 on stdin and stdout; stdout carries
-//! nothing else, and the server exits when stdin closes.
+//! nothing else. Once stdin closes, the server answers the requests it already read and exits.
 
 use serde_json::{Map, Value, json};
-use std::collections::{HashSet, VecDeque};
+use std::collections::HashMap;
 use std::io::{BufRead, Write};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
 
 pub const PROTOCOL_VERSION: &str = "2026-07-28";
 
-/// The tool and prompt lists never change while the binary runs; clients may cache them.
+/// Nothing in discover or the lists changes while the binary runs; clients may cache them.
 const TTL_MS: u64 = 3_600_000;
 
 const PARSE_ERROR: i64 = -32700;
@@ -28,8 +29,27 @@ const SERVER_INFO_KEY: &str = "io.modelcontextprotocol/serverInfo";
 
 const PROMPT: &str = "rotter-comment-review";
 
-/// Runs `rotter extract` with these CLI arguments, `extract` first.
-pub type Extract<'a> = &'a dyn Fn(Vec<String>) -> Result<(String, bool), String>;
+/// Runs `rotter extract` with these CLI arguments, `extract` first: the report's JSON text and
+/// the notes the CLI would print on stderr. The flag is set when the request is cancelled.
+pub type Extract<'a> =
+    &'a dyn Fn(Vec<String>, Arc<AtomicBool>) -> Result<(String, Vec<String>), String>;
+
+/// Requests read but not yet answered, by id key, with their cancel flags. The reader thread
+/// adds each request before passing it on, so a cancellation always finds a request it follows.
+type Pending = Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>;
+
+/// A line the reader thread passed on, with the id key and cancel flag it registered when the
+/// line is a request.
+type Read = (Vec<u8>, Option<(String, Arc<AtomicBool>)>);
+
+/// Tells a model that got the skill through MCP how its CLI steps map onto the `extract` tool.
+const MCP_GUIDE: &str = "You reach rotter through MCP: call the `extract` tool where the steps \
+below run `rotter extract`. The mode flags become `mode` (`staged`, `worktree`, `full`, or `base` \
+with the revision in `base`); `-C <dir>` becomes `directory`, `-- <pathspec>...` becomes `paths`, \
+`--lang` becomes `lang` and `--include-untracked` becomes `include_untracked`. Exit status 0 is a \
+result whose report has `complete: true`, exit 1 one with `complete: false`, and exit 2 a result \
+with `isError: true` whose text says why. What the CLI prints on stderr comes as further text \
+content after the report.";
 
 struct RpcError(i64, String, Option<Value>);
 
@@ -45,40 +65,38 @@ where
     R: BufRead + Send + 'static,
     W: Write,
 {
-    // A reader thread keeps taking messages while a request runs, so a cancellation sent during
-    // a long extract is seen before its response would be written.
-    let (sender, receiver) = mpsc::channel::<std::io::Result<String>>();
-    std::thread::spawn(move || {
-        for line in input.lines() {
-            if sender.send(line).is_err() {
-                break;
+    // A reader thread keeps taking messages while a request runs, so a cancellation reaches a
+    // running extract, which stops early, and a waiting request, which never runs. Lines stay
+    // bytes: a line that is not UTF-8 is a parse error for that message, not the end of the stream.
+    let (sender, receiver) = mpsc::channel::<std::io::Result<Read>>();
+    let pending: Pending = Arc::default();
+    let reader_pending = Arc::clone(&pending);
+    std::thread::spawn(move || read_lines(input, &sender, &reader_pending));
+    while let Ok(read) = receiver.recv() {
+        let (line, request) = read?;
+        let cancel = request
+            .as_ref()
+            .map(|(_, cancel)| Arc::clone(cancel))
+            .unwrap_or_default();
+        let response = if cancel.load(Ordering::Relaxed) {
+            None
+        } else {
+            handle(&line, extract, skill, Arc::clone(&cancel))
+        };
+        // A later request may reuse the id once this one is cancelled; its entry stays.
+        if let Some((key, cancel)) = &request {
+            let mut pending = lock(&pending);
+            if pending
+                .get(key)
+                .is_some_and(|entry| Arc::ptr_eq(entry, cancel))
+            {
+                pending.remove(key);
             }
         }
-    });
-    let mut queue: VecDeque<String> = VecDeque::new();
-    let mut cancelled: HashSet<String> = HashSet::new();
-    loop {
-        let line = match queue.pop_front() {
-            Some(line) => line,
-            None => match receiver.recv() {
-                Ok(line) => line?,
-                Err(_) => return Ok(()),
-            },
-        };
-        if line.trim().is_empty() {
-            continue;
-        }
-        let Some((id, response)) = handle(&line, extract, skill, &mut cancelled) else {
+        let Some(response) = response else {
             continue;
         };
-        // Messages that arrived while this request ran: note cancellations, keep the rest.
-        while let Ok(next) = receiver.try_recv() {
-            let next = next?;
-            if !note_cancellation(&next, &mut cancelled) {
-                queue.push_back(next);
-            }
-        }
-        if id.as_ref().is_some_and(|id| cancelled.remove(&id_key(id))) {
+        if cancel.load(Ordering::Relaxed) {
             continue;
         }
         let mut text = serde_json::to_string(&response).map_err(std::io::Error::other)?;
@@ -86,80 +104,138 @@ where
         output.write_all(text.as_bytes())?;
         output.flush()?;
     }
+    Ok(())
 }
 
-/// The request's `id` as a set key: `1` and `"1"` are different ids.
+/// Sends each line of `input`, trimmed of surrounding ASCII whitespace and blank lines left out,
+/// until the input ends, a read fails or nobody receives. A cancellation is not passed on: it
+/// sets the flag of the request it names when that request is still pending, and anything else
+/// is ignored, as a cancellation of a request already answered, or of none, must be.
+fn read_lines<R: BufRead>(
+    mut input: R,
+    sender: &mpsc::Sender<std::io::Result<Read>>,
+    pending: &Pending,
+) {
+    loop {
+        let mut line = Vec::new();
+        let line = match input.read_until(b'\n', &mut line) {
+            Ok(0) => return,
+            Ok(_) => line.trim_ascii().to_vec(),
+            Err(error) => {
+                let _ = sender.send(Err(error));
+                return;
+            }
+        };
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(target) = cancellation(&line) {
+            if let Some(cancel) = lock(pending).get(&target) {
+                cancel.store(true, Ordering::Relaxed);
+            }
+            continue;
+        }
+        let request = request_key(&line).map(|key| {
+            let cancel = Arc::new(AtomicBool::new(false));
+            lock(pending).insert(key.clone(), Arc::clone(&cancel));
+            (key, cancel)
+        });
+        if sender.send(Ok((line, request))).is_err() {
+            return;
+        }
+    }
+}
+
+/// A poisoned lock only means the other thread panicked; the map is still usable.
+fn lock(pending: &Pending) -> std::sync::MutexGuard<'_, HashMap<String, Arc<AtomicBool>>> {
+    pending
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The request's `id` as a map key: `1` and `"1"` are different ids.
 fn id_key(id: &Value) -> String {
     id.to_string()
 }
 
-/// Records a `notifications/cancelled` message; false for anything else.
-fn note_cancellation(line: &str, cancelled: &mut HashSet<String>) -> bool {
-    let Ok(message) = serde_json::from_str::<Value>(line) else {
-        return false;
-    };
-    if message.get("id").is_some() || message["method"] != "notifications/cancelled" {
-        return false;
-    }
-    if let Some(id) = message["params"].get("requestId") {
-        cancelled.insert(id_key(id));
-    }
-    true
+fn is_request_id(id: &Value) -> bool {
+    id.is_string() || id.is_i64() || id.is_u64()
 }
 
-/// The response to one message (with the request id it answers), or None for a notification.
-fn handle(
-    line: &str,
-    extract: Extract,
-    skill: &str,
-    cancelled: &mut HashSet<String>,
-) -> Option<(Option<Value>, Value)> {
-    let message: Value = match serde_json::from_str(line) {
+/// The key of a request's id, or None when the line is not a request.
+fn request_key(line: &[u8]) -> Option<String> {
+    let message = serde_json::from_slice::<Value>(line).ok()?;
+    message["method"].as_str()?;
+    message.get("id").filter(|id| is_request_id(id)).map(id_key)
+}
+
+/// The key of the request a `notifications/cancelled` names; None for any other message.
+fn cancellation(line: &[u8]) -> Option<String> {
+    let message = serde_json::from_slice::<Value>(line).ok()?;
+    if message.get("id").is_some() || message["method"] != "notifications/cancelled" {
+        return None;
+    }
+    message["params"].get("requestId").map(id_key)
+}
+
+/// The response to one message, or None for a notification or a response: this server sends no
+/// requests, so no response is addressed to it.
+fn handle(line: &[u8], extract: Extract, skill: &str, cancel: Arc<AtomicBool>) -> Option<Value> {
+    let message: Value = match serde_json::from_slice(line) {
         Ok(message) => message,
         Err(error) => {
             let error = RpcError(PARSE_ERROR, format!("parse error: {error}"), None);
-            return Some((None, error_response(&Value::Null, error)));
+            return Some(error_response(None, error));
         }
+    };
+    let invalid = |what: &str| {
+        let error = RpcError(INVALID_REQUEST, what.into(), None);
+        error_response(None, error)
     };
     let Some(object) = message.as_object() else {
-        let error = RpcError(
-            INVALID_REQUEST,
-            "a message must be one JSON object".into(),
-            None,
-        );
-        return Some((None, error_response(&Value::Null, error)));
+        return Some(invalid("a message must be one JSON object"));
     };
-    let Some(id) = object.get("id").cloned() else {
-        // A notification: only cancellations mean anything to this server.
-        note_cancellation(line, cancelled);
-        return None;
-    };
-    let valid_id = id.is_string() || id.is_i64() || id.is_u64();
     let method = object.get("method").and_then(Value::as_str);
-    let result = match (object.get("jsonrpc"), method) {
-        (Some(version), Some(method)) if version == "2.0" && valid_id => {
-            dispatch(method, object.get("params"), extract, skill)
-        }
-        _ => Err(RpcError(
-            INVALID_REQUEST,
-            "expected a JSON-RPC 2.0 request with a string or integer id and a method".into(),
-            None,
-        )),
+    if method.is_none() && (object.contains_key("result") || object.contains_key("error")) {
+        return None;
+    }
+    let Some(id) = object.get("id") else {
+        return match method {
+            Some(_) => None,
+            None => Some(invalid("expected a JSON-RPC 2.0 request or notification")),
+        };
     };
-    let reply_id = if valid_id { id.clone() } else { Value::Null };
-    let response = match result {
-        Ok(result) => json!({ "jsonrpc": "2.0", "id": reply_id, "result": result }),
-        Err(error) => error_response(&reply_id, error),
+    let id = Some(id).filter(|id| is_request_id(id));
+    let version = object.get("jsonrpc").and_then(Value::as_str);
+    let (Some(id), Some(method), Some("2.0")) = (id, method, version) else {
+        return Some(error_response(
+            id,
+            RpcError(
+                INVALID_REQUEST,
+                "expected a JSON-RPC 2.0 request with a string or integer id and a method".into(),
+                None,
+            ),
+        ));
     };
-    Some((valid_id.then_some(id), response))
+    Some(
+        match dispatch(method, object.get("params"), extract, skill, cancel) {
+            Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
+            Err(error) => error_response(Some(id), error),
+        },
+    )
 }
 
-fn error_response(id: &Value, RpcError(code, message, data): RpcError) -> Value {
+/// An error response; without a readable request id it carries none, as the MCP schema has it.
+fn error_response(id: Option<&Value>, RpcError(code, message, data): RpcError) -> Value {
     let mut error = json!({ "code": code, "message": message });
     if let Some(data) = data {
         error["data"] = data;
     }
-    json!({ "jsonrpc": "2.0", "id": id, "error": error })
+    let mut response = json!({ "jsonrpc": "2.0", "error": error });
+    if let Some(id) = id {
+        response["id"] = id.clone();
+    }
+    response
 }
 
 fn dispatch(
@@ -167,6 +243,7 @@ fn dispatch(
     params: Option<&Value>,
     extract: Extract,
     skill: &str,
+    cancel: Arc<AtomicBool>,
 ) -> Result<Value, RpcError> {
     let known = [
         "server/discover",
@@ -186,6 +263,15 @@ fn dispatch(
             Some(json!({ "supported": [PROTOCOL_VERSION] })),
         ));
     }
+    let empty = Map::new();
+    let params = match params {
+        None => &empty,
+        Some(Value::Object(params)) => params,
+        Some(_) => return Err(RpcError::params("params must be an object")),
+    };
+    // The version and capabilities are checked before the method: an unsupported version gets
+    // -32022 whatever it asks for.
+    check_meta(params)?;
     if !known.contains(&method) {
         return Err(RpcError(
             METHOD_NOT_FOUND,
@@ -193,20 +279,13 @@ fn dispatch(
             None,
         ));
     }
-    let empty = Map::new();
-    let params = match params {
-        None => &empty,
-        Some(Value::Object(params)) => params,
-        Some(_) => return Err(RpcError::params("params must be an object")),
-    };
-    check_meta(params)?;
     let result = match method {
         "server/discover" => discover(),
         "tools/list" => {
             no_cursor(params)?;
             list(json!({ "tools": [extract_tool()] }))
         }
-        "tools/call" => call_tool(params, extract)?,
+        "tools/call" => call_tool(params, extract, cancel)?,
         "prompts/list" => {
             no_cursor(params)?;
             list(json!({ "prompts": [prompt()] }))
@@ -255,7 +334,7 @@ fn complete(mut result: Value) -> Value {
     result
 }
 
-/// A list result clients may cache: nothing in it depends on the user.
+/// A result clients may cache: nothing in it depends on the user.
 fn list(mut result: Value) -> Value {
     result["ttlMs"] = TTL_MS.into();
     result["cacheScope"] = "public".into();
@@ -280,8 +359,9 @@ fn extract_tool() -> Value {
         "description": "Runs `rotter extract`: lists the code units a Git change touches in \
             Go, Lua, Nix, Shell, YAML, TOML, Rust and enabled external languages, each with the \
             comments related to it, as a rotter.extract.poc/0 report. Read-only: it never \
-            writes the repository or its index and never runs repository hooks or filters. \
-            `complete` is false when some changed file could not be analysed.",
+            writes the repository or its index and never runs repository hooks or filters. It \
+            reads only repositories whose top level is inside a root the server was started \
+            with. `complete` is false when some changed file could not be analysed.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -297,8 +377,8 @@ fn extract_tool() -> Value {
                 },
                 "directory": {
                     "type": "string",
-                    "description": "A directory inside the repository (default: the server's \
-                        working directory)",
+                    "description": "A directory inside a repository under one of the server's \
+                        roots (default: the server's working directory)",
                 },
                 "include_untracked": {
                     "type": "boolean",
@@ -339,14 +419,21 @@ fn get_prompt(params: &Map<String, Value>, skill: &str) -> Result<Value, RpcErro
     match params.get("name").and_then(Value::as_str) {
         Some(PROMPT) => Ok(json!({
             "description": prompt()["description"],
-            "messages": [{ "role": "user", "content": { "type": "text", "text": skill } }],
+            "messages": [{
+                "role": "user",
+                "content": { "type": "text", "text": format!("{MCP_GUIDE}\n\n{skill}") },
+            }],
         })),
         Some(name) => Err(RpcError::params(format!("unknown prompt: {name}"))),
         None => Err(RpcError::params("prompts/get needs a prompt name")),
     }
 }
 
-fn call_tool(params: &Map<String, Value>, extract: Extract) -> Result<Value, RpcError> {
+fn call_tool(
+    params: &Map<String, Value>,
+    extract: Extract,
+    cancel: Arc<AtomicBool>,
+) -> Result<Value, RpcError> {
     match params.get("name").and_then(Value::as_str) {
         Some("extract") => {}
         Some(name) => return Err(RpcError::params(format!("unknown tool: {name}"))),
@@ -356,19 +443,23 @@ fn call_tool(params: &Map<String, Value>, extract: Extract) -> Result<Value, Rpc
     let arguments = match params.get("arguments") {
         None | Some(Value::Null) => &empty,
         Some(Value::Object(arguments)) => arguments,
-        Some(_) => return Ok(tool_error("arguments must be an object")),
+        Some(_) => return Err(RpcError::params("arguments must be an object")),
     };
-    // Bad arguments are the model's to fix: they come back as a tool error, not a protocol one.
+    // Bad argument values are the model's to fix: they come back as a tool error, not a
+    // protocol one.
     let args = match cli_args(arguments) {
         Ok(args) => args,
         Err(why) => return Ok(tool_error(&why)),
     };
-    Ok(match extract(args) {
-        Ok((text, _)) => match serde_json::from_str::<Value>(&text) {
-            Ok(report) => json!({
-                "content": [{ "type": "text", "text": text }],
-                "structuredContent": report,
-            }),
+    Ok(match extract(args, cancel) {
+        Ok((text, notes)) => match serde_json::from_str::<Value>(&text) {
+            Ok(report) => {
+                let content: Vec<Value> = std::iter::once(text)
+                    .chain(notes)
+                    .map(|text| json!({ "type": "text", "text": text }))
+                    .collect();
+                json!({ "content": content, "structuredContent": report })
+            }
             Err(error) => tool_error(&format!("the report is not JSON: {error}")),
         },
         Err(why) => tool_error(&why),
@@ -463,10 +554,16 @@ fn bool_arg(arguments: &Map<String, Value>, key: &str) -> Result<bool, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{PROTOCOL_VERSION, cli_args, serve};
+    use super::{MCP_GUIDE, PROTOCOL_VERSION, cli_args, serve};
     use serde_json::{Value, json};
     use std::cell::RefCell;
-    use std::io::Cursor;
+    use std::io::{BufReader, Cursor, Write};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+
+    /// An extract that ignores the cancel flag; most tests need no more.
+    type Extract<'a> = dyn Fn(Vec<String>) -> Result<(String, Vec<String>), String> + 'a;
 
     fn meta() -> Value {
         json!({
@@ -480,28 +577,90 @@ mod tests {
         json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params })
     }
 
-    /// Serves `lines` with an extract that records its arguments; returns the responses.
-    fn run(
-        lines: &[Value],
-        extract: &dyn Fn(Vec<String>) -> Result<(String, bool), String>,
-    ) -> Vec<Value> {
-        let input: String = lines.iter().map(|line| format!("{line}\n")).collect();
+    /// Serves `input` as it stands; returns the responses.
+    fn serve_bytes(input: &[u8], extract: &Extract<'_>) -> Vec<Value> {
         let mut output = Vec::new();
-        serve(
-            Cursor::new(input.into_bytes()),
-            &mut output,
-            extract,
-            "SKILL",
-        )
-        .unwrap();
+        let ignoring = |args, _| extract(args);
+        serve(Cursor::new(input.to_vec()), &mut output, &ignoring, "SKILL").unwrap();
         let text = String::from_utf8(output).unwrap();
         text.lines()
             .map(|line| serde_json::from_str(line).unwrap())
             .collect()
     }
 
-    fn report(_: Vec<String>) -> Result<(String, bool), String> {
-        Ok((r#"{"tool":"rotter","complete":true}"#.to_owned(), true))
+    /// Serves `lines`, one message per line; returns the responses.
+    fn run(lines: &[Value], extract: &Extract<'_>) -> Vec<Value> {
+        let input: String = lines.iter().map(|line| format!("{line}\n")).collect();
+        serve_bytes(input.as_bytes(), extract)
+    }
+
+    fn report(_: Vec<String>) -> Result<(String, Vec<String>), String> {
+        Ok((
+            r#"{"tool":"rotter","complete":true}"#.to_owned(),
+            Vec::new(),
+        ))
+    }
+
+    fn slow(_: Vec<String>) -> Result<(String, Vec<String>), String> {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        report(Vec::new())
+    }
+
+    fn call(id: i64) -> Value {
+        request(
+            id,
+            "tools/call",
+            json!({ "name": "extract", "arguments": { "mode": "full" } }),
+        )
+    }
+
+    fn cancel(id: Value) -> Value {
+        json!({ "jsonrpc": "2.0", "method": "notifications/cancelled",
+            "params": { "requestId": id } })
+    }
+
+    #[test]
+    fn a_cancellation_of_the_running_request_sets_its_flag_at_once() {
+        let saw = AtomicBool::new(false);
+        let (started, has_started) = std::sync::mpsc::channel();
+        let waiting = |_: Vec<String>, cancel: Arc<AtomicBool>| {
+            started.send(()).unwrap();
+            let start = Instant::now();
+            while start.elapsed() < Duration::from_secs(5) {
+                if cancel.load(Ordering::Relaxed) {
+                    saw.store(true, Ordering::Relaxed);
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            report(Vec::new())
+        };
+        // The cancellation is written only once the extract runs, so it cancels a running
+        // request, not a waiting one.
+        let (reader, mut writer) = std::io::pipe().unwrap();
+        let client = std::thread::spawn(move || {
+            writeln!(writer, "{}", call(1)).unwrap();
+            has_started
+                .recv_timeout(Duration::from_secs(10))
+                .expect("the extract never started");
+            writeln!(writer, "{}", cancel(json!(1))).unwrap();
+            writeln!(writer, "{}", request(2, "tools/list", json!({}))).unwrap();
+        });
+        let mut output = Vec::new();
+        let start = Instant::now();
+        serve(BufReader::new(reader), &mut output, &waiting, "SKILL").unwrap();
+        client.join().unwrap();
+        assert!(
+            saw.load(Ordering::Relaxed),
+            "the extract saw the cancellation"
+        );
+        assert!(start.elapsed() < Duration::from_secs(4), "it stopped early");
+        let text = String::from_utf8(output).unwrap();
+        let ids: Vec<Value> = text
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap()["id"].clone())
+            .collect();
+        assert_eq!(ids, [json!(2)]);
     }
 
     #[test]
@@ -548,7 +707,8 @@ mod tests {
         );
         assert_eq!(
             responses[3]["result"]["messages"],
-            json!([{ "role": "user", "content": { "type": "text", "text": "SKILL" } }])
+            json!([{ "role": "user",
+                "content": { "type": "text", "text": format!("{MCP_GUIDE}\n\nSKILL") } }])
         );
     }
 
@@ -598,28 +758,62 @@ mod tests {
     }
 
     #[test]
-    fn malformed_messages_get_errors_and_notifications_get_nothing() {
-        let input = "not json\n[1]\n{\"jsonrpc\":\"2.0\",\"id\":null,\"method\":\"tools/list\"}\n\
-            {\"jsonrpc\":\"2.0\",\"method\":\"notifications/whatever\"}\n\n";
-        let mut output = Vec::new();
-        serve(
-            Cursor::new(input.as_bytes().to_vec()),
-            &mut output,
-            &report,
-            "",
-        )
-        .unwrap();
-        let responses: Vec<Value> = String::from_utf8(output)
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect();
+    fn requests_without_jsonrpc_get_errors_and_responses_without_an_id_get_nothing() {
+        let input = b"{\"id\":4,\"method\":\"tools/list\"}\n{\"id\":5}\n\
+            {\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32600,\"message\":\"x\"}}\n";
+        let responses = serve_bytes(input, &report);
+        assert_eq!(responses.len(), 2, "{responses:?}");
+        for (response, id) in responses.iter().zip([4, 5]) {
+            assert_eq!(response["id"], id);
+            assert_eq!(response["error"]["code"], -32600);
+        }
+        let mut unknown = request(6, "resources/list", json!({}));
+        unknown["params"]["_meta"]["io.modelcontextprotocol/protocolVersion"] = "2027-01-01".into();
+        let responses = run(&[unknown], &report);
+        assert_eq!(
+            responses[0]["error"]["code"], -32022,
+            "the version is checked before the method"
+        );
+    }
+
+    #[test]
+    fn malformed_messages_get_errors_without_an_id_and_notifications_get_nothing() {
+        let mut input = b"not json\n\xff\xfe\n[1]\n{}\n".to_vec();
+        input.extend_from_slice(
+            b"{\"jsonrpc\":\"2.0\",\"id\":null,\"method\":\"tools/list\"}\n\
+            {\"jsonrpc\":\"2.0\",\"method\":1}\n\
+            {\"jsonrpc\":\"2.0\",\"method\":\"notifications/whatever\"}\n\
+            {\"jsonrpc\":\"2.0\",\"id\":9,\"result\":{}}\n\
+            {\"jsonrpc\":\"2.0\",\"id\":8,\"error\":{\"code\":1,\"message\":\"x\"}}\n \r\n",
+        );
+        input.extend_from_slice(format!("{}\r\n", request(7, "tools/list", json!({}))).as_bytes());
+        let responses = serve_bytes(&input, &report);
         let codes: Vec<_> = responses
             .iter()
             .map(|r| r["error"]["code"].clone())
             .collect();
-        assert_eq!(codes, [json!(-32700), json!(-32600), json!(-32600)]);
-        assert!(responses.iter().all(|r| r["id"].is_null()));
+        let parse = json!(-32700);
+        let invalid = json!(-32600);
+        assert_eq!(
+            codes[..6],
+            [
+                parse.clone(),
+                parse,
+                invalid.clone(),
+                invalid.clone(),
+                invalid.clone(),
+                invalid
+            ],
+            "{responses:?}"
+        );
+        assert!(responses[..6].iter().all(|r| r.get("id").is_none()));
+        assert_eq!(
+            responses.len(),
+            7,
+            "a line that is not UTF-8 does not end the stream"
+        );
+        assert_eq!(responses[6]["id"], 7);
+        assert!(responses[6].get("result").is_some());
     }
 
     #[test]
@@ -649,6 +843,11 @@ mod tests {
                     4,
                     "tools/call",
                     json!({ "name": "delete", "arguments": {} }),
+                ),
+                request(
+                    5,
+                    "tools/call",
+                    json!({ "name": "extract", "arguments": 5 }),
                 ),
             ],
             &extract,
@@ -688,23 +887,34 @@ mod tests {
             responses[3]["error"]["code"], -32602,
             "an unknown tool is a protocol error"
         );
+        assert_eq!(
+            responses[4]["error"]["code"], -32602,
+            "arguments that are not an object break the CallToolRequest schema"
+        );
+    }
+
+    #[test]
+    fn notes_follow_the_report_as_text_content() {
+        let noted = |_: Vec<String>| {
+            Ok((
+                r#"{"complete":true}"#.to_owned(),
+                vec!["config ignored".to_owned()],
+            ))
+        };
+        let responses = run(&[call(1)], &noted);
+        assert_eq!(
+            responses[0]["result"]["content"],
+            json!([{ "type": "text", "text": r#"{"complete":true}"# },
+                { "type": "text", "text": "config ignored" }])
+        );
     }
 
     #[test]
     fn a_cancelled_request_gets_no_response() {
-        let slow = |_: Vec<String>| {
-            std::thread::sleep(std::time::Duration::from_millis(200));
-            report(Vec::new())
-        };
         let responses = run(
             &[
-                request(
-                    1,
-                    "tools/call",
-                    json!({ "name": "extract", "arguments": { "mode": "full" } }),
-                ),
-                json!({ "jsonrpc": "2.0", "method": "notifications/cancelled",
-                    "params": { "requestId": 1 } }),
+                call(1),
+                cancel(json!(1)),
                 request(2, "tools/list", json!({})),
             ],
             &slow,
@@ -715,27 +925,130 @@ mod tests {
 
     #[test]
     fn a_cancellation_drops_only_the_request_with_that_exact_id() {
-        let slow = |_: Vec<String>| {
-            std::thread::sleep(std::time::Duration::from_millis(200));
-            report(Vec::new())
-        };
-        let call = |id| {
-            request(
-                id,
-                "tools/call",
-                json!({ "name": "extract", "arguments": { "mode": "full" } }),
-            )
-        };
-        let cancel = |id: Value| {
-            json!({ "jsonrpc": "2.0", "method": "notifications/cancelled",
-                "params": { "requestId": id } })
-        };
         let responses = run(
             &[call(1), cancel(json!("1")), call(2), cancel(json!(3))],
             &slow,
         );
         let ids: Vec<_> = responses.iter().map(|r| r["id"].clone()).collect();
         assert_eq!(ids, [json!(1), json!(2)]);
+    }
+
+    #[test]
+    fn only_a_cancellation_notification_cancels() {
+        // Another notification naming the request, and a request with the cancellation's method,
+        // cancel nothing.
+        let mut as_request = cancel(json!(1));
+        as_request["id"] = json!(9);
+        let responses = run(
+            &[
+                call(1),
+                json!({ "jsonrpc": "2.0", "method": "notifications/progress",
+                    "params": { "requestId": 1 } }),
+                as_request,
+            ],
+            &slow,
+        );
+        let ids: Vec<_> = responses.iter().map(|r| r["id"].clone()).collect();
+        assert_eq!(ids, [json!(1), json!(9)], "{responses:?}");
+    }
+
+    #[test]
+    fn a_cancellation_of_an_unknown_request_is_ignored() {
+        let idle = run(
+            &[cancel(json!(1)), request(1, "tools/list", json!({}))],
+            &report,
+        );
+        assert_eq!(idle.len(), 1, "{idle:?}");
+        let busy = run(
+            &[
+                call(1),
+                cancel(json!(5)),
+                request(5, "tools/list", json!({})),
+            ],
+            &slow,
+        );
+        let ids: Vec<_> = busy.iter().map(|r| r["id"].clone()).collect();
+        assert_eq!(ids, [json!(1), json!(5)]);
+    }
+
+    #[test]
+    fn skipping_a_cancelled_request_keeps_the_entry_of_a_new_one_with_its_id() {
+        // The first 5 is cancelled while it waits and skipped; the second 5 then runs and is
+        // cancelled only after it started, which must still reach its flag.
+        let runs = std::cell::Cell::new(0);
+        let (started, has_started) = std::sync::mpsc::channel();
+        let extract = |_: Vec<String>, cancel: Arc<AtomicBool>| {
+            runs.set(runs.get() + 1);
+            if runs.get() == 1 {
+                std::thread::sleep(Duration::from_millis(200));
+                return report(Vec::new());
+            }
+            started.send(()).unwrap();
+            let start = Instant::now();
+            while !cancel.load(Ordering::Relaxed) && start.elapsed() < Duration::from_secs(5) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            report(Vec::new())
+        };
+        let (reader, mut writer) = std::io::pipe().unwrap();
+        let client = std::thread::spawn(move || {
+            for line in [call(1), call(5), cancel(json!(5)), call(5)] {
+                writeln!(writer, "{line}").unwrap();
+            }
+            has_started
+                .recv_timeout(Duration::from_secs(10))
+                .expect("the extract never started");
+            writeln!(writer, "{}", cancel(json!(5))).unwrap();
+            writeln!(writer, "{}", request(6, "tools/list", json!({}))).unwrap();
+        });
+        let mut output = Vec::new();
+        serve(BufReader::new(reader), &mut output, &extract, "SKILL").unwrap();
+        client.join().unwrap();
+        let ids: Vec<Value> = String::from_utf8(output)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap()["id"].clone())
+            .collect();
+        assert_eq!(ids, [json!(1), json!(6)]);
+        assert_eq!(runs.get(), 2, "the first 5 never ran");
+    }
+
+    #[test]
+    fn an_id_reused_after_a_cancellation_names_only_the_new_request() {
+        let responses = run(
+            &[
+                call(1),
+                request(5, "prompts/list", json!({})),
+                cancel(json!(5)),
+                request(5, "tools/list", json!({})),
+                cancel(json!(5)),
+                request(6, "tools/list", json!({})),
+            ],
+            &slow,
+        );
+        let ids: Vec<_> = responses.iter().map(|r| r["id"].clone()).collect();
+        assert_eq!(ids, [json!(1), json!(6)], "{responses:?}");
+    }
+
+    #[test]
+    fn a_request_cancelled_while_queued_never_runs() {
+        let runs = RefCell::new(0);
+        let counted = |args: Vec<String>| {
+            *runs.borrow_mut() += 1;
+            slow(args)
+        };
+        let responses = run(
+            &[
+                call(1),
+                call(2),
+                cancel(json!(2)),
+                request(3, "tools/list", json!({})),
+            ],
+            &counted,
+        );
+        let ids: Vec<_> = responses.iter().map(|r| r["id"].clone()).collect();
+        assert_eq!(ids, [json!(1), json!(3)]);
+        assert_eq!(*runs.borrow(), 1, "the cancelled extract never ran");
     }
 
     #[test]

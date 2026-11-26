@@ -1,10 +1,14 @@
 use rotter::config::{self, Config, Sources};
 use rotter::json::Json;
 use rotter::render::{self, Color, clean};
-use rotter::{Git, Mode, Options, extract_with, hosts, install, integration, mcp, toplevel};
+use rotter::{
+    Git, Mode, Options, Report, extract_with, git_dir, hosts, install, integration, mcp, toplevel,
+};
 use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 /// The review skill ships inside the binary so it always matches this version of the CLI.
 const SKILL: &str = include_str!("../skills/rotter-comment-review/SKILL.md");
@@ -20,12 +24,15 @@ const USAGE: &str = "usage: rotter --skill
        rotter extract (--staged | --worktree | --base <rev> | --full)
                       [--include-untracked] [--lang <glob>=<language>]... [-C <dir>]
                       [-- <pathspec>...]
-       rotter mcp
+       rotter mcp [--root <dir>]...
 Every command but --skill, hook and mcp takes [--pretty [--color=(auto | always | never)]].
 
 mcp serves the Model Context Protocol (version 2026-07-28 only) on stdin/stdout: a read-only
-`extract` tool, run exactly like `rotter extract`, and the review skill as the prompt
-`rotter-comment-review`. It exits when stdin closes.
+`extract` tool, run like `rotter extract` with its stderr notes returned as text content, and
+the review skill as the prompt `rotter-comment-review`. The tool reads only repositories whose
+top level is inside a --root (default: the repository of the working directory, or the working
+directory outside a repository). Once stdin closes, it answers the requests already read and
+exits.
 
 --skill prints the comment review skill for coding agents (it matches this binary's version).
 integration install claude registers `'<rotter>' hook claude-stop || true` as a Claude Code Stop
@@ -79,10 +86,11 @@ const VALUE_OPTIONS: [&str; 3] = ["--base", "--lang", "-C"];
 
 const LARGE_REPORT: usize = 5 << 20;
 
-fn size_note(len: usize) -> Option<String> {
+/// `narrow` names how the caller limits a report: `-- <pathspec>` on the CLI, `paths` over MCP.
+fn size_note(len: usize, narrow: &str) -> Option<String> {
     (len > LARGE_REPORT).then(|| {
         format!(
-            "report is {} MiB; consider limiting it with -- <pathspec>",
+            "report is {} MiB; consider limiting it with {narrow}",
             len >> 20
         )
     })
@@ -211,23 +219,27 @@ fn output_flags(args: &mut Vec<String>) -> Result<Option<Color>, String> {
     }
 }
 
-/// An untrusted config is reported and ignored.
-fn cli_config(repo: Option<&Path>) -> Result<Config, String> {
+/// An untrusted config is reported through `note` and ignored.
+fn load_config(repo: Option<&Path>, note: &mut dyn FnMut(String)) -> Result<Config, String> {
     let loaded = config::load(repo, &Sources::from_env())?;
-    if let Some(note) = loaded.note {
-        eprintln!("rotter: {}", clean(&note));
+    if let Some(text) = loaded.note {
+        note(clean(&text).to_string());
     }
     Ok(loaded.config)
 }
 
+fn cli_config(repo: Option<&Path>) -> Result<Config, String> {
+    load_config(repo, &mut |note| eprintln!("rotter: {note}"))
+}
+
 /// `--lang` globs come before `[overrides]`.
 fn configure(
-    git: &Git,
-    dir: &Path,
+    repo: &Path,
     options: &mut Options,
     languages: LangArgs,
+    note: &mut dyn FnMut(String),
 ) -> Result<(), String> {
-    let config = cli_config(Some(&toplevel(git, dir)?))?;
+    let config = load_config(Some(repo), note)?;
     options.grammars = config.languages();
     options.parse_timeout = config.parse_timeout();
     for (pattern, name) in languages {
@@ -243,13 +255,147 @@ fn configure(
     Ok(())
 }
 
-/// The MCP `extract` tool runs the same parsing, configuration and extraction as `rotter extract`.
-fn mcp_extract(args: Vec<String>) -> Result<(String, bool), String> {
-    let (dir, mut options, languages) = parse_args(&args)?;
+/// What `rotter extract` and the MCP `extract` tool share once the arguments are parsed. `allow`
+/// checks the repository before rotter's config is loaded for it, and extraction refuses a top
+/// level other than the one checked.
+fn extract_parsed(
+    (dir, mut options, languages): (PathBuf, Options, LangArgs),
+    allow: &dyn Fn(&Git, &Path) -> Result<(), String>,
+    note: &mut dyn FnMut(String),
+) -> Result<Report, String> {
     let git = Git::cli(&dir)?;
-    configure(&git, &dir, &mut options, languages)?;
-    let report = extract_with(&git, &dir, &options)?;
-    Ok((report.json.to_string(), report.complete))
+    let top = toplevel(&git, &dir)?;
+    allow(&git, &top)?;
+    configure(&top, &mut options, languages, note)?;
+    options.expect_top = Some(top);
+    extract_with(&git, &dir, &options)
+}
+
+fn mcp_extract(
+    roots: &[PathBuf],
+    args: Vec<String>,
+    cancel: Arc<AtomicBool>,
+) -> Result<(String, Vec<String>), String> {
+    let (dir, mut options, languages) = parse_args(&args)?;
+    // Resolved once and checked before git runs there; every later step uses this path. Both
+    // failures read the same and name the directory only as it was given (then the roots), so a
+    // call cannot tell whether a path outside the roots exists or where a link leads.
+    let refused = || {
+        format!(
+            "{} is not a directory inside the roots this server may read: {}",
+            dir.display(),
+            roots_text(roots)
+        )
+    };
+    let dir = canonical(&dir).map_err(|_| refused())?;
+    within(roots, &dir).map_err(|_| refused())?;
+    options.cancel = Some(cancel);
+    let allow = |git: &Git, top: &Path| check_repository(roots, git, top);
+    let mut notes = Vec::new();
+    let report = extract_parsed((dir, options, languages), &allow, &mut |note| {
+        notes.push(note)
+    })?;
+    let text = report.json.to_string();
+    notes.extend(size_note(text.len(), "paths"));
+    Ok((text, notes))
+}
+
+/// The top level must be inside a root, and so must the git directory, unless the git directory
+/// is the entry of a linked worktree that its repository registered for this very top level.
+fn check_repository(roots: &[PathBuf], git: &Git, top: &Path) -> Result<(), String> {
+    within(roots, top)?;
+    let git_dir = git_dir(git, top)?;
+    if within(roots, &git_dir).is_ok() || registered_worktree(&git_dir, top) {
+        return Ok(());
+    }
+    Err(format!(
+        "the git directory {} of {} is outside the roots this server may read",
+        git_dir.display(),
+        top.display()
+    ))
+}
+
+/// Git writes a linked worktree's `.git` path into the worktree entry's `gitdir` file; a `.git`
+/// file someone points at another repository has no such entry pointing back. Git writes that
+/// `.git` as a regular file, so a symlink in its place is not what git registered.
+fn registered_worktree(git_dir: &Path, top: &Path) -> bool {
+    let is_file = std::fs::symlink_metadata(top.join(".git")).is_ok_and(|meta| meta.is_file());
+    let Ok(back) = std::fs::read_to_string(git_dir.join("gitdir")) else {
+        return false;
+    };
+    // A relative entry (`git worktree add --relative-paths`) is relative to the entry's directory.
+    let back = git_dir.join(back.trim_end());
+    let worktree = back.parent().map(canonical);
+    is_file
+        && back.file_name() == Some(std::ffi::OsStr::new(".git"))
+        && worktree.is_some_and(|worktree| worktree.is_ok() && worktree == canonical(top))
+}
+
+fn within(roots: &[PathBuf], path: &Path) -> Result<(), String> {
+    let path = canonical(path)?;
+    if roots.iter().any(|root| path.starts_with(root)) {
+        return Ok(());
+    }
+    Err(format!(
+        "{} is outside the roots this server may read: {}",
+        path.display(),
+        roots_text(roots)
+    ))
+}
+
+fn roots_text(roots: &[PathBuf]) -> String {
+    let roots: Vec<String> = roots
+        .iter()
+        .map(|root| root.display().to_string())
+        .collect();
+    roots.join(", ")
+}
+
+fn canonical(dir: &Path) -> Result<PathBuf, String> {
+    dir.canonicalize()
+        .map_err(|error| format!("{}: {error}", dir.display()))
+}
+
+/// `--root <dir>`, repeated. Without one, the repository of the working directory, or the working
+/// directory itself when git finds no repository there.
+fn mcp_roots(rest: &[&str]) -> Result<Vec<PathBuf>, String> {
+    let mut roots = Vec::new();
+    for pair in rest.chunks(2) {
+        match pair {
+            ["--root", dir] => {
+                let root = canonical(Path::new(dir))?;
+                if !root.is_dir() {
+                    return Err(format!("--root {dir} is not a directory"));
+                }
+                roots.push(root);
+            }
+            ["--root"] => return Err("--root needs a directory".into()),
+            other => return Err(format!("unexpected mcp argument: {}", other[0])),
+        }
+    }
+    if roots.is_empty() {
+        let cwd = std::env::current_dir()
+            .map_err(|error| format!("cannot read the working directory: {error}"))?;
+        let found = Git::cli(&cwd).and_then(|git| {
+            let top = toplevel(&git, &cwd)?;
+            let git_dir = git_dir(&git, &top)?;
+            Ok((top, git_dir))
+        });
+        match found {
+            Ok((top, git_dir)) => {
+                let top = canonical(&top)?;
+                // A submodule or a `--separate-git-dir` repository keeps its git directory
+                // outside its top level; the default root has to admit that repository too.
+                let git_dir = canonical(&git_dir)?;
+                if !git_dir.starts_with(&top) {
+                    roots.push(git_dir);
+                }
+                roots.push(top);
+            }
+            Err(_) => roots.push(canonical(&cwd)?),
+        }
+    }
+    Ok(roots)
 }
 
 /// A reader that closed the pipe early (`rotter extract | head`) is not an error, so the run keeps
@@ -299,7 +445,7 @@ fn main() -> ExitCode {
     match words.as_slice() {
         ["--skill"] => emit(SKILL, ExitCode::SUCCESS),
         ["hook", rest @ ..] => hook(rest),
-        ["mcp"] => mcp_command(),
+        ["mcp", rest @ ..] => mcp_command(rest),
         words => match document(words, &show) {
             Some(result) => finish(result),
             None => extract_command(&args, &show),
@@ -324,9 +470,20 @@ fn utf8_args() -> Result<Vec<String>, ExitCode> {
     })
 }
 
-fn mcp_command() -> ExitCode {
+fn mcp_command(rest: &[&str]) -> ExitCode {
+    if rest.iter().any(|arg| *arg == "-h" || *arg == "--help") {
+        return emit(&format!("{USAGE}\n"), ExitCode::SUCCESS);
+    }
+    let roots = match mcp_roots(rest) {
+        Ok(roots) => roots,
+        Err(error) => {
+            eprintln!("rotter: {}\n{USAGE}", clean(&error));
+            return ExitCode::from(2);
+        }
+    };
+    let extract = |args, cancel| mcp_extract(&roots, args, cancel);
     let input = std::io::BufReader::new(std::io::stdin());
-    match mcp::serve(input, std::io::stdout().lock(), &mcp_extract, SKILL) {
+    match mcp::serve(input, std::io::stdout().lock(), &extract, SKILL) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("rotter: mcp: {}", clean(&error.to_string()));
@@ -445,28 +602,20 @@ fn extract_command(args: &[String], show: Show<'_>) -> ExitCode {
     {
         return emit(&format!("{USAGE}\n"), ExitCode::SUCCESS);
     }
-    let (dir, mut options, languages) = match parse_args(args) {
+    let (dir, options, languages) = match parse_args(args) {
         Ok(parsed) => parsed,
         Err(error) => {
             eprintln!("rotter: {}\n{USAGE}", clean(&error));
             return ExitCode::from(2);
         }
     };
-    let git = match Git::cli(&dir) {
-        Ok(git) => git,
-        Err(error) => {
-            eprintln!("rotter: {}", clean(&error));
-            return ExitCode::from(2);
-        }
-    };
-    if let Err(error) = configure(&git, &dir, &mut options, languages) {
-        eprintln!("rotter: {}", clean(&error));
-        return ExitCode::from(2);
-    }
-    match extract_with(&git, &dir, &options) {
+    let parsed = (dir, options, languages);
+    match extract_parsed(parsed, &|_, _| Ok(()), &mut |note| {
+        eprintln!("rotter: {note}")
+    }) {
         Ok(report) => {
             let text = show(&report.json, &|color| render::extract(&report.json, color));
-            if let Some(note) = size_note(text.len()) {
+            if let Some(note) = size_note(text.len(), "-- <pathspec>") {
                 eprintln!("rotter: {note}");
             }
             emit(&text, ExitCode::from(if report.complete { 0 } else { 1 }))
@@ -480,17 +629,66 @@ fn extract_command(args: &[String], show: Show<'_>) -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::size_note;
+    use super::{mcp_roots, size_note, within};
+    use std::path::Path;
 
     #[test]
     fn only_a_report_over_five_mib_gets_a_size_note() {
-        assert_eq!(size_note(0), None);
-        assert_eq!(size_note(5 << 20), None);
-        let note = size_note((5 << 20) + 1).unwrap();
+        assert_eq!(size_note(0, "paths"), None);
+        assert_eq!(size_note(5 << 20, "paths"), None);
+        let note = size_note((5 << 20) + 1, "-- <pathspec>").unwrap();
         assert_eq!(
             note,
             "report is 5 MiB; consider limiting it with -- <pathspec>"
         );
-        assert!(size_note(7 << 20).unwrap().starts_with("report is 7 MiB;"));
+        assert_eq!(
+            size_note(7 << 20, "paths").unwrap(),
+            "report is 7 MiB; consider limiting it with paths"
+        );
+    }
+
+    #[test]
+    fn within_accepts_only_a_top_level_inside_a_root() {
+        let base = std::env::temp_dir().join(format!("rotter-within-{}", std::process::id()));
+        let root = base.join("root");
+        let inside = root.join("repo");
+        let outside = base.join("other");
+        for dir in [&inside, &outside] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let roots = [root.canonicalize().unwrap()];
+        assert_eq!(within(&roots, &inside), Ok(()));
+        assert_eq!(within(&roots, &root), Ok(()));
+        let refused = within(&roots, &outside).unwrap_err();
+        assert!(refused.contains("outside the roots"), "{refused}");
+        assert!(refused.contains(roots[0].to_str().unwrap()), "{refused}");
+        assert!(within(&roots, &base.join("missing")).is_err());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn mcp_roots_take_root_pairs_or_default_to_the_working_repository() {
+        let temp = std::env::temp_dir().canonicalize().unwrap();
+        let text = temp.to_str().unwrap();
+        assert_eq!(
+            mcp_roots(&["--root", text, "--root", text]).unwrap(),
+            [temp.clone(), temp]
+        );
+        assert!(
+            mcp_roots(&["--root"])
+                .unwrap_err()
+                .contains("needs a directory")
+        );
+        assert!(mcp_roots(&["--pretty"]).unwrap_err().contains("unexpected"));
+        assert!(mcp_roots(&["--root", "/no/such/rotter/root"]).is_err());
+        let file = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        let refused = mcp_roots(&["--root", file.to_str().unwrap()]).unwrap_err();
+        assert!(refused.contains("is not a directory"), "{refused}");
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .canonicalize()
+            .unwrap();
+        // The last root is the top level; a checkout whose git directory lies outside it (a
+        // linked worktree, a submodule) adds that directory first.
+        assert_eq!(mcp_roots(&[]).unwrap().last(), Some(&repo));
     }
 }
