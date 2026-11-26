@@ -750,7 +750,15 @@ fn a_path_the_index_lists_outside_the_working_tree_is_not_read() {
         Some("read_error"),
         "{file}"
     );
+
+    // Whether something exists where the path leads does not show in the report.
     fs::remove_file(&outside).unwrap();
+    let without = repo.extract(Mode::Full, false);
+    assert_eq!(
+        without.json.to_string(),
+        text,
+        "the same report without the outside file"
+    );
 }
 
 #[test]

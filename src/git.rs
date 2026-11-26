@@ -750,7 +750,11 @@ fn drop_stat_only(
             let Some((path, _)) = stat_candidate(&entries[*index]) else {
                 continue;
             };
-            let Ok(Some(mut file)) = open_regular(&top.join(OsStr::from_bytes(path))) else {
+            let relative = Path::new(OsStr::from_bytes(path));
+            if unsafe_disk_path(top, relative).is_some() {
+                continue;
+            }
+            let Ok(Some(mut file)) = open_regular(&top.join(relative)) else {
                 continue;
             };
             let mut bytes = Vec::new();
@@ -1316,17 +1320,8 @@ impl Run<'_> {
     }
 
     fn read_disk(&self, relative: &Path, detected: &Detected) -> Result<Vec<u8>, Unread> {
-        // Git refuses such paths, but an index written by other means can still list them.
-        if relative
-            .components()
-            .any(|part| !matches!(part, std::path::Component::Normal(_)))
-        {
-            return Err(Unread::Error(
-                "the index names a path outside the working tree".to_owned(),
-            ));
-        }
-        if through_symlink(self.top, relative) {
-            return Err(Unread::Symlink);
+        if let Some(unread) = unsafe_disk_path(self.top, relative) {
+            return Err(unread);
         }
         let full = self.top.join(relative);
         let meta = fs::symlink_metadata(&full).map_err(|error| Unread::Error(error.to_string()))?;
@@ -1709,9 +1704,23 @@ fn diff_args<'a>(mode: &Mode, tree: &'a str) -> Vec<&'a str> {
     args
 }
 
-/// Whether a directory between the top level and `relative` is a symlink. Git never tracks a path
-/// through one, so such a path means the working tree no longer matches the index, and reading it
-/// would follow the link wherever it leads.
+/// Why a path the index lists must not be touched on disk, if it must not. Git refuses `..` and
+/// paths through a symlinked directory, but an index written by other means can list them, and
+/// every disk access to such a path (`read_disk`, `drop_stat_only`, `snapshot_entries`) would
+/// leave the working tree. The component check comes first: a `..` path has no ancestors to test.
+fn unsafe_disk_path(top: &Path, relative: &Path) -> Option<Unread> {
+    if relative
+        .components()
+        .any(|part| !matches!(part, std::path::Component::Normal(_)))
+    {
+        return Some(Unread::Error(
+            "the index names a path outside the working tree".to_owned(),
+        ));
+    }
+    through_symlink(top, relative).then_some(Unread::Symlink)
+}
+
+/// Whether a directory between the top level and `relative` is a symlink.
 fn through_symlink(top: &Path, relative: &Path) -> bool {
     relative
         .ancestors()
@@ -1735,8 +1744,12 @@ fn snapshot_entries(top: &Path, listed: &[u8]) -> Result<Vec<Entry>, String> {
             .ok_or("unexpected ls-files record")?;
         let mode = String::from_utf8_lossy(&record[..6]).into_owned();
         let path = record[tab + 1..].to_vec();
-        // Tracked files deleted from the working tree are not part of this snapshot.
-        let on_disk = fs::symlink_metadata(top.join(OsStr::from_bytes(&path))).is_ok();
+        // Tracked files deleted from the working tree are not part of this snapshot. A path that
+        // must not be read is kept, for read_disk to report, so the report never shows whether
+        // something exists where it leads.
+        let relative = Path::new(OsStr::from_bytes(&path));
+        let on_disk = unsafe_disk_path(top, relative).is_some()
+            || fs::symlink_metadata(top.join(relative)).is_ok();
         if on_disk
             && entries
                 .last()
@@ -1843,8 +1856,9 @@ fn report_json(
 #[cfg(test)]
 mod tests {
     use super::{
-        Change, Git, GitClass, Hunk, changes, classify, diff, guard_args, identity, linux_native,
-        macos_native, parse_raw, select, temp_root, timeout_detail, walk, write_new,
+        Change, Entry, Git, GitClass, Hunk, changes, classify, diff, drop_stat_only, guard_args,
+        identity, linux_native, macos_native, parse_raw, select, temp_root, timeout_detail, walk,
+        write_new,
     };
     use std::ffi::OsString;
     use std::fs;
@@ -1858,6 +1872,66 @@ mod tests {
         fs::create_dir_all(&path).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
         fs::canonicalize(path).unwrap()
+    }
+
+    #[test]
+    fn stat_only_checks_never_read_a_path_that_leaves_the_working_tree() {
+        let root = temp("stat-escape");
+        let repo = root.join("repo");
+        fs::create_dir(&repo).unwrap();
+        let status = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&repo)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let content = "package p\n";
+        for file in [root.join("x.go"), repo.join("y.go")] {
+            fs::write(file, content).unwrap();
+        }
+        symlink(&root, repo.join("link")).unwrap();
+        let oid = String::from_utf8(
+            std::process::Command::new("git")
+                .args(["hash-object", "--stdin"])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .and_then(|mut child| {
+                    use std::io::Write;
+                    child.stdin.take().unwrap().write_all(content.as_bytes())?;
+                    child.wait_with_output()
+                })
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_owned();
+        let entry = |path: &str| Entry {
+            status: "M".to_owned(),
+            old: Some((path.as_bytes().to_vec(), "100644".to_owned(), oid.clone())),
+            new: Some((
+                path.as_bytes().to_vec(),
+                "100644".to_owned(),
+                "0".repeat(oid.len()),
+            )),
+        };
+        let git = Git::cli(&repo).unwrap();
+        // Content equal to the before blob would drop the entry; outside the tree it is never read.
+        let mut entries = vec![entry("../x.go"), entry("link/x.go"), entry("y.go")];
+        drop_stat_only(&git, &repo, &mut entries, &[], &|| false).unwrap();
+        let kept: Vec<_> = entries
+            .iter()
+            .map(|entry| String::from_utf8_lossy(&entry.new.as_ref().unwrap().0).into_owned())
+            .collect();
+        assert_eq!(
+            kept,
+            ["../x.go", "link/x.go"],
+            "y.go is the positive control"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
