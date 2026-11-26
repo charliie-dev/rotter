@@ -10,8 +10,6 @@ use std::sync::OnceLock;
 
 const SOURCE: &str = include_str!("git_helper.rs");
 
-/// The helper binary, compiled with `rustc` once and cached under `CARGO_TARGET_TMPDIR` by a hash
-/// of its source.
 pub fn helper() -> &'static Path {
     static HELPER: OnceLock<PathBuf> = OnceLock::new();
     HELPER.get_or_init(|| {
@@ -45,7 +43,6 @@ pub fn helper() -> &'static Path {
     })
 }
 
-/// Installs the helper as `<dir>/<name>` (0755) with `settings` as its `key value` lines.
 pub fn native_as(dir: &Path, name: &str, settings: &[(&str, &str)]) -> PathBuf {
     fs::create_dir_all(dir).unwrap();
     let path = dir.join(name);
@@ -59,12 +56,10 @@ pub fn native_as(dir: &Path, name: &str, settings: &[(&str, &str)]) -> PathBuf {
     path
 }
 
-/// [`native_as`] named `git`.
 pub fn native_git(dir: &Path, settings: &[(&str, &str)]) -> PathBuf {
     native_as(dir, "git", settings)
 }
 
-/// The git a plain `git` resolves to from this process's absolute PATH entries.
 pub fn real_git() -> PathBuf {
     std::env::split_paths(&std::env::var_os("PATH").unwrap())
         .filter(|dir| dir.is_absolute())
@@ -73,7 +68,6 @@ pub fn real_git() -> PathBuf {
         .expect("git on PATH")
 }
 
-/// Every call the `env` setting recorded: `(key, value)` lines per call.
 pub fn calls(log: &Path) -> Vec<Vec<(String, String)>> {
     fs::read_to_string(log)
         .unwrap_or_default()
@@ -103,7 +97,6 @@ pub fn temp(name: &str) -> PathBuf {
     path
 }
 
-/// Plain git for fixtures, isolated from the user's configuration.
 pub fn git(dir: &Path, args: &[&str]) {
     let status = Command::new("git")
         .arg("-C")
@@ -122,12 +115,10 @@ pub fn git(dir: &Path, args: &[&str]) {
     assert!(status.success(), "git {args:?}");
 }
 
-/// `a.go` with a documented function returning `value`.
 pub fn go(value: usize) -> String {
     format!("package p\n\n// F returns one.\nfunc F() int {{ return {value} }}\n")
 }
 
-/// A repository at `repo` whose committed `a.go` is changed in the work tree.
 pub fn changed_repo(repo: &Path) {
     fs::create_dir_all(repo).unwrap();
     fs::write(repo.join("a.go"), go(1)).unwrap();
@@ -139,9 +130,8 @@ pub fn changed_repo(repo: &Path) {
 
 /// `rotter <args>` in `cwd` with HOME, XDG_*, CLAUDE_CONFIG_DIR, GROK_HOME, CODEX_HOME,
 /// COPILOT_HOME, PI_CODING_AGENT_DIR, OPENCODE_CONFIG_DIR and ROTTER_STATE_DIR pinned under
-/// `root` (Droid and Letta have no variable: `~/.factory`, `~/.letta`), then `env` (None removes
-/// a variable); `input` on stdin. A run that does not finish promptly fails the test instead of
-/// hanging it.
+/// `root` (Droid and Letta have no variable: `~/.factory`, `~/.letta`), then `env`; `input` on
+/// stdin.
 pub fn rotter(
     root: &Path,
     args: &[&str],
@@ -208,21 +198,18 @@ pub fn rotter(
     }
 }
 
-/// Claude Code's Stop input.
 pub fn claude_input(session: &str, cwd: &Path) -> String {
     serde_json::json!({ "session_id": session, "cwd": cwd, "hook_event_name": "Stop",
         "stop_hook_active": false })
     .to_string()
 }
 
-/// Grok Build's Stop input.
 pub fn grok_input(session: &str, cwd: &Path) -> String {
     serde_json::json!({ "hookEventName": "stop", "hook_event_name": "Stop", "sessionId": session,
         "cwd": cwd, "workspaceRoot": cwd, "stopHookActive": false, "reason": "end_turn" })
     .to_string()
 }
 
-/// Codex's Stop input.
 pub fn codex_input(session: &str, cwd: &Path) -> String {
     serde_json::json!({ "session_id": session, "turn_id": "t1", "transcript_path": null,
         "cwd": cwd, "hook_event_name": "Stop", "model": "m", "permission_mode": "default",
@@ -230,7 +217,6 @@ pub fn codex_input(session: &str, cwd: &Path) -> String {
     .to_string()
 }
 
-/// GitHub Copilot CLI's agentStop input.
 pub fn copilot_input(session: &str, cwd: &Path) -> String {
     serde_json::json!({ "sessionId": session, "timestamp": 1_700_000_000_000_u64, "cwd": cwd,
         "transcriptPath": "/nonexistent/transcript.jsonl", "stopReason": "end_turn",
@@ -238,7 +224,6 @@ pub fn copilot_input(session: &str, cwd: &Path) -> String {
     .to_string()
 }
 
-/// Factory Droid's Stop input.
 pub fn droid_input(session: &str, cwd: &Path) -> String {
     serde_json::json!({ "session_id": session, "transcript_path": "/nonexistent/t.jsonl",
         "cwd": cwd, "permission_mode": "default", "hook_event_name": "Stop",
@@ -260,7 +245,7 @@ pub fn set_mode(path: &Path, mode: u32) {
 }
 
 /// The JSON document rotter printed at the start of `text` (its stdout, possibly followed by its
-/// stderr), checked to be rotter's with `schema`.
+/// stderr).
 pub fn document(text: &str, schema: &str) -> serde_json::Value {
     let value: serde_json::Value = serde_json::Deserializer::from_str(text)
         .into_iter()
@@ -272,7 +257,6 @@ pub fn document(text: &str, schema: &str) -> serde_json::Value {
     value
 }
 
-/// Host `id` in the `rotter integration status` document at the start of `text`.
 pub fn status_host(text: &str, id: &str) -> serde_json::Value {
     document(text, "rotter.status/1")["hosts"]
         .as_array()
@@ -283,7 +267,6 @@ pub fn status_host(text: &str, id: &str) -> serde_json::Value {
         .clone()
 }
 
-/// The `result` of the `rotter integration install|uninstall` document at the start of `text`.
 pub fn result(text: &str) -> String {
     document(text, "rotter.integration/1")["result"]
         .as_str()

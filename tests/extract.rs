@@ -24,7 +24,6 @@ impl Repo {
         repo
     }
 
-    /// Runs git isolated from the user's configuration.
     fn git(&self, args: &[&str]) -> String {
         let output = Command::new("git")
             .arg("-C")
@@ -73,7 +72,6 @@ impl Repo {
         report
     }
 
-    /// Every reported text must equal the snapshot bytes at its reported range.
     fn check_ranges(&self, report: &Json) {
         for file in report.get("files").as_arr() {
             for key in ["before", "after"] {
@@ -160,7 +158,6 @@ fn unit<'a>(side: &'a Json, name: &str) -> &'a Json {
         .unwrap_or_else(|| panic!("no unit {name} in {side}"))
 }
 
-/// Returns (relation, changed, directive) for the comment with this exact text.
 fn comment<'a>(unit: &'a Json, text: &str) -> (&'a str, bool, Option<&'a str>) {
     let found = unit
         .get("comments")
@@ -226,7 +223,6 @@ fn comment_only_change_maps_to_the_documented_unit() {
         [Json::Num(2), Json::Num(5)]
     );
     assert_eq!(comment(add, "/// Adds two."), ("leading", true, None));
-    // The unit starts at its attribute, right after the comment.
     assert!(
         add.get("text")
             .as_str()
@@ -633,7 +629,6 @@ fn stat_only_check_stops_at_the_run_deadline() {
     let repo = Repo::new();
     repo.write("a.go", "package p\n");
     repo.commit();
-    // Same content, other stat data: dropped as stat-only before the deadline.
     fs::File::options()
         .write(true)
         .open(repo.0.join("a.go"))
@@ -1231,7 +1226,6 @@ fn unmerged_paths_are_reported_even_without_a_diff_record() {
             .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
             .output()
             .unwrap();
-        // Failed because of the conflict, not for any other reason.
         assert!(!merge.status.success());
         let said = String::from_utf8_lossy(&merge.stdout);
         assert!(said.contains("CONFLICT"), "{said}");
@@ -1429,7 +1423,6 @@ fn language_overrides_cover_helpers_without_a_shebang() {
     );
 }
 
-/// Runs the CLI in `repo.0` with TMPDIR = `tmp` and every user directory pinned under `home`.
 fn cli_with_tmp(repo: &Repo, home: &Path, tmp: &Path, args: &[&str]) -> std::process::Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_rotter"))
         .args(args)
@@ -1458,7 +1451,6 @@ fn cli_with_tmp(repo: &Repo, home: &Path, tmp: &Path, args: &[&str]) -> std::pro
     child.wait_with_output().unwrap()
 }
 
-/// A fresh 0700 directory next to the test repositories.
 fn private_temp(name: &str) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let path = std::env::temp_dir().join(format!(
@@ -1543,7 +1535,6 @@ fn unsafe_temp_root_is_refused_before_any_write() {
     assert_eq!(fs::read_to_string(&canary).unwrap(), "canary");
     assert_eq!(fs::read(repo.0.join(".git/index")).unwrap(), index);
 
-    // The hook reports it as one systemMessage per session and does not block.
     let run_hook = |session: &str| {
         let mut hook = Command::new(env!("CARGO_BIN_EXE_rotter"))
             .args(["hook", "claude-stop"])
@@ -1629,7 +1620,6 @@ fn fifo_index_fails_fast() {
     fs::remove_dir_all(tmp).unwrap();
 }
 
-/// Commits `before` at `path`, writes `after` there and extracts the work tree.
 fn changed(path: &str, before: &str, after: &str) -> (Repo, Report) {
     let repo = Repo::new();
     repo.write(path, before);

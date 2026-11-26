@@ -33,19 +33,16 @@ fn hook(input: &str, state: &Path) -> String {
     hook_with(input, state, &[])
 }
 
-/// Runs the hook with config and Claude settings pinned under `state` unless `env` sets them.
 fn hook_with(input: &str, state: &Path, env: &[(&str, &str)]) -> String {
     hook_in(input, state, state, env)
 }
 
-/// [`hook_with`] with the hook process running in `cwd`.
 fn hook_in(input: &str, state: &Path, cwd: &Path, env: &[(&str, &str)]) -> String {
     let output = run_hook("claude-stop", input, state, cwd, env);
     assert!(output.status.success(), "{output:?}");
     String::from_utf8(output.stdout).unwrap()
 }
 
-/// `rotter hook grok-stop` with everything pinned under `state`: (stdout, stderr).
 fn grok(input: &str, state: &Path, env: &[(&str, &str)]) -> (String, String) {
     let output = run_hook("grok-stop", input, state, state, env);
     assert_eq!(output.status.code(), Some(0), "{output:?}");
@@ -55,13 +52,10 @@ fn grok(input: &str, state: &Path, env: &[(&str, &str)]) -> (String, String) {
     )
 }
 
-/// `rotter hook <name>` in `cwd` with HOME, XDG dirs, Claude settings, Grok's home and the state
-/// directory pinned under `state` unless `env` sets them.
 fn run_hook(name: &str, input: &str, state: &Path, cwd: &Path, env: &[(&str, &str)]) -> Output {
     run_hook_args(&[name], input, state, cwd, env)
 }
 
-/// [`run_hook`] with `rotter hook <args>`.
 fn run_hook_args(
     args: &[&str],
     input: &str,
@@ -101,7 +95,6 @@ fn run_hook_args(
     wait(child, "rotter hook")
 }
 
-/// Waits for `child`; one that does not finish promptly fails the test instead of hanging it.
 fn wait(mut child: Child, what: &str) -> Output {
     let started = std::time::Instant::now();
     while child.try_wait().unwrap().is_none() {
@@ -170,14 +163,12 @@ fn integration(config: &Path, args: &[&str]) -> (i32, String) {
     integration_env(config, args, &[])
 }
 
-/// [`integration`] with `env` applied after the pinned directories (None removes a variable).
 fn integration_env(config: &Path, args: &[&str], env: &[(&str, Option<&str>)]) -> (i32, String) {
     let mut command = Command::new(env!("CARGO_BIN_EXE_rotter"));
     command.arg("integration").args(args);
     finish_env(config, command, env)
 }
 
-/// `rotter integration <args>` under `umask`.
 fn integration_umask(config: &Path, umask: &str, args: &[&str]) -> (i32, String) {
     let mut command = Command::new("/bin/sh");
     command
@@ -192,9 +183,6 @@ fn finish(config: &Path, command: Command) -> (i32, String) {
     finish_env(config, command, &[])
 }
 
-/// Runs an integration command in `config` with Claude settings in `config`, HOME, XDG dirs and
-/// Grok's home pinned under it, then `env`; a command that does not finish promptly fails the
-/// test instead of hanging it.
 fn finish_env(config: &Path, mut command: Command, env: &[(&str, Option<&str>)]) -> (i32, String) {
     command
         .current_dir(config)
@@ -345,7 +333,7 @@ fn state_files_behind_a_link_are_neither_read_nor_written() {
     let input = common::claude_input("s", &repo);
     let first = hook(&input, &state);
     assert!(first.contains(r#""decision":"block""#), "{first}");
-    // The slot now remembers this report; swap it for a link to a file outside the state dir.
+    // The slot now remembers this report.
     let slot = state.join("claude-stop/s");
     let outside = root.join("outside");
     fs::copy(&slot, &outside).unwrap();
@@ -575,7 +563,6 @@ fn install_sizes_the_timeout_from_the_config() {
     assert_eq!(integration(&config, &["install", "claude"]).0, 0);
     expect(150);
 
-    // A refused config is reported and the default applies.
     write_config(&xdg, "parse_timeout_seconds = 3600\n");
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(&path, fs::Permissions::from_mode(0o664)).unwrap();
@@ -655,7 +642,6 @@ fn symlinked_backup_or_temporary_is_never_followed() {
     let temporary = config.join("settings.json.rotter-tmp");
     fs::write(&settings, r#"{"model": "x"}"#).unwrap();
 
-    // install stops on a symlinked backup without touching it, its referent or settings.json.
     symlink(&canary, &backup).unwrap();
     let (code, text) = integration(&config, &["install", "claude"]);
     assert_eq!(code, 2, "{text}");
@@ -670,19 +656,16 @@ fn symlinked_backup_or_temporary_is_never_followed() {
     );
     fs::remove_file(&backup).unwrap();
 
-    // A pre-planted temporary symlink is refused, never written through.
     symlink(&canary, &temporary).unwrap();
     let (code, text) = integration(&config, &["install", "claude"]);
     assert_eq!(code, 2, "{text}");
     assert_eq!(fs::read_to_string(&canary).unwrap(), "canary");
     assert_eq!(fs::read_to_string(&settings).unwrap(), r#"{"model": "x"}"#);
     fs::remove_file(&temporary).unwrap();
-    // A stale regular temporary is replaced.
     fs::write(&temporary, "stale").unwrap();
     assert_eq!(integration(&config, &["install", "claude"]).0, 0);
     assert!(!temporary.exists());
 
-    // Uninstall with a symlinked backup: the entry goes, the link and its referent stay.
     fs::remove_file(&backup).unwrap();
     symlink(&canary, &backup).unwrap();
     let (code, text) = integration(&config, &["uninstall", "claude"]);
@@ -722,11 +705,9 @@ fn uninstall_backup_cleanup_follows_a_successful_read() {
     let backup = config.join("settings.json.rotter-bak");
     assert_eq!(integration(&config, &["install", "claude"]).0, 0);
     fs::write(&backup, "old").unwrap();
-    // Unparseable settings: exit 2 and the backup stays.
     fs::write(&settings, "{").unwrap();
     assert_eq!(integration(&config, &["uninstall", "claude"]).0, 2);
     assert_eq!(fs::read_to_string(&backup).unwrap(), "old");
-    // Nothing installed: the leftover backup is still removed and named.
     fs::write(&settings, "{}").unwrap();
     let (code, text) = integration(&config, &["uninstall", "claude"]);
     assert_eq!(code, 0, "{text}");
@@ -857,15 +838,12 @@ fn config_notes_are_announced_once_per_session() {
             cwd.display()
         )
     };
-    // Nothing to review: the note alone, once.
     let first = hook(&input(&clean, "n"), &state);
     assert!(first.contains("config error"), "{first}");
     assert_eq!(hook(&input(&clean, "n"), &state), "", "note repeated");
-    // A review request in the same session no longer carries the note.
     let review = hook(&input(&repo, "n"), &state);
     assert!(review.contains(r#""decision":"block""#), "{review}");
     assert!(!review.contains("systemMessage"), "{review}");
-    // A new session hears it again; a different note is announced too.
     assert!(hook(&input(&clean, "m"), &state).contains("config error"));
     write_config(&state.join("xdg-config"), "parse_timeout_seconds = 4000\n");
     assert!(hook(&input(&clean, "n"), &state).contains("4000"));
@@ -878,7 +856,6 @@ fn grok_command() -> String {
     format!("'{}' hook grok-stop || true", env!("CARGO_BIN_EXE_rotter"))
 }
 
-/// A rotter-generated Grok document for `command` and `timeout`.
 fn grok_document(command: &str, timeout: u64) -> serde_json::Value {
     serde_json::json!({ "hooks": { "Stop": [{ "hooks": [
         { "type": "command", "command": command, "timeout": timeout }
@@ -931,7 +908,6 @@ fn grok_install_writes_one_private_file_and_uninstall_removes_it() {
         "{text}"
     );
 
-    // Replacing a 0644 file, sized from the config: exactly 0600 again, nothing copied.
     set_mode(&file, 0o644);
     let xdg = root.join("xdg-config");
     write_config(&xdg, "parse_timeout_seconds = 300\n");
@@ -941,7 +917,6 @@ fn grok_install_writes_one_private_file_and_uninstall_removes_it() {
     assert_eq!(read_json(&file), grok_document(&grok_command(), 330));
     assert_eq!(mode(&file), 0o600);
 
-    // A stale regular temporary is replaced; a symlinked one is refused and never followed.
     let temporary = hooks.join("rotter.json.rotter-tmp");
     fs::write(&temporary, "stale").unwrap();
     write_config(&xdg, "");
@@ -1007,7 +982,6 @@ fn grok_target_must_exist_and_be_private() {
     assert!(!root.join("rotter.json").exists());
     fs::remove_file(grok.join("hooks")).unwrap();
 
-    // A relative GROK_HOME is ignored: $HOME/.grok is used.
     let dot = root.join("home/.grok");
     fs::create_dir_all(&dot).unwrap();
     let relative = [("GROK_HOME", Some("rel-grok"))];
@@ -1015,7 +989,6 @@ fn grok_target_must_exist_and_be_private() {
     assert_eq!(code, 0, "{text}");
     assert!(dot.join("hooks/rotter.json").is_file());
     assert!(!root.join("rel-grok").exists() && !grok.join("hooks").exists());
-    // Neither an absolute GROK_HOME nor HOME.
     let neither = [("GROK_HOME", Some("rel-grok")), ("HOME", None)];
     for args in [&["install", "grok"][..], &["uninstall", "grok"]] {
         let (code, text) = integration_env(&root, args, &neither);
@@ -1083,7 +1056,6 @@ fn foreign_or_unsafe_rotter_json_is_left_alone() {
     fs::remove_dir_all(&root).unwrap();
 }
 
-/// Host `id` of a status document as `(state, detail, path)`.
 fn host_state(text: &str, id: &str) -> (String, String, String) {
     let host = status_host(text, id);
     let field = |key: &str| host[key].as_str().unwrap_or("null").to_owned();
@@ -1138,7 +1110,6 @@ fn status_reports_each_host_with_its_path() {
         owned("installed", "installed (current)", &file)
     );
 
-    // Edited timeouts.
     let edit = |path: &Path, key: &str, value: serde_json::Value| {
         let mut json = read_json(path);
         json["hooks"]["Stop"][0]["hooks"][0][key] = value;
@@ -1163,7 +1134,6 @@ fn status_reports_each_host_with_its_path() {
             &file
         )
     );
-    // Edited commands.
     edit(
         &settings,
         "command",
@@ -1219,7 +1189,7 @@ fn status_compat_check_is_read_only_and_tolerant() {
     );
     let before = fs::read(&literal).unwrap();
     // (ii) The primary settings are a different, readable file; only the compat path is
-    // unreadable or a FIFO: "unknown", exit 0, no blocking.
+    // unreadable or a FIFO.
     fs::write(root.join("settings.json"), "{}").unwrap();
     set_mode(&literal, 0o000);
     let (code, text) = integration(&root, &["status"]);
@@ -1320,7 +1290,6 @@ fn unknown_hooks_and_failing_binaries_never_block() {
             "{output:?}"
         );
     }
-    // The installed command strings with a binary that exits 2 still exit 0, printing nothing.
     fs::create_dir(root.join("grok")).unwrap();
     assert_eq!(integration(&root, &["install", "grok"]).0, 0);
     assert_eq!(integration(&root, &["install", "claude"]).0, 0);
@@ -1390,7 +1359,6 @@ fn install_claude_migrates_the_old_command_form() {
     fs::remove_dir_all(&config).unwrap();
 }
 
-/// Grok Build's Stop input for `cwd` in `session`, with `extra` fields replacing defaults.
 fn grok_input(session: &str, cwd: &Path, extra: serde_json::Value) -> String {
     let mut input = serde_json::json!({
         "hookEventName": "stop",
@@ -1489,7 +1457,7 @@ fn grok_stop_blocks_once_per_new_report() {
         ""
     );
 
-    // The session-end Stop never runs git; the same wrapper does run on a turn end.
+    // The session-end Stop never runs git.
     let wrapper = state.join("wrapper");
     let log = state.join("git.log");
     let real = common::real_git();
@@ -1550,7 +1518,6 @@ fn native_and_compat_registrations_ask_once() {
     let repo = changed_repo("double-repo");
     let state = temp("double-state");
     let claude = |input: &str| hook(input, &state);
-    // Native then compat, and compat then native, with the same Grok input.
     let input = grok_input("d1", &repo, json!({}));
     assert!(is_block(&grok(&input, &state, &[]).0));
     assert_eq!(claude(&input), "");
@@ -1558,8 +1525,8 @@ fn native_and_compat_registrations_ask_once() {
     assert!(is_block(&claude(&input)));
     assert_eq!(grok(&input, &state, &[]).0, "");
 
-    // The external review's sequence: the compat hook's short timeout gives a zero-unit
-    // timed-out report, which must not make the native report ask again. Three user turns.
+    // The compat hook's short timeout gives a zero-unit timed-out report, which must not make
+    // the native report ask again.
     seed_settings(&state.join("claude"), json!(10));
     let turn = grok_input("r", &repo, json!({}));
     let continuation = grok_input("r", &repo, json!({ "stopHookActive": true }));
@@ -1578,7 +1545,6 @@ fn native_and_compat_registrations_ask_once() {
         assert_eq!(claude(&continuation), "");
     }
     assert_eq!(blocks, 1);
-    // A genuinely different report asks again.
     fs::write(
         repo.join("b.lua"),
         "-- G.\nlocal function g() return 1 end\n",

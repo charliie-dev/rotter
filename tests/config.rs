@@ -44,7 +44,6 @@ fn git(dir: &Path, args: &[&str]) {
     assert!(status.success(), "git {args:?}");
 }
 
-/// A committed repository with these files.
 fn repo(files: &[(&str, &str)]) -> PathBuf {
     let repo = temp("repo");
     for (path, content) in files {
@@ -86,7 +85,6 @@ impl Run {
     }
 }
 
-/// Runs `rotter extract --full -C <repo>` with `env` (None removes the variable) in `cwd`.
 fn extract_cli(repo: &Path, args: &[&str], env: &[(&str, Option<&Path>)], cwd: &Path) -> Run {
     let mut command = Command::new(env!("CARGO_BIN_EXE_rotter"));
     command
@@ -108,7 +106,6 @@ fn extract_cli(repo: &Path, args: &[&str], env: &[(&str, Option<&Path>)], cwd: &
     }
 }
 
-/// Config and cache pinned to `xdg`.
 fn xdg_env(xdg: &Path) -> [(&'static str, Option<&Path>); 2] {
     [
         ("XDG_CONFIG_HOME", Some(xdg)),
@@ -200,7 +197,6 @@ fn untrusted_or_repository_config_is_ignored_with_a_note() {
     assert!(run.stderr.contains("external languages disabled"));
     assert_eq!(run.status("a.lua2"), "not_in_scope");
 
-    // Inside the analysed repository, directly and through a symlink from outside.
     let inside = repo.join(".config");
     write_config(&inside, LUA2);
     let run = extract_cli(&repo, &[], &xdg_env(&inside), &repo);
@@ -284,10 +280,8 @@ fn a_directory_link_in_the_repository_anywhere_on_the_way_turns_the_config_off()
     let outside = fs::canonicalize(temp("outside")).unwrap();
     write_config(&outside, LUA2);
     let links = fs::canonicalize(temp("links")).unwrap();
-    // XDG_CONFIG_HOME is a link to the repository's link to the config home.
     symlink(&outside, repo.join("cfglink")).unwrap();
     symlink(repo.join("cfglink"), links.join("home")).unwrap();
-    // `rotter` is a link to the repository's link to the config directory.
     symlink(outside.join("rotter"), repo.join("rotter-cfg")).unwrap();
     fs::create_dir(links.join("dir")).unwrap();
     symlink(repo.join("rotter-cfg"), links.join("dir/rotter")).unwrap();
@@ -365,7 +359,6 @@ fn a_missing_config_under_an_untrusted_directory_is_not_a_note() {
     let run = extract_cli(&repo, &[], &xdg_env(&xdg), &repo);
     assert_eq!(run.code, 0, "{}", run.stderr);
     assert!(!run.stderr.contains("refused"), "{}", run.stderr);
-    // With a file there, the refusal is still reported.
     write_config(&xdg, LUA2);
     let run = extract_cli(&repo, &[], &xdg_env(&xdg), &repo);
     assert!(run.stderr.contains("refused"), "{}", run.stderr);

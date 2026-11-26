@@ -1,7 +1,3 @@
-//! Which git rotter runs, and with what environment: PATH entries inside the repository (under
-//! any spelling), untrusted or non-native candidates and dispatchers are never run; in hook mode
-//! the git child gets only the allowlisted environment.
-
 mod common;
 
 use common::{
@@ -14,13 +10,11 @@ use std::os::unix::fs::{MetadataExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::Output;
 
-/// `entries` in front of this process's PATH.
 fn path_with(entries: &[&Path]) -> OsString {
     let rest = std::env::split_paths(&std::env::var_os("PATH").unwrap()).collect::<Vec<_>>();
     std::env::join_paths(entries.iter().map(|entry| entry.to_path_buf()).chain(rest)).unwrap()
 }
 
-/// `hook claude-stop`, `hook grok-stop` and `extract --worktree` for `cwd` with `path`.
 fn every_mode(
     root: &Path,
     cwd: &Path,
@@ -54,7 +48,6 @@ fn every_mode(
     ]
 }
 
-/// Every mode found the change with the real git.
 fn assert_reviewed(outputs: &[Output], what: &str) {
     assert!(is_block(&outputs[0]), "{what}: {:?}", outputs[0]);
     assert!(is_block(&outputs[1]), "{what}: {:?}", outputs[1]);
@@ -111,7 +104,6 @@ fn repository_git_on_path_is_never_run_under_any_spelling() {
             bin.clone(),
         ),
     ];
-    // A case-variant spelling, on a case-insensitive volume.
     let upper = PathBuf::from(repo.display().to_string().to_uppercase()).join("BIN");
     if fs::metadata(&upper).is_ok_and(|meta| meta.ino() == fs::metadata(&bin).unwrap().ino()) {
         cases.push(("case variant".into(), sub.clone(), upper));
@@ -124,7 +116,6 @@ fn repository_git_on_path_is_never_run_under_any_spelling() {
         assert!(!marker.exists(), "{name}: the repository's git ran");
         assert_reviewed(&outputs, &name);
     }
-    // Positive control: the same helper outside the repository is the git rotter runs.
     let elsewhere = root.join("elsewhere");
     native_git(&elsewhere, &[("marker", &marker.display().to_string())]);
     fresh_state(&root);
@@ -141,11 +132,9 @@ fn untrusted_or_misnamed_candidates_are_skipped() {
     let marker = root.join("marker");
     let marking = [("marker", marker.display().to_string())];
     let marking: Vec<(&str, &str)> = marking.iter().map(|(k, v)| (*k, v.as_str())).collect();
-    // A native program not named git, reached through a link named git.
     let misnamed = root.join("misnamed");
     let other = native_as(&misnamed, "other", &marking);
     symlink(&other, misnamed.join("git")).unwrap();
-    // A native git in a group-writable directory.
     let shared = root.join("shared");
     native_git(&shared, &marking);
     set_mode(&shared, 0o775);
@@ -155,7 +144,6 @@ fn untrusted_or_misnamed_candidates_are_skipped() {
         assert!(!marker.exists(), "{name}: ran");
         assert_reviewed(&outputs, name);
     }
-    // With nothing usable after them: silent hooks, CLI exit 2 naming the skipped candidate.
     fresh_state(&root);
     let only = std::env::join_paths([&misnamed, &shared]).unwrap();
     let outputs = every_mode(&root, &repo, &only, &[]);
@@ -201,8 +189,7 @@ fn script_dispatchers_are_skipped_before_any_probe() {
     )
     .unwrap();
     set_mode(&shims.join("git"), 0o755);
-    // Positive control: run from the repository, the dispatcher runs the repository's git. A
-    // fork in a concurrent test can still hold the script's write descriptor until it execs
+    // A fork in a concurrent test can still hold the script's write descriptor until it execs
     // (ETXTBSY on Linux), so the first runs may be refused.
     let control = (0..100)
         .find_map(|_| {
@@ -268,7 +255,7 @@ fn no_git_runs_without_a_git_directory_above_the_cwd() {
         "{}",
         fs::read_to_string(&log).unwrap_or_default()
     );
-    // A continuation the hook caused, and Grok's session-end Stop: no git either.
+    // A continuation the hook caused, and Grok's session-end Stop.
     let repo = root.join("repo");
     changed_repo(&repo);
     let flagged = [
@@ -299,7 +286,6 @@ fn no_git_runs_without_a_git_directory_above_the_cwd() {
         "{}",
         fs::read_to_string(&log).unwrap_or_default()
     );
-    // Positive control: in a repository the wrapper is used.
     let output = rotter(
         &root,
         &["hook", "claude"],
@@ -482,7 +468,6 @@ fn developer_dir_never_reaches_the_apple_git_stub() {
         .unwrap();
         set_mode(&path, 0o755);
     }
-    // Positive control: the stub runs the repository's tools when DEVELOPER_DIR reaches it.
     let control = std::process::Command::new("/usr/bin/git")
         .arg("version")
         .env("DEVELOPER_DIR", &developer)

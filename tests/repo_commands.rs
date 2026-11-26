@@ -1,7 +1,5 @@
-//! Repository-defined commands (filter drivers, hooks, promisor fetches, submodule status) never
-//! run while rotter extracts. Every marker case first runs rotter on a fresh fixture (negative),
-//! then plain git on a rebuilt equivalent fixture (positive control), proving the fixture really
-//! reaches the command.
+//! Every marker case first runs rotter on a fresh fixture (negative), then plain git on a rebuilt
+//! equivalent fixture (positive control), proving the fixture really reaches the command.
 
 mod common;
 
@@ -16,19 +14,16 @@ use std::time::{Duration, Instant, SystemTime};
 
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 
-/// An object id no fixture contains.
 const MISSING: &str = "1234567890123456789012345678901234567890";
 
 struct Fixture {
     root: PathBuf,
     repo: PathBuf,
     marker: PathBuf,
-    /// Prepended to PATH for rotter (a git wrapper), if any.
     wrapper: Option<PathBuf>,
 }
 
 impl Fixture {
-    /// A repository whose committed `a.rs` has a documented function, changed in the work tree.
     fn changed(name: &str) -> Self {
         // Only safe characters: the marker path is quoted into git config values.
         let name: String = name
@@ -114,12 +109,10 @@ impl Fixture {
         fs::write(self.repo.join(".git/info/attributes"), format!("{line}\n")).unwrap();
     }
 
-    /// A shell command that creates the marker.
     fn touch(&self) -> String {
         format!("touch '{}'", self.marker.display())
     }
 
-    /// An executable script that creates the marker and fails.
     fn script(&self, name: &str) -> PathBuf {
         let path = self.root.join(name);
         fs::write(&path, format!("#!/bin/sh\n{}\nexit 1\n", self.touch())).unwrap();
@@ -131,7 +124,6 @@ impl Fixture {
         self.marker.exists()
     }
 
-    /// Runs rotter in the repository with every user directory pinned under the fixture.
     fn rotter(&self, args: &[&str], input: Option<&str>) -> Output {
         let home = self.root.join("home");
         let mut command = Command::new(env!("CARGO_BIN_EXE_rotter"));
@@ -177,7 +169,6 @@ impl Fixture {
         child.wait_with_output().unwrap()
     }
 
-    /// `hook claude-stop` for this repository in a fresh session.
     fn claude_stop(&self) -> Output {
         let session = format!("s{}", NEXT.fetch_add(1, Ordering::Relaxed));
         let input = serde_json::json!({ "session_id": session, "cwd": self.repo }).to_string();
@@ -186,7 +177,6 @@ impl Fixture {
         output
     }
 
-    /// `hook grok-stop` with Grok-shaped input for this repository in a fresh session.
     fn grok_stop(&self) -> Output {
         let session = format!("g{}", NEXT.fetch_add(1, Ordering::Relaxed));
         self.grok_stop_in(&session)
@@ -207,7 +197,6 @@ impl Fixture {
         output
     }
 
-    /// Replaces the HEAD commit's tree with one whose `a.rs` names a missing blob.
     fn missing_blob(&self) {
         let tree = self.pipe(
             &["mktree", "--missing"],
@@ -217,7 +206,6 @@ impl Fixture {
         self.git(&["update-ref", "refs/heads/main", &commit]);
     }
 
-    /// Commits once more and deletes that commit's loose object: HEAD names a missing commit.
     fn missing_head(&self) {
         self.git(&["commit", "-q", "--allow-empty", "-m", "gone"]);
         let head = self.git(&["rev-parse", "HEAD"]);
@@ -250,9 +238,6 @@ impl Fixture {
         String::from_utf8(output.stdout).unwrap().trim().to_owned()
     }
 
-    /// A native `git` helper first on rotter's PATH: `version` prints `version`, `refuse` (text
-    /// in the whole argument list) exits 3, anything else runs the real git. Every call is
-    /// logged.
     fn wrap(&mut self, version: Option<&str>, refuse: Option<&str>) {
         let dir = self.root.join("wrapper");
         let log = self.root.join("wrapper.log").display().to_string();
@@ -277,7 +262,6 @@ impl Drop for Fixture {
 
 use common::real_git;
 
-/// The real git's `(major, minor, patch)`.
 fn real_version() -> (u32, u32, u32) {
     let output = Command::new(real_git()).arg("version").output().unwrap();
     let text = String::from_utf8(output.stdout).unwrap();
@@ -314,14 +298,11 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
-/// A `hook grok-stop` refusal: exit 0 (checked by the helper), nothing on stdout, a stderr note.
 fn assert_grok_note(output: &Output, note: &str, name: &str) {
     assert_eq!(stdout(output), "", "{name}: {output:?}");
     assert!(stderr(output).contains(note), "{name}: {output:?}");
 }
 
-/// Rotter through `hook claude-stop`, `hook grok-stop`, `extract --worktree` and
-/// `extract --base HEAD`: `a.rs` is still reported and the marker never appears.
 fn assert_rotter_safe(fixture: &Fixture, name: &str) {
     assert!(!fixture.marked(), "{name}: fixture setup ran the command");
     let hook = fixture.claude_stop();
@@ -353,7 +334,6 @@ fn assert_rotter_safe(fixture: &Fixture, name: &str) {
     }
 }
 
-/// Negative run on a fresh fixture, then `positive` on a rebuilt one must create the marker.
 fn case(name: &str, build: impl Fn(&Fixture), positive: impl Fn(&Fixture)) {
     let fixture = Fixture::changed(name);
     build(&fixture);
@@ -370,7 +350,6 @@ fn plain_diff(fixture: &Fixture) {
     fixture.plain_git(&["diff", "--raw", "-M", "HEAD"]);
 }
 
-/// Sets `path`'s mtime far in the past without changing its content.
 fn touch_old(path: &Path) {
     fs::File::options()
         .write(true)
@@ -383,7 +362,6 @@ fn touch_old(path: &Path) {
 #[test]
 fn filter_drivers_never_run() {
     let body: String = (1..=12).map(|line| format!("// line {line}\n")).collect();
-    // (config section header, attribute value): exact, `=`, `.`, section case and empty names.
     let drivers = [
         (r#"[filter "x"]"#, "x"),
         (r#"[filter "x=y"]"#, "x=y"),
@@ -509,7 +487,6 @@ fn dirty_submodule_status_never_runs() {
     case("submodule", build, plain_diff);
 }
 
-/// A local promisor remote whose upload-pack creates the marker.
 fn promisor(fixture: &Fixture, config: &str) {
     let upload = fixture.script("upload-pack");
     fixture.append_config(
@@ -528,7 +505,6 @@ fn promisor_objects_are_never_fetched_with_lazy_fetch_git() {
         real_version() >= (2, 45, 1),
         "this test needs git 2.45.1 or newer (GIT_NO_LAZY_FETCH) first on PATH"
     );
-    // A missing before blob is that side's read_error.
     let build = |fixture: &Fixture| {
         promisor(fixture, PARTIAL_CLONE);
         fixture.missing_blob();
@@ -558,7 +534,6 @@ fn promisor_objects_are_never_fetched_with_lazy_fetch_git() {
     assert!(fixture.marked(), "positive control never fetched");
     drop(fixture);
 
-    // A HEAD naming a missing commit is an extraction error.
     let build = |fixture: &Fixture| {
         promisor(fixture, PARTIAL_CLONE);
         fixture.missing_head();
@@ -594,7 +569,6 @@ fn gated_git_refuses_partial_clones_before_reading_objects() {
     let with =
         |key: &str| format!("{key}\n[remote \"origin\"]\n\turl = URL\n\tuploadpack = UPLOAD\n");
     let fixtures: Vec<(&str, String, bool, bool)> = vec![
-        // (name, config, missing HEAD instead of a missing blob, positive control)
         ("partial clone", PARTIAL_CLONE.to_owned(), false, true),
         (
             "promisor yes",
@@ -697,7 +671,6 @@ fn gated_git_refuses_partial_clones_before_reading_objects() {
                 assert!(fixture.marked(), "{name}: positive control never fetched");
             }
         }
-        // Without any of those keys the same wrapper extracts normally.
         let mut fixture = Fixture::changed("gated-plain");
         fixture.wrap(Some(version), None);
         let output = fixture.rotter(&["extract", "--worktree"], None);
@@ -814,7 +787,6 @@ fn embedded_bare_repository_is_never_used() {
     let fixture = Fixture::changed("bare");
     let bare = fixture.repo.join("vendor/evil.git");
     fixture.git(&["init", "-q", "--bare", "vendor/evil.git"]);
-    // Positive control: plain git discovers the embedded bare repository.
     let found = fixture.git(&["-C", "vendor/evil.git", "rev-parse", "--absolute-git-dir"]);
     assert_eq!(fs::canonicalize(found).unwrap(), bare);
     let output = fixture.rotter(&["extract", "--worktree", "-C", "vendor/evil.git"], None);
