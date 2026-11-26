@@ -274,12 +274,31 @@ timeout 才是最終上限。hook 另有整體軟性期限（見下節）。
 [repo 指令測試](tests/repo_commands.rs) 以會建立標記檔的 filter、hook、promisor 與子模組 fixture，
 經 hook 與 CLI 確認標記從未出現，並各以一般 git 在重建的 fixture 上作為正向對照。
 
+## 安裝
+
+推送 `v<版本>` tag 時，[release workflow](.github/workflows/release.yml) 建置 macOS arm64
+與 Linux glibc（x86_64、arm64）的封存檔，發佈為 GitHub release，並附上
+[packslip](https://packslip.dev) 簽章清單 `packslip.sigstore.json`（tag 須與 `Cargo.toml` 的版本相同）。
+安裝時會驗證簽章與 digest，不執行下載的程式碼：
+
+```sh
+packslip install github.com/charliie-dev/rotter
+mise use packslip:github.com/charliie-dev/rotter   # 或交給 mise 管理
+```
+
+封存檔根目錄是 `rotter` binary 與 `skills/rotter-comment-review/`；清單把後者宣告為 `skill` 資源。
+沒有 musl 版（rotter 要 dlopen `parser install` 編譯的 grammar，靜態 musl binary 做不到），也沒有
+Windows 版（使用 Unix 專屬 API）。從原始碼安裝：
+
+```sh
+cargo install --path . --locked
+```
+
 ## Agent 整合
 
 skill 已編進 binary，不需另外安裝或維護：`rotter --skill` 印出與此版本相符的審查 skill。
 
 ```sh
-cargo install --path . --locked
 rotter integration install claude     # 在 Claude Code settings.json 加入 Stop hook
 rotter integration install grok       # 寫入 Grok Build 的 hooks/rotter.json
 rotter integration install copilot    # 寫入 GitHub Copilot CLI 的 hooks/rotter.json
