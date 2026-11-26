@@ -470,7 +470,7 @@ fn evaluate(
                  Before finishing, review them with the rotter-comment-review skill in working tree mode \
                  including untracked files: run `{run}`. If that skill is not loaded, run \
                  `{rotter} --skill` and follow its output. Report concrete contradictions between \
-                 comments and code, and remove the unnecessary comments this change added or changed, \
+                 comments and code, and remove the unnecessary comments you added or changed in this task, \
                  as the skill says; do not edit anything else unless the user asked for it.",
                 cwd.display(),
                 report.complete

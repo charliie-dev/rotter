@@ -160,8 +160,10 @@ revision that were checked.
 
 ## 5. Edit only in a hook review
 
-When a hook asked for this review of the working tree, the comments it found belong to the
-agent's own changes: remove the unnecessary comments, or the unnecessary parts of them, that
-are marked `changed: true`, then report what was removed. Do not touch code, unchanged
-comments, or comments that contradict the code; report those. In every other case do not
-edit comments or code unless the user asks; the review only reports.
+When a hook asked for this review of the working tree, remove the unnecessary comments, or the
+unnecessary parts of them, that are marked `changed: true` and that you added or changed in
+this task, then report what was removed. `changed: true` only means the comment is in the diff
+from HEAD, which also holds the user's own uncommitted edits: when you are not sure that you
+wrote a changed comment, report it instead. Do not touch code, unchanged comments, or comments
+that contradict the code; report those. In every other case do not edit comments or code
+unless the user asks; the review only reports.
