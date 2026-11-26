@@ -159,10 +159,6 @@ export const RotterReview = async (input) => {
           if (typeof user?.id !== "string" || last.parentID !== user.id) return;
           const reviewed = last.id;
           if (typeof reviewed !== "string") return;
-          // A prompt without an agent runs as OpenCode's default agent, which can have more tools
-          // than the turn's own (plan, a custom agent). Re-prompt with that turn's agent and model,
-          // and its reasoning variant: without one, OpenCode picks the agent's and stores it on the
-          // session for every later turn.
           const agent = user.agent;
           const model = user.model;
           if (typeof agent !== "string" || typeof model?.providerID !== "string") return;
