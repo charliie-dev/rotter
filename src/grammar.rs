@@ -220,8 +220,6 @@ impl Grammar {
         // and every directory from / to it is checked; its constructors run here (documented).
         let library = unsafe { libloading::Library::new(path) }
             .map_err(|error| format!("cannot load {}: {error}", path.display()))?;
-        // Leaked so the returned Language, which points into it, can never outlive it.
-        let library: &'static libloading::Library = Box::leak(Box::new(library));
         // SAFETY: tree-sitter grammars export `const TSLanguage *tree_sitter_<name>(void)`.
         let raw = unsafe {
             let function = library
@@ -235,6 +233,8 @@ impl Grammar {
                 path.display()
             ));
         }
+        // Leaked only now: a failure above closes it; the Language pointing into it stays valid.
+        std::mem::forget(library);
         // SAFETY: a non-null TSLanguage from the grammar; its ABI is checked by set_language.
         Ok(unsafe { tree_sitter::Language::from_raw(raw) })
     }
