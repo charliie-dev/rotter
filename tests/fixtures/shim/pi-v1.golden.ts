@@ -8,8 +8,7 @@ const TIMEOUT = 90;
 const HOST = "pi";
 const MAX_STDOUT = 65536;
 
-// Runs `rotter hook pi --timeout <n>` with `input` on stdin and resolves to the review request,
-// or null for anything else. Never rejects; settles once, at the latest when the timeout fires.
+// Never rejects; settles once, at the latest when the timeout fires.
 function ask(input) {
   return new Promise((resolve) => {
     let settled = false;
@@ -98,8 +97,8 @@ function ask(input) {
   });
 }
 
-// One run at a time. The per-session cap on consecutive requests lives in rotter itself, which
-// keeps it on disk and fails closed; a second count here would silence one more stop than it.
+// The per-session cap on consecutive requests lives in rotter itself, which keeps it on disk and
+// fails closed; a second count here would silence one more stop than it.
 let inFlight = false;
 
 async function review(session, cwd) {

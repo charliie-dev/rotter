@@ -62,9 +62,8 @@ if (host === "pi") {
         if (scenario === "throwing") throw new Error("host API failure");
         return { data: path.id === "child" ? { id: path.id, parentID: "parent" } : { id: path.id } };
       },
-      // The turn's messages: a user message, then the scenario's last message. In "laterturn"
-      // and "laterthrowing", the user starts and cancels another turn while rotter runs: the
-      // second listing (after rotter answered) ends with that cancelled turn, or fails.
+      // In "laterturn" and "laterthrowing", the user starts and cancels another turn while rotter
+      // runs: the second listing (after rotter answered) ends with that cancelled turn, or fails.
       async messages() {
         listings += 1;
         if (scenario === "messagesthrowing") throw new Error("host API failure");
@@ -102,22 +101,17 @@ if (host === "pi") {
           errored: { ...ended, error: { name: "APIError", data: { message: "x" } } },
           running: { role: "assistant", time: { created: 1 } },
           usertail: { role: "user", time: { created: 1 } },
-          // Completed with no error, but finish "tool-calls".
           subtask: { ...ended, finish: "tool-calls" },
           unknownfinish: { ...ended, finish: "unknown" },
           nofinish: { id: "a1", role: "assistant", parentID: "u1", time: done },
           // A message without an id cannot be checked again after rotter answers.
           noid: { role: "assistant", parentID: "u1", time: done, finish: "stop" },
-          // An answer to an older user message.
           otherparent: { ...ended, parentID: "u0" },
         }[scenario] ?? ended;
         const tool = (metadata, state) => ({ type: "tool", tool: "bash", metadata, state });
         const parts = {
-          // finish "stop" with a tool call of its own.
           toolcall: [tool(undefined, { status: "completed" })],
-          // Only a tool the provider ran itself.
           providertool: [tool({ providerExecuted: true }, { status: "completed" })],
-          // Only an interrupted tool part (status "error", metadata.interrupted): not pending.
           orphantool: [tool(undefined, { status: "error", metadata: { interrupted: true } })],
         }[scenario] ?? [];
         const user = { info: { id: "u1", role: "user", time: { created: 0 }, ...first }, parts: [] };
@@ -125,7 +119,6 @@ if (host === "pi") {
       },
       async promptAsync({ path, body }) {
         const [part, ...extra] = body.parts;
-        // Without a variant on the turn, the re-prompt sends none.
         const variantKept = scenario === "novariant" ? !("variant" in body) : body.variant === "high";
         const same =
           body.agent === "plan" &&
@@ -151,7 +144,6 @@ if (host === "pi") {
 }
 if (typeof handler !== "function") fired.push("no handler registered");
 
-// One host stop; resolves to the review request the shim injected, or null.
 async function stop(session, { outcome, throwing } = {}) {
   if (host === "pi") {
     const earlier = { type: "custom", customType: "other" };
