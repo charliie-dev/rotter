@@ -276,7 +276,7 @@ timeout 才是最終上限。hook 另有整體軟性期限（見下節）。
 
 ## 安裝
 
-推送 `v<版本>` tag 時，[release workflow](.github/workflows/release.yml) 建置 macOS（arm64、x86_64）
+推送 `v<版本>` tag 時，[release workflow](.github/workflows/release.yml) 建置 macOS arm64
 與 Linux glibc（x86_64、arm64）的封存檔，發佈為 GitHub release，並附上
 [packslip](https://packslip.dev) 簽章清單 `packslip.sigstore.json`（tag 須與 `Cargo.toml` 的版本相同）。
 安裝時會驗證簽章與 digest，不執行下載的程式碼：
