@@ -160,11 +160,15 @@ export const RotterReview = async (input) => {
           const reviewed = last.id;
           if (typeof reviewed !== "string") return;
           // A prompt without an agent runs as OpenCode's default agent, which can have more tools
-          // than the turn's own (plan, a custom agent). Re-prompt with that turn's agent and model.
+          // than the turn's own (plan, a custom agent). Re-prompt with that turn's agent and model,
+          // and its reasoning variant: without one, OpenCode picks the agent's and stores it on the
+          // session for every later turn.
           const agent = user.agent;
           const model = user.model;
           if (typeof agent !== "string" || typeof model?.providerID !== "string") return;
           if (typeof model.modelID !== "string") return;
+          const variant = model.variant;
+          if (variant !== undefined && typeof variant !== "string") return;
           const text = await review(id, directory);
           if (text === null) return;
           // rotter runs for seconds, and the user can start and stop another turn meanwhile.
@@ -174,7 +178,9 @@ export const RotterReview = async (input) => {
           if (now[now.length - 1]?.info?.id !== reviewed) return;
           const parts = [{ type: "text", text }];
           const chosen = { providerID: model.providerID, modelID: model.modelID };
-          await client.session.promptAsync({ path: { id }, body: { agent, model: chosen, parts } });
+          const body = { agent, model: chosen, parts };
+          if (variant !== undefined) body.variant = variant;
+          await client.session.promptAsync({ path: { id }, body });
         } catch {}
       },
     };

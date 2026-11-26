@@ -505,6 +505,9 @@ fn opencode_asks_only_after_a_turn_that_completed() {
             "otherparent",
             "noid",
             "noagent",
+            "nomodel",
+            "nomodelid",
+            "badvariant",
         ] {
             let run = run("opencode", "rotter-review.js", engine, "reply", scenario);
             let [(answer, _)] = run.answers.as_slice() else {
@@ -514,7 +517,7 @@ fn opencode_asks_only_after_a_turn_that_completed() {
             assert!(run.calls.is_empty(), "{engine} {scenario}");
             let _ = fs::remove_dir_all(run.stub.parent().unwrap());
         }
-        for scenario in ["once", "providertool", "orphantool"] {
+        for scenario in ["once", "providertool", "orphantool", "novariant"] {
             let completed = run("opencode", "rotter-review.js", engine, "reply", scenario);
             assert_eq!(completed.answers[0].0, REQUEST, "{engine} {scenario}");
             let _ = fs::remove_dir_all(completed.stub.parent().unwrap());

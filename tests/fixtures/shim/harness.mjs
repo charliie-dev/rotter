@@ -70,9 +70,18 @@ if (host === "pi") {
         if (scenario === "messagesthrowing") throw new Error("host API failure");
         const done = { created: 1, completed: 2 };
         const ended = { id: "a1", role: "assistant", parentID: "u1", time: done, finish: "stop" };
-        // The turn ran as the read-only plan agent: the re-prompt must keep it and the model.
-        const asked = { agent: "plan", model: { providerID: "p", modelID: "m" } };
-        const first = scenario === "noagent" ? { model: asked.model } : asked;
+        // The turn ran as the read-only plan agent with the "high" reasoning variant: the re-prompt
+        // must keep the agent, the model and the variant.
+        const variant =
+          scenario === "novariant" ? undefined : scenario === "badvariant" ? 7 : "high";
+        const model = { providerID: "p", modelID: "m", ...(variant === undefined ? {} : { variant }) };
+        const asked = { agent: "plan", model };
+        const first =
+          {
+            noagent: { model },
+            nomodel: { agent: "plan" },
+            nomodelid: { agent: "plan", model: { providerID: "p" } },
+          }[scenario] ?? asked;
         if (listings > 1 && scenario === "laterthrowing") throw new Error("host API failure");
         if (listings > 1 && scenario === "laterturn") {
           const aborted = { name: "MessageAbortedError", data: { message: "Aborted" } };
@@ -116,8 +125,14 @@ if (host === "pi") {
       },
       async promptAsync({ path, body }) {
         const [part, ...extra] = body.parts;
+        // Without a variant on the turn, the re-prompt sends none, so OpenCode decides as for the
+        // turn itself.
+        const variantKept = scenario === "novariant" ? !("variant" in body) : body.variant === "high";
         const same =
-          body.agent === "plan" && body.model?.providerID === "p" && body.model?.modelID === "m";
+          body.agent === "plan" &&
+          body.model?.providerID === "p" &&
+          body.model?.modelID === "m" &&
+          variantKept;
         const plain = same && part.type === "text" && extra.length === 0;
         prompts.push(plain ? part.text : { bad: body });
         if (scenario === "rejecting") throw new Error("prompt failed");
