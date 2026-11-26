@@ -17,24 +17,19 @@ use std::os::unix::fs::{DirBuilderExt, FileExt, MetadataExt, OpenOptionsExt, Per
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-/// The smallest hook timeout rotter installs.
 const MIN_HOOK_TIMEOUT: u64 = 60;
 /// Seconds of the hook timeout kept free for git and reporting after the per-file phases.
 const HOOK_RESERVE: u64 = 15;
 /// Most consecutive review requests per host and session; the next Stop that would ask is silent
 /// instead, and that silent Stop resets the count.
 const MAX_REQUESTS: u32 = 2;
-/// How long the install work-tree probe (`git rev-parse --show-toplevel`) may take.
 const WORK_TREE_LIMIT: Duration = Duration::from_secs(10);
 
-/// `'<exe>' hook <name> || true` with the host's canonical hook name: a missing or older binary
-/// can never exit 2 and so never forces continuations.
+/// With `|| true`, a missing or older binary can never exit 2 and so never forces continuations.
 fn command(host: &Host, exe: &str) -> String {
     format!("{} hook {} || true", shell_quote(exe), host.hook)
 }
 
-/// The host's directory: its variable when absolute, else `<home>/<fallback>` (or
-/// `<XDG config base>/<fallback>`).
 fn host_dir(host: &Host, sources: &Sources) -> Result<PathBuf, String> {
     let base = if host.fallback_in_config {
         &sources.config
@@ -65,7 +60,6 @@ fn shape(host: &Host) -> (bool, bool) {
     }
 }
 
-/// The value at the host's event in a hook document (null when absent).
 fn event_list<'a>(host: &Host, document: &'a Value) -> &'a Value {
     if shape(host).0 {
         &document["hooks"][host.event]
@@ -74,7 +68,6 @@ fn event_list<'a>(host: &Host, document: &'a Value) -> &'a Value {
     }
 }
 
-/// The file holding the host's hook under `dir`.
 fn hook_file(host: &Host, dir: &Path) -> PathBuf {
     match host.install {
         Install::MergeJson { file, .. } => dir.join(file),
@@ -89,16 +82,14 @@ fn hook_file(host: &Host, dir: &Path) -> PathBuf {
 const SHIM_EXE: &str = "__ROTTER_EXE__";
 const SHIM_TIMEOUT: &str = "__ROTTER_TIMEOUT__";
 
-/// Whether `exe` may be embedded in a shim: absolute, and free of control characters, U+2028,
-/// U+2029 (line terminators in older JavaScript), `$` and backtick.
+/// U+2028 and U+2029 are line terminators in older JavaScript.
 fn shim_exe_ok(exe: &str) -> bool {
     exe.starts_with('/')
         && !exe
             .contains(|c: char| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}' | '$' | '`'))
 }
 
-/// `template` with the exe path placed as a JSON string literal and the timeout as digits,
-/// split at the placeholders so neither value can be read as a placeholder.
+/// Split at the placeholders so neither value can be read as a placeholder.
 fn render_template(template: &str, exe: &str, timeout: u64) -> Result<String, String> {
     if !shim_exe_ok(exe) {
         return Err(format!(
@@ -119,7 +110,7 @@ fn render_template(template: &str, exe: &str, timeout: u64) -> Result<String, St
     Ok(format!("{before}{literal}{middle}{timeout}{after}"))
 }
 
-/// The host's current shim for `exe` and `timeout` (validated as for every render).
+/// The host's current shim for `exe` and `timeout`.
 pub fn render_shim(name: &str, exe: &str, timeout: u64) -> Result<String, String> {
     let host = hosts::by_id(name).ok_or_else(|| format!("unknown integration {name:?}"))?;
     let Install::OwnedShim { templates, .. } = host.install else {
@@ -134,7 +125,6 @@ fn shim_values(template: &str, text: &str) -> Option<(String, u64)> {
     let (before, rest) = template.split_once(SHIM_EXE)?;
     let (middle, _) = rest.split_once(SHIM_TIMEOUT)?;
     let rest = text.strip_prefix(before)?;
-    // The literal ends at the first `"` not escaped by a backslash.
     let bytes = rest.as_bytes();
     if bytes.first() != Some(&b'"') {
         return None;
@@ -170,7 +160,6 @@ pub fn hook_timeout(parse_timeout_seconds: u64) -> u64 {
     MIN_HOOK_TIMEOUT.max(parse_timeout_seconds.saturating_add(30))
 }
 
-/// Smallest positive integer `timeout` among the host's event entries with exactly this command.
 fn entry_timeout(host: &Host, settings: &Value, command: &str) -> Option<u64> {
     event_entries(host, settings)
         .into_iter()
@@ -183,18 +172,14 @@ fn entry_timeout(host: &Host, settings: &Value, command: &str) -> Option<u64> {
         .min()
 }
 
-/// Soft budget for the per-file phases of one hook run.
 fn run_budget(computed: u64, installed: u64) -> Duration {
     Duration::from_secs(computed.min(installed).saturating_sub(HOOK_RESERVE))
 }
 
-/// The installed timeout, shortened (never extended) by the one a shim passed.
 fn shortened(installed: u64, passed: Option<u64>) -> u64 {
     passed.map_or(installed, |passed| passed.min(installed))
 }
 
-/// The installed timeout from the host's hook file, read without following a final link or
-/// blocking on a FIFO; anything unusable counts as the host's own default.
 fn installed_timeout(host: &Host, sources: &Sources, command: &str) -> u64 {
     host_dir(host, sources)
         .ok()
@@ -207,9 +192,8 @@ fn exe() -> String {
     std::env::current_exe().map_or_else(|_| "rotter".to_owned(), |path| path.display().to_string())
 }
 
-/// This binary's path for a hook command. The file and every directory to it must pass
-/// `trusted_file`, and the path must not contain `$` or `` ` `` (Grok expands `$VAR` in
-/// commands), NUL or a newline.
+/// This binary's path for a hook command. The path must not contain `$` or `` ` `` (Grok
+/// expands `$VAR` in commands), NUL or a newline.
 fn trusted_exe() -> Result<String, String> {
     let path =
         std::env::current_exe().map_err(|error| format!("cannot locate this binary: {error}"))?;
@@ -271,8 +255,6 @@ fn session(host: &Host, input: &Value) -> Option<String> {
     )
 }
 
-/// The first present cwd key, used only when absolute and free of control characters; without
-/// one, the hook process's own directory for hosts that run the hook there.
 fn cwd(host: &Host, input: &Value) -> Option<PathBuf> {
     match host.cwd_keys.iter().find_map(|key| input[key].as_str()) {
         Some(cwd) => {
@@ -413,7 +395,6 @@ fn evaluate(
             return Some(outcome);
         }
     };
-    // Without a usable git (native, trusted, outside the repository) there is nothing to do.
     let git = Git::new(&walk, scratch, sources, true).ok()?;
     // Too old or unrecognised git: no repository is looked at, not even to find its top level.
     if let Err(error) = git.class() {
@@ -422,9 +403,7 @@ fn evaluate(
         }
         return Some(outcome);
     }
-    // Outside a work tree, or a work tree holding the chosen git: nothing to do.
     let top = toplevel(&git, &cwd).ok()?;
-    // Config problems never block: they are announced and builtins are used.
     let mut notes = Vec::new();
     let config = match config::load(Some(&top), sources) {
         Ok(loaded) => {
@@ -512,8 +491,6 @@ fn counter(state: &Path, host: &Host, session: &str) -> Result<fs::File, String>
     lock_count(&dir.join(session), true)
 }
 
-/// [`counter`] when its directories and file already exist and pass the same checks; None
-/// otherwise (nothing to reset).
 fn existing_counter(state: &Path, host: &Host, session: &str) -> Option<fs::File> {
     let dir = existing_state_dir(state, &counter_dir(host))?;
     lock_count(&dir.join(session), false).ok()
@@ -523,8 +500,6 @@ fn counter_dir(host: &Host) -> std::ffi::OsString {
     format!("{}-count", host.hook).into()
 }
 
-/// Opens the count file at `path` (created with `create`) without following a link, checks it
-/// is [`private_file`] and locks it.
 fn lock_count(path: &Path, create: bool) -> Result<fs::File, String> {
     let fail = |error: io::Error| format!("{}: {error}", path.display());
     let file = fs::OpenOptions::new()
@@ -545,9 +520,6 @@ fn lock_count(path: &Path, create: bool) -> Result<fs::File, String> {
     Ok(file)
 }
 
-/// `<state>/<name>`: the state directory resolved through [`resolve_trusted`] and `<name>` a
-/// directory owned by the user; missing directories are made 0700 one at a time below a trusted
-/// ancestor.
 fn state_dir(state: &Path, name: &OsStr) -> Result<PathBuf, String> {
     crate::install::create_base(state)?;
     let state = match resolve_trusted(state, user(), &lstat) {
@@ -568,22 +540,20 @@ fn state_dir(state: &Path, name: &OsStr) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-/// [`state_dir`] when it already exists and passes the same checks; None otherwise.
 fn existing_state_dir(state: &Path, name: &OsStr) -> Option<PathBuf> {
     let dir = resolve_trusted(state, user(), &lstat).ok()?.join(name);
     owned_dir(&dir, lstat(&dir).ok()?, user()).ok()?;
     Some(dir)
 }
 
-/// `path` (`<state>/<name>/<file>`) split for [`state_dir`].
 fn state_parts(path: &Path) -> Option<(&Path, &OsStr, &OsStr)> {
     let dir = path.parent()?;
     Some((dir.parent()?, dir.file_name()?, path.file_name()?))
 }
 
 /// Opens `<state>/<name>/<file>` without following links or blocking (a FIFO is refused, not
-/// waited on); only a [`private_file`] is returned. With `create` the directories and file are
-/// created. None when it cannot be opened: state is only ever a hint.
+/// waited on); only a [`private_file`] is returned. None when it cannot be opened: state is only
+/// ever a hint.
 fn state_file(path: &Path, create: bool) -> Option<fs::File> {
     let (state, name, file) = state_parts(path)?;
     let dir = if create {
@@ -602,8 +572,6 @@ fn state_file(path: &Path, create: bool) -> Option<fs::File> {
     private_file(Meta::of(&file.metadata().ok()?), user()).then_some(file)
 }
 
-/// The count in a locked counter file: empty is 0, else digits and a newline; None when it
-/// cannot be read or is anything else.
 fn read_count(file: &mut fs::File) -> Option<u32> {
     let mut text = String::new();
     file.read_to_string(&mut text).ok()?;
@@ -617,7 +585,6 @@ fn read_count(file: &mut fs::File) -> Option<u32> {
     digits.parse().ok()
 }
 
-/// Writes `count` in place: truncate, then the digits (0 is the empty file).
 fn write_count(file: &fs::File, count: u32) -> io::Result<()> {
     file.set_len(0)?;
     if count > 0 {
@@ -680,7 +647,7 @@ fn verdict(state: Option<&Path>, host: &Host, session: &str, key: &str, found: u
     Verdict::Block(Some((slot(state, host, session), fingerprint)))
 }
 
-/// `<state>/<hook>/<session>`: the host's last blocked fingerprint.
+/// The host's last blocked fingerprint.
 fn slot(state: &Path, host: &Host, session: &str) -> PathBuf {
     state.join(host.hook).join(session)
 }
@@ -706,7 +673,6 @@ fn record(path: &Path, fingerprint: &str) {
     }
 }
 
-/// Records `content`'s fingerprint as the latest seen in `dir/session`; false when it already was.
 fn first_time(dir: &Path, session: &str, content: &str) -> bool {
     let fingerprint = fingerprint(content);
     let state = dir.join(session);
@@ -721,7 +687,6 @@ fn shell_quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', r"'\''"))
 }
 
-/// How a hook entry relates to rotter.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Ours {
     /// `'<this binary>' hook <name> || true`.
@@ -836,7 +801,6 @@ fn read_settings(path: &Path) -> Result<(Value, Option<String>), String> {
     Ok((object(path, &text)?, Some(text)))
 }
 
-/// `text` parsed as a JSON object.
 fn object(path: &Path, text: &str) -> Result<Value, String> {
     let value: Value = serde_json::from_str(text)
         .map_err(|error| format!("cannot parse {}: {error}", path.display()))?;
@@ -847,7 +811,6 @@ fn object(path: &Path, text: &str) -> Result<Value, String> {
     }
 }
 
-/// A file rotter may rewrite: owned by the user and not writable by group or others.
 fn rewritable(path: &Path, uid: u32, mode: u32, user: u32) -> Result<(), String> {
     if uid != user {
         return Err(format!(
@@ -912,7 +875,7 @@ fn remove_stale(path: &Path) -> Result<(), String> {
     }
 }
 
-/// `<file>.rotter-tmp` next to `path`; no host loads a name ending in `.rotter-tmp`.
+/// No host loads a name ending in `.rotter-tmp`.
 fn temporary_path(path: &Path) -> PathBuf {
     let mut name = path.file_name().unwrap_or_default().to_owned();
     name.push(".rotter-tmp");
@@ -923,7 +886,6 @@ fn backup_path(path: &Path) -> PathBuf {
     path.with_extension("json.rotter-bak")
 }
 
-/// Writes the hook file's `.rotter-bak` copy (0600) from the bytes already read.
 fn write_backup(path: &Path, text: &str) -> Result<(), String> {
     let backup = backup_path(path);
     remove_stale(&backup)?;
@@ -976,8 +938,6 @@ fn replace_file(
         .map_err(|error| format!("cannot replace {}: {error}", path.display()))
 }
 
-/// Writes a merged file atomically, keeping the original's permission bits, unless it changed
-/// since `original` was read.
 fn write_merged(path: &Path, value: &Value, original: Option<&str>) -> Result<(), String> {
     let text = serde_json::to_string_pretty(value).map_err(|error| error.to_string())? + "\n";
     let mode = fs::symlink_metadata(path)
@@ -987,7 +947,6 @@ fn write_merged(path: &Path, value: &Value, original: Option<&str>) -> Result<()
     replace_file(path, &text, mode, Some(original.map(str::as_bytes)))
 }
 
-/// The groups of the host's event in a merged file, when it is an array.
 fn event_groups_mut<'a>(host: &Host, settings: &'a mut Value) -> Option<&'a mut Vec<Value>> {
     // get_mut, not IndexMut: indexing would insert `"hooks": null` into untouched settings.
     let events = if shape(host).0 {
@@ -998,8 +957,6 @@ fn event_groups_mut<'a>(host: &Host, settings: &'a mut Value) -> Option<&'a mut 
     events.get_mut(host.event)?.as_array_mut()
 }
 
-/// Removes rotter's entries (any [`Ours`]) and returns how many were removed. Only groups this
-/// emptied are removed; other tools' empty groups stay.
 fn remove_ours(host: &Host, settings: &mut Value, exe: &str) -> usize {
     prune_ours(host, settings, exe, |_| false)
 }
@@ -1063,7 +1020,6 @@ fn target(name: &str) -> Result<&'static Host, String> {
     })
 }
 
-/// Every hook entry of the host's event, in any group.
 fn event_entries<'a>(host: &Host, settings: &'a Value) -> Vec<&'a Value> {
     let items = event_list(host, settings).as_array().into_iter().flatten();
     if shape(host).1 {
@@ -1075,7 +1031,6 @@ fn event_entries<'a>(host: &Host, settings: &'a Value) -> Vec<&'a Value> {
     }
 }
 
-/// The host's entries that belong to some rotter binary, with how.
 fn our_entries<'a>(host: &Host, settings: &'a Value, exe: &str) -> Vec<(Ours, &'a Value)> {
     event_entries(host, settings)
         .into_iter()
@@ -1083,12 +1038,10 @@ fn our_entries<'a>(host: &Host, settings: &'a Value, exe: &str) -> Vec<(Ours, &'
         .collect()
 }
 
-/// A regular file owned by the user (root is not accepted) that group and others cannot write.
 fn private_file(meta: Meta, user: u32) -> bool {
     meta.kind == Kind::File && meta.uid == user && meta.mode & 0o022 == 0
 }
 
-/// A directory owned by the user (root is not accepted) that group and others cannot write.
 fn owned_dir(path: &Path, meta: Meta, user: u32) -> Result<(), String> {
     if meta.kind == Kind::Dir && meta.uid == user && meta.mode & 0o022 == 0 {
         Ok(())
@@ -1100,8 +1053,6 @@ fn owned_dir(path: &Path, meta: Meta, user: u32) -> Result<(), String> {
     }
 }
 
-/// The host directory `home` through `resolve_trusted`, then [`owned_dir`]; None when it does
-/// not exist.
 fn trusted_home(
     host: &Host,
     home: &Path,
@@ -1124,7 +1075,6 @@ fn trusted_home(
     Ok(Some(resolved))
 }
 
-/// [`trusted_home`] that must exist, for install.
 fn existing_home(host: &Host, home: &Path) -> Result<PathBuf, String> {
     trusted_home(host, home, user(), &lstat)?.ok_or_else(|| {
         format!(
@@ -1136,10 +1086,7 @@ fn existing_home(host: &Host, home: &Path) -> Result<PathBuf, String> {
 }
 
 /// Refuses a host directory inside a git work tree: a checkout, pull or commit there could
-/// change or publish the hook, and ignoring the file does not take it out of the work tree. The
-/// physical `.git` walk runs first and needs no git; only with a `.git` above does git run,
-/// resolved like every other git call, isolated (cleared environment, no inherited GIT_*, a
-/// neutral cwd), and only a clean "not a git repository" counts as outside.
+/// change or publish the hook, and ignoring the file does not take it out of the work tree.
 fn outside_work_tree(host: &Host, dir: &Path, sources: &Sources) -> Result<(), String> {
     let refuse = |why: String| {
         format!(
@@ -1167,9 +1114,6 @@ fn outside_work_tree(host: &Host, dir: &Path, sources: &Sources) -> Result<(), S
     }
 }
 
-/// `<resolved home>/<dir>/<file>`, with `<dir>` checked by [`owned_dir`] (lstat, so never a
-/// symlink); None when `<dir>` does not exist. With `create`, a missing `<dir>` is created at
-/// 0700 (never its parents).
 fn owned_file(host: &Host, home: &Path, create: bool) -> Result<Option<PathBuf>, String> {
     let (Install::OwnedJson { dir, file, .. } | Install::OwnedShim { dir, file, .. }) =
         host.install
@@ -1194,7 +1138,6 @@ fn owned_file(host: &Host, home: &Path, create: bool) -> Result<Option<PathBuf>,
     Ok(Some(hooks.join(file)))
 }
 
-/// The document rotter writes for an owned-file host: see [`owned_handler`].
 fn owned_document(host: &Host, command: &str, timeout: u64) -> Value {
     let Install::OwnedJson {
         version, grouped, ..
@@ -1474,7 +1417,6 @@ fn install_shim(
     Ok(done)
 }
 
-/// The shim's path when its directory exists under a trusted host dir.
 fn shim_path(host: &Host, sources: &Sources) -> Result<(Option<PathBuf>, PathBuf), String> {
     let configured = host_dir(host, sources)?;
     let path = match trusted_home(host, &configured, user(), &lstat)? {
@@ -1484,7 +1426,6 @@ fn shim_path(host: &Host, sources: &Sources) -> Result<(Option<PathBuf>, PathBuf
     Ok((path, hook_file(host, &configured)))
 }
 
-/// Unlinks the shim only when [`shim_installed`] accepts it.
 fn uninstall_shim(host: &Host, sources: &Sources) -> Result<IntegrationResult, String> {
     let (path, shown) = shim_path(host, sources)?;
     let Some(path) = path else {
@@ -1542,7 +1483,6 @@ fn shim_status(
     Ok((state, detail, path))
 }
 
-/// Merges one entry into the host's shared file, keeping a `.rotter-bak` of the bytes read.
 fn install_merged(
     host: &Host,
     sources: &Sources,
@@ -1744,7 +1684,6 @@ fn uninstall_merged(host: &Host, sources: &Sources) -> Result<IntegrationResult,
     Ok(done)
 }
 
-/// Unlinks the owned file only when [`owned_installed`] accepts it.
 fn uninstall_owned(host: &Host, sources: &Sources) -> Result<IntegrationResult, String> {
     let configured = host_dir(host, sources)?;
     let path = match trusted_home(host, &configured, user(), &lstat)? {
@@ -1864,9 +1803,7 @@ fn owned_status(
 }
 
 /// Whether Grok's Claude compatibility, which reads the literal `$HOME/.claude/settings.json`,
-/// can pick up a rotter entry: `found`, `not_found` or `unknown`, with the detail. Read-only and
-/// error-tolerant: anything unusual is "unknown". Whether compat is enabled (`[compat.claude]`,
-/// `GROK_CLAUDE_HOOKS_ENABLED`) is not evaluated.
+/// can pick up a rotter entry: `found`, `not_found` or `unknown`, with the detail.
 fn compat_status(sources: &Sources, exe: &str) -> (&'static str, Option<String>) {
     let Some(home) = &sources.home else {
         return (
@@ -1892,9 +1829,6 @@ fn compat_status(sources: &Sources, exe: &str) -> (&'static str, Option<String>)
     }
 }
 
-/// What Codex needs besides the entry: its `hooks` feature (on unless `[features]` in
-/// `config.toml` turns off `hooks` or its older name `codex_hooks`) and a `/hooks` review, which
-/// rotter does not check. Read-only; any problem reading the file is "unknown".
 fn codex_status(dir: &Path) -> String {
     let path = dir.join("config.toml");
     let feature = match open_regular(&path) {
@@ -2011,8 +1945,6 @@ pub fn status(parse_timeout_seconds: u64) -> Result<Status, String> {
     let mut hosts = Vec::new();
     for host in hosts::HOSTS {
         let found = match host.install {
-            // Claude's shared file's errors (e.g. a FIFO) fail status, as before; the other
-            // hosts' are reported as their state.
             Install::MergeJson { .. } => match merged_status(host, &sources, &exe, expected) {
                 Err(why) if host.id == CLAUDE.id => return Err(why),
                 found => found.map_err(Refusal::Error),
@@ -2404,7 +2336,6 @@ mod tests {
         for document in rejected {
             assert_eq!(owned_handler(&COPILOT, &document), None, "{document}");
         }
-        // A Grok document is not a Copilot one and back.
         assert_eq!(owned_handler(&GROK, &good), None);
     }
 
@@ -2424,7 +2355,6 @@ mod tests {
         );
     }
 
-    /// The real lstat with owner and mode replaced for `at`.
     fn with(at: PathBuf, uid: u32, mode: u32) -> impl Fn(&Path) -> std::io::Result<Meta> {
         move |path| {
             let mut meta = lstat(path)?;
@@ -2454,7 +2384,6 @@ mod tests {
         let sticky = with(home.clone(), 0, 0o41777);
         assert!(crate::config::resolve_trusted(&home, user(), &sticky).is_ok());
         for host in [&GROK, &CLAUDE] {
-            // Root-owned: passes resolve_trusted, refused as not the user's.
             for mode in [0o41777, 0o40755] {
                 let error =
                     trusted_home(host, &home, user(), &with(home.clone(), 0, mode)).unwrap_err();
@@ -2528,8 +2457,6 @@ mod tests {
         };
         let asks: Vec<bool> = (0..7).map(|_| ask(&state, &CLAUDE, "s")).collect();
         assert_eq!(asks, [true, true, false, true, true, false, true]);
-        // A Stop without a request resets (to an empty file); the counter is per host and
-        // session.
         reset_requests(&state, &CLAUDE, "s");
         assert_eq!(
             fs::read_to_string(state.join("claude-stop-count/s")).unwrap(),
@@ -2543,7 +2470,6 @@ mod tests {
             fs::metadata(&count).unwrap().permissions().mode() & 0o777,
             0o600
         );
-        // Fail closed: corrupt content, a directory in the way, an unwritable state dir.
         for corrupt in ["x\n", "+1\n", "1"] {
             fs::write(&count, corrupt).unwrap();
             assert_eq!(
@@ -2554,10 +2480,8 @@ mod tests {
         }
         reset_requests(&state, &CLAUDE, "s");
         assert!(ask(&state, &CLAUDE, "s"), "a reset repairs it");
-        // Errors (reported by the hook) when the counter cannot be opened at all.
         fs::create_dir(state.join("claude-stop-count/d")).unwrap();
         assert!(allow_request(&state, &CLAUDE, "d").is_err());
-        // Owned by the user but writable by others: refused all the same.
         let shared_count = state.join("claude-stop-count/w");
         fs::write(&shared_count, "").unwrap();
         fs::set_permissions(&shared_count, fs::Permissions::from_mode(0o622)).unwrap();
@@ -2574,7 +2498,6 @@ mod tests {
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o600)).unwrap();
         assert!(allow_request(&locked, &CLAUDE, "s").is_err());
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
-        // A state directory that is a dangling link of the user's.
         let dangling = temp().join("state");
         std::os::unix::fs::symlink(temp().join("gone"), &dangling).unwrap();
         let vanished = allow_request(&dangling, &CLAUDE, "s").unwrap_err();
@@ -2583,7 +2506,6 @@ mod tests {
         fs::set_permissions(&shared, fs::Permissions::from_mode(0o770)).unwrap();
         let refused = allow_request(&shared, &CLAUDE, "s").unwrap_err();
         assert!(refused.contains("writable by other users"), "{refused}");
-        // A reset never creates anything.
         let fresh = temp().join("state");
         reset_requests(&fresh, &CLAUDE, "s");
         assert!(!fresh.exists());
@@ -2622,7 +2544,6 @@ mod tests {
 
     #[test]
     fn concurrent_stops_never_lose_a_count() {
-        // (preset count, concurrent stops) → requests that may pass.
         for (preset, stops, passes) in [(Some("1\n"), 2, 1), (None, 2, 2), (Some("2\n"), 3, 2)] {
             let state = temp();
             if let Some(preset) = preset {
@@ -2648,7 +2569,6 @@ mod tests {
         }
     }
 
-    /// Replays Stops of (host, report, units) in one session; returns how many blocked.
     fn replay(turns: &[(&Host, &str, usize)]) -> usize {
         let state = temp();
         let mut blocks = 0;
@@ -2676,7 +2596,6 @@ mod tests {
         // Different budgets, different reports with units: each once.
         let turn = [(grok, "R1", 3), (claude, "R2", 2)];
         assert_eq!(replay(&turn.repeat(3)), 2);
-        // Either order.
         assert_eq!(
             replay(&[(claude, "R", 1), (grok, "R", 1), (claude, "R", 1)]),
             1
@@ -2697,7 +2616,6 @@ mod tests {
         assert_eq!(verdict(None, grok, "s", "R", 1), Verdict::Block(None));
     }
 
-    /// Every template rotter has shipped for a shim host.
     fn templates(host: &Host) -> &'static [&'static str] {
         match host.install {
             Install::OwnedShim { templates, .. } => templates,
@@ -2723,7 +2641,6 @@ mod tests {
                             Some((exe.to_owned(), timeout)),
                             "{exe}"
                         );
-                        // The path appears once, inside its JSON literal.
                         let literal = serde_json::to_string(exe).unwrap();
                         assert_eq!(text.matches(&literal).count(), 1, "{exe}");
                         assert!(text.contains(&format!("const EXE = {literal};\n")), "{exe}");
@@ -2786,7 +2703,6 @@ mod tests {
                 ] {
                     assert!(!template.contains(forbidden), "{}: {forbidden}", host.id);
                 }
-                // process.env is read for PATH and LANG only.
                 for (at, _) in template.match_indices("process.env") {
                     let rest = &template[at + "process.env".len()..];
                     assert!(
@@ -2841,7 +2757,6 @@ mod tests {
         assert_eq!(budget(90, None), Duration::from_secs(75));
         assert_eq!(budget(90, Some(30)), Duration::from_secs(15));
         assert_eq!(budget(90, Some(1)), Duration::ZERO);
-        // Longer than the installed timeout: ignored, never extended.
         assert_eq!(budget(90, Some(600)), Duration::from_secs(75));
         assert_eq!(budget(60, Some(90)), Duration::from_secs(45));
     }
@@ -2850,10 +2765,7 @@ mod tests {
     /// budget `evaluate` gives `extract_with`, not just the two pure helpers above. With no
     /// override the change is found and blocked; with a 1-second override (under the 15-second
     /// reserve, so the budget is `Duration::ZERO`) the file is skipped as `parse_timeout` before
-    /// rotter opens it, so nothing is found and the report is only reported as incomplete. A
-    /// mutation of the `evaluate` call site that stops passing `timeout` through to
-    /// `run_budget`/`shortened` turns the second assertion into the first outcome, and the test
-    /// fails.
+    /// rotter opens it, so nothing is found and the report is only reported as incomplete.
     #[test]
     fn a_shim_passed_timeout_actually_shortens_the_run() {
         let root = temp();
@@ -2895,8 +2807,6 @@ mod tests {
             home: Some(home),
         };
         let input = json!({ "session_id": "s", "cwd": repo });
-        // Positive control: with the host's own (installed) timeout, there is room to parse the
-        // one changed file and the comment-linked change is found and blocked.
         let outcome = evaluate(&CLAUDE, &input, "s", &sources, None).unwrap();
         assert!(
             outcome
@@ -2905,8 +2815,6 @@ mod tests {
                 .is_some_and(|reason| reason.contains("rotter found 2 changed code unit")),
             "{outcome:?}"
         );
-        // A shim's `--timeout 1` leaves a zero-second budget: the file is skipped before it is
-        // read, so the report is incomplete and only the "could not be analysed" note goes out.
         let outcome = evaluate(&CLAUDE, &input, "s2", &sources, Some(1)).unwrap();
         assert_eq!(outcome.reason, None, "{outcome:?}");
         assert!(
@@ -2965,14 +2873,10 @@ mod tests {
         assert_eq!(shim_timeout(&PI, 1), 60);
         assert_eq!(shim_timeout(&PI, 60), 90);
         assert_eq!(shim_timeout(&LETTA, 300), 120);
-        // OpenCode does not await its plugins' event handlers.
         assert_eq!(shim_timeout(&OPENCODE, 300), 330);
         assert_eq!(shim_timeout(&CLAUDE, 300), 330);
     }
 
-    /// The hook core for the shim hosts, in-process with injected sources (no case spawns an
-    /// injectable-host hook): the shim reply shape, the loop cap across changing reports, and
-    /// silence without a state directory or a session.
     #[test]
     fn shim_hosts_answer_in_the_shim_protocol_and_are_capped() {
         let root = temp();
@@ -3070,7 +2974,6 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-    /// The native git helper (tests/common/git_helper.rs), compiled once into the temp dir.
     fn helper() -> PathBuf {
         static HELPER: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
         HELPER
@@ -3102,7 +3005,6 @@ mod tests {
             let root = temp();
             let evil = root.join("evil");
             fs::create_dir_all(evil.join(".config/rotter")).unwrap();
-            // A grammar-enabling config and a permissive git config under the env-named HOME.
             fs::write(
                 evil.join(".config/rotter/config.toml"),
                 "languages = [\"python\"]\n",
