@@ -9,8 +9,8 @@ This skill is printed by `rotter --skill` and always matches the installed binar
 keep a separate copy.
 
 Rotter extracts the changed code units and their related comments. You judge whether each
-comment is still true. Rotter never judges meaning, and an empty result is not a pass unless
-the report says `"complete": true`.
+comment is still true and whether it is needed. Rotter never judges meaning, and an empty
+result is not a pass unless the report says `"complete": true`.
 
 ## 1. Choose the diff mode
 
@@ -96,12 +96,12 @@ For each unit on the `after` side, compare every comment with the unit's code. U
 `before` side to see what the comment was written against. In full mode there is no before
 side: judge each comment only against the current code.
 
-Report a finding only when the comment states something the code now contradicts: a wrong
+Report a contradiction only when the comment states something the code now contradicts: a wrong
 return value, parameter, unit, default, limit, order, side effect, error behaviour, or a
 name that no longer exists. A comment is not wrong merely because the code around it
 changed, and a comment describing intent or history can stay true after the mechanism
-changes. Do not report style, grammar, spelling, missing comments, or comments that are
-merely incomplete.
+changes; whether such a comment is still needed is decided below. Do not report style,
+grammar, spelling, missing comments, or comments that are merely incomplete.
 
 If a comment is true in the common case but false at a boundary the change introduced (for
 example overflow or an empty input), report it as a finding marked `low confidence` and name
