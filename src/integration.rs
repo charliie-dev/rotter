@@ -388,8 +388,9 @@ fn evaluate(
         return None;
     }
     let state = sources.state.as_deref();
-    // Messages on a channel the host shows are announced once per session; stderr notes are not
-    // shown, so they are never marked as announced and recur, harmlessly.
+    // A message on a channel the host shows is announced when it differs from the last one its
+    // store announced in the session (every time without a state directory); stderr notes are
+    // not shown, so they are never marked as announced and recur, harmlessly.
     let announce = |store: &str, text: &str| {
         host.notes == Notes::Stderr
             || state.is_none_or(|dir| {
@@ -822,7 +823,7 @@ impl<'de> Visitor<'de> for StrictVisitor {
     }
 }
 
-/// settings.json and its text; only a regular file is read (lstat first, so a FIFO or device
+/// A JSON hook file and its text; only a regular file is read (lstat first, so a FIFO or device
 /// fails instead of blocking). A missing file is an empty object with no text.
 fn read_settings(path: &Path) -> Result<(Value, Option<String>), String> {
     let Some(mut file) = open_regular(path)? else {
@@ -921,7 +922,7 @@ fn backup_path(path: &Path) -> PathBuf {
     path.with_extension("json.rotter-bak")
 }
 
-/// Writes `settings.json.rotter-bak` (0600) from the bytes already read.
+/// Writes the hook file's `.rotter-bak` copy (0600) from the bytes already read.
 fn write_backup(path: &Path, text: &str) -> Result<(), String> {
     let backup = backup_path(path);
     remove_stale(&backup)?;

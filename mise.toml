@@ -18,7 +18,7 @@ bun = "1.4.4"
 "cargo:cargo-llvm-cov" = "0.9.2"
 # CRAP scores (`mise run crap`); unreleased, so pinned by commit.
 "pypi:git+https://github.com/unclebob/crapper.git" = "c757ec79a6c15dc815238bbd9c2f4601eb54d3cc"
-# Static analysis (`mise run sast`, `mise run codeql`) and workflow linting (`mise run lint`).
+# Static analysis (`mise run sast`) and workflow linting (`mise run lint`).
 "aqua:opengrep/opengrep" = "2.0.0"
 "aqua:EmbarkStudios/cargo-deny" = "0.22.0"
 "aqua:zizmorcore/zizmor" = "1.33.1"

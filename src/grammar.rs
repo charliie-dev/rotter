@@ -1,5 +1,6 @@
-//! Grammars and the loader for installed external grammars. Loading only reads and verifies the
-//! cache and dlopens a library; fetching and building live in `install.rs` alone.
+//! Grammars and the loader for installed external grammars. Loading reads and verifies the cache
+//! (and, for a local source, the source files it hashes) and dlopens a library; fetching and
+//! building live in `install.rs` alone.
 
 use crate::Language;
 use crate::config::{
@@ -13,7 +14,8 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
-/// Where an external grammar's C sources come from; only `rotter parser install` reads them.
+/// Where an external grammar's C sources come from: `rotter parser install` builds from them, and
+/// a local path is also read, to hash its sources, whenever its library is looked up.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ExternalSource {
     Git {
@@ -56,7 +58,7 @@ pub struct Grammar {
     pub(crate) filenames: Vec<String>,
     /// Canonical top level of the analysed repository; a cache inside it is refused.
     repo: Option<PathBuf>,
-    /// The cache base (`$XDG_CACHE_HOME`) installed libraries are looked up under.
+    /// The cache base (`Sources::cache`) installed libraries are looked up under.
     cache: Option<PathBuf>,
 }
 

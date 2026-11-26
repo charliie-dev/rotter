@@ -402,10 +402,10 @@ impl Git {
         Ok((*class, version))
     }
 
-    /// `git` with the run's environment: TMPDIR is always the scratch directory; isolated, the
+    /// `git` with the run's environment: TMPDIR is always the scratch directory. Isolated, the
     /// environment is cleared first and gets only PATH (the usable entries), HOME, `LANG=C` and
-    /// `LC_ALL=C`, and the child starts in `/` (every call names its directory with `-C`). No
-    /// loader variables, `DEVELOPER_DIR`, `SDKROOT`, `TOOLCHAINS`, XDG_* or inherited GIT_*.
+    /// `LC_ALL=C` (no loader variables, `DEVELOPER_DIR`, `SDKROOT`, `TOOLCHAINS`, XDG_* or
+    /// inherited GIT_*), and the child starts in `/` (every call names its directory with `-C`).
     fn command(&self) -> Command {
         let mut command = Command::new(&self.program);
         if let Some(home) = &self.isolated {

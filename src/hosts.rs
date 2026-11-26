@@ -1,6 +1,5 @@
 //! The agents rotter integrates with as a turn-end hook: where each keeps its hook, what its hook
-//! input looks like and how it takes a reply. Every host-specific fact lives in this table; the
-//! runtime and the install code only read it. `docs/hosts.md` records where each fact comes from.
+//! input looks like and how it takes a reply. `docs/hosts.md` records where each fact comes from.
 
 /// How rotter's hook is registered with a host.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -44,7 +43,7 @@ pub(crate) enum Notes {
 
 #[derive(Debug)]
 pub struct Host {
-    /// The host id: install targets, messages and loop-cap keys.
+    /// The host id: install targets and messages.
     pub(crate) id: &'static str,
     /// The name `rotter hook <name>` is rendered with, also the prefix of the host's state
     /// directories (`claude-stop`, `claude-stop-notes`, …), kept from the first release.
@@ -72,7 +71,7 @@ pub struct Host {
     pub(crate) legacy: bool,
     pub(crate) session_keys: &'static [&'static str],
     pub(crate) cwd_keys: &'static [&'static str],
-    /// Whether a Stop without a usable cwd key runs in the hook process's own directory.
+    /// Whether a Stop with no string cwd key runs in the hook process's own directory.
     pub(crate) cwd_fallback: bool,
     /// Keys whose `true` marks a continuation the host started because of a block.
     pub(crate) continuation_keys: &'static [&'static str],

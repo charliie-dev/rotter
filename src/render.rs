@@ -928,7 +928,8 @@ Note: an installed grammar is C code.
         check_injection(|value, color| parser_install(&sample_install(value), color));
     }
 
-    /// A report with `value` in every string field and `code` as the unit's text.
+    /// A report with `value` in every field built with `text` (paths, names, comments, details)
+    /// and `code` as the unit's text.
     fn report(value: &str, code: &str) -> Json {
         json(report_value(value, code))
     }

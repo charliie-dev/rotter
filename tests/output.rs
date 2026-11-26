@@ -14,8 +14,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-/// Every string field of the injection fixture carries these (ESC, OSC 52, BEL, CR, BS, DEL, C1
-/// CSI and OSC, bidi overrides).
+/// What the injection fixture puts in a path, a comment and an untracked name: ESC, OSC 52, BEL,
+/// CR, BS, DEL, C1 CSI and OSC, a bidi override and a bidi isolate.
 const EVIL: &str = "\u{1b}[2J\u{1b}]52;c;aGk=\u{7}\r\u{8}\u{7f}\u{9b}\u{9d}\u{202e}\u{2066}";
 
 /// Git isolated from the user's configuration, with a pinned identity and dates so commit ids

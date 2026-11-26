@@ -38,8 +38,8 @@ pub(crate) fn home() -> Option<PathBuf> {
 /// Every directory one run takes from its environment, and PATH: on the hook path this is the
 /// only source of them (no function below it reads the environment). The binary builds it with
 /// [`Sources::from_env`] or, for hosts whose project configuration can set the hook's
-/// environment, [`Sources::injectable`]; nothing in the environment, argv or a file selects the
-/// constructor. Tests build it directly.
+/// environment, [`Sources::injectable`]; the host's `injectable` flag alone chooses, and nothing
+/// in the environment or a file does. Tests build it directly.
 #[derive(Clone, Debug)]
 pub struct Sources {
     pub(crate) home: Option<PathBuf>,
@@ -120,7 +120,7 @@ impl Sources {
     }
 }
 
-/// `$XDG_CONFIG_HOME/rotter/config.toml`, else `$HOME/.config/...`; None without either.
+/// `rotter/config.toml` under `Sources::config`; None without one.
 pub fn location(sources: &Sources) -> Option<PathBuf> {
     sources
         .config
@@ -185,7 +185,8 @@ impl Loaded {
 }
 
 /// Loads the config for a run in `repo` (None: no repository comparison). `Err` is an invalid
-/// config; a missing file gives the defaults and an untrusted one the defaults with a note.
+/// or unreadable config; a missing file gives the defaults and an untrusted one the defaults with
+/// a note.
 pub fn load(repo: Option<&Path>, sources: &Sources) -> Result<Loaded, String> {
     let Some(path) = location(sources) else {
         return Ok(Loaded::off(
@@ -1251,7 +1252,7 @@ units = ["x"]
         fs::create_dir_all(root.join("real")).unwrap();
         fs::write(root.join("real/config.toml"), "").unwrap();
         symlink("../x/../real/config.toml", root.join("cfg/config.toml")).unwrap();
-        // Through the original temp path, which on macOS itself starts with the /tmp symlink.
+        // A relative link whose target goes through `x/..`.
         let resolved = trusted_file(&root.join("cfg/config.toml"), user(), &real()).unwrap();
         assert_eq!(resolved, root.join("real/config.toml"));
         let dotted = root.join("cfg/./../real/config.toml");
