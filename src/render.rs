@@ -30,8 +30,6 @@ impl Color {
     }
 }
 
-/// Whether pretty output is coloured: `auto` only when stdout is a terminal, `NO_COLOR` is unset
-/// or empty and `TERM` is not `dumb`.
 pub fn color_on(
     choice: Color,
     terminal: bool,
@@ -109,7 +107,7 @@ const GREEN: &str = "32";
 const YELLOW: &str = "33";
 const CYAN: &str = "36";
 
-/// SGR styling, or none. Every span resets itself, so no style outlives its line.
+/// Every span resets itself, so no style outlives its line.
 #[derive(Clone, Copy)]
 struct Style(bool);
 
@@ -123,7 +121,7 @@ impl Style {
     }
 }
 
-/// Rows of `(already cleaned text, SGR)` cells, padded to aligned columns (by characters).
+/// Rows of `(already cleaned text, SGR)` cells, padded to aligned columns.
 fn table(style: Style, rows: &[Vec<(String, &str)>]) -> Vec<String> {
     let mut widths = Vec::new();
     for row in rows {
@@ -161,8 +159,6 @@ fn or_dash(value: Option<&str>) -> String {
     value.map_or_else(|| "-".to_owned(), clean)
 }
 
-/// `rotter integration status`: one aligned row per host with its detail and notes indented
-/// under it, then Grok's Claude compatibility, git and this executable.
 pub fn status(status: &Status, color: bool) -> String {
     let style = Style(color);
     let mut rows = vec![vec![
@@ -232,7 +228,7 @@ pub fn status(status: &Status, color: bool) -> String {
     finish(lines)
 }
 
-/// `rotter integration install|uninstall`: the result and path, then the notes.
+/// `rotter integration install|uninstall`.
 pub fn integration(done: &IntegrationResult, color: bool) -> String {
     let style = Style(color);
     let result = match done.result {
@@ -253,7 +249,6 @@ pub fn integration(done: &IntegrationResult, color: bool) -> String {
     finish(lines)
 }
 
-/// `rotter parser list`: one row per grammar, its source and detail indented under it.
 pub fn parsers(parsers: &[ParserEntry], color: bool) -> String {
     let style = Style(color);
     let mut rows = vec![vec![
@@ -287,7 +282,6 @@ pub fn parsers(parsers: &[ParserEntry], color: bool) -> String {
     finish(lines)
 }
 
-/// `rotter parser install`: one row per grammar, a failure's detail under it, then the notes.
 pub fn parser_install(done: &ParserInstall, color: bool) -> String {
     let style = Style(color);
     let rows: Vec<Vec<(String, &str)>> = done
@@ -333,7 +327,6 @@ fn status_color(status: &str) -> &'static str {
     }
 }
 
-/// `[a, b]` of a range's `lines`.
 fn lines_of(range: &Json) -> (usize, usize) {
     let lines = range.get("lines").as_arr();
     let at = |index: usize| {
@@ -345,8 +338,6 @@ fn lines_of(range: &Json) -> (usize, usize) {
     (at(0), at(1))
 }
 
-/// One unit: its header and annotations, then its comments and code with a line-number gutter,
-/// `~` on changed lines and comment lines highlighted.
 fn unit(style: Style, unit: &Json, lines: &mut Vec<String>) {
     let (first, last) = lines_of(unit.get("range"));
     let mut header = format!("    {}", style.paint(BOLD, &text(unit.get("kind"))));
@@ -398,7 +389,7 @@ fn unit(style: Style, unit: &Json, lines: &mut Vec<String>) {
     if !notes.is_empty() {
         lines.push(format!("      {}", style.paint(DIM, &notes.join(" · "))));
     }
-    // line → (text, comment); the unit's own lines win over a comment's partial first line.
+    // The unit's own lines win over a comment's partial first line.
     let mut shown: BTreeMap<usize, (String, bool)> = BTreeMap::new();
     let mut comment_lines = BTreeSet::new();
     let mut changed: BTreeSet<usize> = unit
@@ -459,8 +450,6 @@ fn unit(style: Style, unit: &Json, lines: &mut Vec<String>) {
     }
 }
 
-/// `rotter extract`: a header, one section per file with its units and their code, untracked
-/// files not covered, and a summary footer.
 pub fn extract(report: &Json, color: bool) -> String {
     let style = Style(color);
     let mut header = vec![style.paint(BOLD, &text(report.get("mode")))];
@@ -603,7 +592,6 @@ mod tests {
         Box::leak(text.into_boxed_str())
     }
 
-    /// A `Json` from a `serde_json` value, keys in order.
     fn json(value: serde_json::Value) -> Json {
         use serde_json::Value;
         match value {
@@ -621,7 +609,6 @@ mod tests {
         }
     }
 
-    /// `text` without SGR runs (`ESC [ <digits and ;> m`).
     fn strip_sgr(text: &str) -> String {
         let mut out = String::new();
         let mut rest = text;
@@ -642,8 +629,6 @@ mod tests {
         out
     }
 
-    /// No C1, bidi or zero-width character and no ESC, BEL, BS, CR or DEL except in rotter's
-    /// own SGR runs (none at all without colour), every injected newline escaped.
     fn assert_inert(text: &str, color: bool) {
         if !color {
             assert!(!text.contains('\u{1b}'), "{text:?}");
@@ -663,8 +648,6 @@ mod tests {
         );
     }
 
-    /// `render` of the evil values against the same with plain ones: inert in both colour
-    /// modes, and no injected newline adds a line.
     fn check_injection(render: impl Fn(&str, bool) -> String) {
         for color in [false, true] {
             let evil = render(EVIL, color);
@@ -928,12 +911,10 @@ Note: an installed grammar is C code.
         check_injection(|value, color| parser_install(&sample_install(value), color));
     }
 
-    /// A report with `value` in every string field and `code` as the unit's text.
     fn report(value: &str, code: &str) -> Json {
         json(report_value(value, code))
     }
 
-    /// [`report`] before its conversion, for tests that change a field.
     fn report_value(value: &str, code: &str) -> serde_json::Value {
         let text = |base: &str| format!("{base}{value}");
         let range = |first: u64, last: u64| {
@@ -1035,7 +1016,6 @@ untracked, not covered:
         let text = extract(&report("", code), false);
         assert_eq!(text, EXTRACT);
         check_injection(|value, color| extract(&report(value, code), color));
-        // The code of a CRLF file shows no CR; a lone CR is escaped.
         assert!(!text.contains(r"\u{d}"), "{text}");
         let lone = extract(&report("", "func F() {\r\tx\r\n}"), false);
         assert!(lone.contains(r"func F() {\u{d}	x"), "{lone}");

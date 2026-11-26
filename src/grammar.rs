@@ -1,5 +1,6 @@
-//! Grammars and the loader for installed external grammars. Loading only reads and verifies the
-//! cache and dlopens a library; fetching and building live in `install.rs` alone.
+//! Grammars and the loader for installed external grammars. Loading reads and verifies the cache
+//! (and, for a local source, the source files it hashes) and dlopens a library; fetching and
+//! building live in `install.rs` alone.
 
 use crate::Language;
 use crate::config::{
@@ -13,7 +14,8 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
-/// Where an external grammar's C sources come from; only `rotter parser install` reads them.
+/// Where an external grammar's C sources come from: `rotter parser install` builds from them, and
+/// a local path is also read, to hash its sources, whenever its library is looked up.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ExternalSource {
     Git {
@@ -34,8 +36,6 @@ enum Source {
     },
 }
 
-/// A language rotter can analyse: a builtin grammar or an enabled external one.
-///
 /// Constructing a Grammar never loads a library; [`Grammar::language`] does so on first use.
 pub struct Grammar {
     pub(crate) name: String,
@@ -56,7 +56,7 @@ pub struct Grammar {
     pub(crate) filenames: Vec<String>,
     /// Canonical top level of the analysed repository; a cache inside it is refused.
     repo: Option<PathBuf>,
-    /// The cache base (`$XDG_CACHE_HOME`) installed libraries are looked up under.
+    /// The cache base (`Sources::cache`) installed libraries are looked up under.
     cache: Option<PathBuf>,
 }
 
@@ -138,12 +138,11 @@ impl Grammar {
         }
     }
 
-    /// The cache base this grammar's library is looked up and installed under.
     pub(crate) fn cache(&self) -> Option<&Path> {
         self.cache.as_deref()
     }
 
-    /// The tree-sitter language, loaded on first call; the error explains what the user can do.
+    /// Loaded on first call; the error explains what the user can do.
     pub fn language(&self) -> Result<&tree_sitter::Language, String> {
         self.ts
             .get_or_init(|| match &self.source {
@@ -156,7 +155,6 @@ impl Grammar {
             .map_err(Clone::clone)
     }
 
-    /// What the user can do about an external grammar that cannot be loaded.
     fn install_hint(&self, source: &ExternalSource) -> String {
         match source {
             // The library is found by its source's contents, so a local source that cannot be
@@ -194,7 +192,6 @@ impl Grammar {
         Ok(path)
     }
 
-    /// dlopens the verified library path and asks it for the grammar.
     fn load(&self, symbol: &str) -> Result<tree_sitter::Language, String> {
         let path = self.library()?;
         check_symbol(symbol)?;
@@ -227,7 +224,7 @@ const LIBRARY_EXTENSION: &str = "dylib";
 #[cfg(not(target_os = "macos"))]
 const LIBRARY_EXTENSION: &str = "so";
 
-/// `<name>-<key>.<ext>`: the file name carries the grammar's identity.
+/// The file name carries the grammar's identity.
 pub(crate) fn library_file(name: &str, key: &str) -> String {
     format!("{name}-{key}.{LIBRARY_EXTENSION}")
 }
@@ -257,7 +254,6 @@ fn key(source: &ExternalSource, symbol: &str) -> Result<String, String> {
     }
 }
 
-/// `<revision>-<h8>`: h8 is the first 8 hex digits of FNV-1a 64 over location and symbol.
 pub(crate) fn git_key(revision: &str, location: &str, symbol: &str) -> String {
     let hash = fnv1a(&[location.as_bytes(), b"\0", symbol.as_bytes()]);
     format!("{revision}-{:08x}", hash >> 32)
@@ -275,7 +271,6 @@ pub(crate) fn inputs_key(inputs: &[(String, Vec<u8>)]) -> String {
     format!("{:016x}", fnv1a(&parts))
 }
 
-/// A real directory (not a symlink) owned by the user with mode exactly 0700.
 pub(crate) fn private_dir(path: &Path) -> Result<(), String> {
     let meta = lstat(path).map_err(|error| format!("{}: {error}", path.display()))?;
     if meta.kind != Kind::Dir || meta.uid != user() || meta.mode & 0o7777 != 0o700 {
@@ -294,7 +289,6 @@ pub(crate) fn trusted_cache_base(base: Option<&Path>) -> Result<PathBuf, String>
     cache_base_entered(base).map(|(resolved, _)| resolved)
 }
 
-/// [`trusted_cache_base`], with the directories [`resolve_trusted_entered`] entered on the way.
 fn cache_base_entered(base: Option<&Path>) -> Result<(PathBuf, Vec<PathBuf>), String> {
     let base = base.ok_or("no cache location (HOME and XDG_CACHE_HOME are unset or relative)")?;
     resolve_trusted_entered(base, user(), &lstat).map_err(|error| match error {
@@ -303,7 +297,6 @@ fn cache_base_entered(base: Option<&Path>) -> Result<(PathBuf, Vec<PathBuf>), St
     })
 }
 
-/// `<base>/rotter/parsers` ([`trusted_cache_base`]), with `rotter/` and `parsers/` checked by [`private_dir`].
 /// Refused when `repo` is on the way to `parsers/` or is `parsers/` itself, as the repository
 /// would choose which libraries are loaded.
 fn parsers_dir(cache: Option<&Path>, repo: Option<&Path>) -> Result<PathBuf, String> {
@@ -385,8 +378,6 @@ pub(crate) fn create_private(path: &Path) -> std::io::Result<fs::File> {
         .open(path)
 }
 
-/// A compile input may be used when it is a regular file owned by the user or root that others
-/// cannot write.
 pub(crate) fn trusted_input(meta: Meta, user: u32) -> bool {
     meta.kind == Kind::File && (meta.uid == user || meta.uid == 0) && meta.mode & 0o022 == 0
 }
@@ -583,7 +574,6 @@ mod tests {
             trusted_input(meta(Kind::File, 0, 0o100444), user()),
             "root-owned"
         );
-        // Metadata injection: another user's file, group/world writable, not a regular file.
         assert!(!trusted_input(meta(Kind::File, 4242, 0o100644), user()));
         assert!(!trusted_input(meta(Kind::File, user(), 0o100664), user()));
         assert!(!trusted_input(meta(Kind::File, user(), 0o100646), user()));

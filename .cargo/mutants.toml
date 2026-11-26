@@ -4,5 +4,5 @@
 # re-examined rather than staying excluded by accident.
 exclude_re = [
   # O_NOFOLLOW and O_NONBLOCK share no bits, so `^` equals `|`.
-  '^src/grammar\.rs:338:47: replace \| with \^$',
+  '^src/grammar\.rs:331:47: replace \| with \^$',
 ]

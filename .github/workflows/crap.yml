@@ -1,6 +1,3 @@
-# CRAP score gate: no Rust function may score above 30 (CRAP = CC² × (1 − coverage)³ + CC, from
-# unclebob/crapper, pinned by commit in mise.toml). `mise run crap` runs every test with
-# cargo-llvm-cov first.
 name: crap
 
 on:
@@ -32,7 +29,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # Rust with llvm-tools, cargo-llvm-cov and crapper; Node and Bun for the shim tests.
+      # Node and Bun for the shim tests.
       - uses: jdx/mise-action@236a21c3b91f5db6d4e174b348674a0f0caac06d # v5.2.9
         with:
           install_args: >-
@@ -41,5 +38,4 @@ jobs:
           cache: false
       # The install tests build a fixture offline, which needs every locked crate downloaded.
       - run: cargo fetch --locked
-      # Rust sources only (the shims' JavaScript has no coverage report); exits 2 above 30.
       - run: mise run crap

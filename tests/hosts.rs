@@ -1,6 +1,3 @@
-//! The host abstraction: host-id keying, the loop cap, merged-file hardening, the install
-//! work-tree probe, the upgrade from S0-written files, and per-host install and hook cases.
-
 mod common;
 
 use common::{
@@ -56,19 +53,16 @@ fn hook_aliases_share_one_counter_and_one_dedupe_slot() {
         let root = temp("alias");
         let repo = root.join("repo");
         changed_repo(&repo);
-        // A changing report every Stop, alternating the two names of one host.
         let mut blocks = Vec::new();
         for (turn, name) in [alias, canonical, alias, canonical].iter().enumerate() {
             fs::write(repo.join("a.go"), go(10 + turn)).unwrap();
             blocks.push(is_block(&hook(&root, name, &input("s", &repo))));
         }
         assert_eq!(blocks, [true, true, false, true], "{alias}");
-        // The last report through the other name: one slot, so quiet.
         assert!(
             !is_block(&hook(&root, alias, &input("s", &repo))),
             "{alias}"
         );
-        // One slot and one counter, under the canonical name only.
         assert_eq!(
             listing(&root.join("state")),
             [canonical.to_owned(), format!("{canonical}-count")],
@@ -99,7 +93,6 @@ fn the_loop_cap_fails_closed() {
         let output = rotter(&root, &["hook", canonical], &root, &unflagged, &env);
         assert!(!is_block(&output), "{canonical}: {output:?}");
         set_mode(&locked, 0o700);
-        // No state location at all.
         let unset = [
             ("ROTTER_STATE_DIR", None),
             ("XDG_STATE_HOME", None),
@@ -107,7 +100,7 @@ fn the_loop_cap_fails_closed() {
         ];
         let output = rotter(&root, &["hook", canonical], &root, &stop, &unset);
         assert!(!is_block(&output), "{canonical}: {output:?}");
-        // Session ids that cannot key a counter: silent without looking at anything.
+        // Session ids that cannot key a counter.
         for session in ["..", ".", "", &"s".repeat(300)] {
             let output = hook(&root, canonical, &input(session, &repo));
             assert_eq!(stdout(&output), "", "{canonical} {session:?}");
@@ -124,7 +117,6 @@ fn the_loop_cap_fails_closed() {
     }
 }
 
-/// Two hook runs of `canonical` in one session started together on different repositories.
 fn concurrent(root: &Path, canonical: &str, input: Input, repos: [&Path; 2]) -> usize {
     let children: Vec<_> = repos
         .iter()
@@ -170,10 +162,9 @@ fn concurrent_stops_respect_the_remaining_capacity() {
         fs::write(two.join("a.go"), go(3)).unwrap();
         let count = root.join(format!("state/{canonical}-count/s"));
         fs::create_dir_all(count.parent().unwrap()).unwrap();
-        // One request left: at most one of two passes.
+        // One request left.
         fs::write(&count, "1\n").unwrap();
         assert_eq!(concurrent(&root, canonical, input, [&one, &two]), 1);
-        // From 0 both pass, and the count is not lost.
         fs::write(one.join("a.go"), go(4)).unwrap();
         fs::write(two.join("a.go"), go(5)).unwrap();
         fs::write(&count, "").unwrap();
@@ -298,7 +289,6 @@ fn claude_takes_its_directories_from_home() {
     fs::remove_dir_all(root).unwrap();
 }
 
-/// Copies `tests/fixtures/s0/<name>` to `to`, with the S0 binary path set to this binary.
 fn golden(name: &str, to: &Path) {
     let from = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/s0")
@@ -354,7 +344,6 @@ fn s0_installations_and_state_carry_over() {
     );
     assert_eq!(listing(&root.join("grok/hooks")), Vec::<String>::new());
 
-    // An S0 merge next to another tool's entry, with its backup.
     let merged = root.join("merged");
     golden("claude-merged/settings.json", &merged.join("settings.json"));
     golden(
@@ -385,8 +374,6 @@ fn s0_installations_and_state_carry_over() {
     );
     assert!(!merged.join("settings.json.rotter-bak").exists());
 
-    // S0 state: a diagnostics store written by S0 is still honoured (the same note is not
-    // repeated in its session), and the new request counter starts at 0.
     let state = root.join("state");
     golden(
         "state/claude-stop-notes/s0",
@@ -476,7 +463,6 @@ fn merged_settings_keep_every_other_tools_entry() {
         "only the group rotter emptied goes"
     );
 
-    // Unsafe modes and duplicate keys: refused and untouched.
     for (mode, text, why) in [
         (0o664, "{}".to_owned(), "chmod go-w"),
         (0o646, "{}".to_owned(), "chmod go-w"),
@@ -494,7 +480,6 @@ fn merged_settings_keep_every_other_tools_entry() {
         assert_eq!(fs::read_to_string(&settings).unwrap(), text);
         assert_eq!(listing(&dir), ["settings.json"]);
     }
-    // A missing host directory is never created.
     let gone = root.join("gone");
     let env = [("CLAUDE_CONFIG_DIR", Some(gone.as_os_str()))];
     let (code, text) = integration(&root, &["install", "claude"], &env);
@@ -550,7 +535,6 @@ fn install_refuses_host_dirs_inside_a_work_tree() {
         .unwrap();
     assert!(!plain.status.success(), "{plain:?}");
 
-    // No usable git on PATH: refused too (fails closed).
     let empty = root.join("empty");
     fs::create_dir(&empty).unwrap();
     let mut no_git = env.clone();
@@ -561,7 +545,6 @@ fn install_refuses_host_dirs_inside_a_work_tree() {
         assert!(text.contains("cannot tell"), "{host}: {text}");
     }
 
-    // No `.git` above the host dir: installed without any git call.
     let outside = root.join("outside");
     fs::create_dir_all(outside.join("grok")).unwrap();
     let wrapper = root.join("wrapper");
@@ -645,8 +628,7 @@ fn owned_file_status_names_other_binaries() {
             .starts_with("git version "),
         "{text}"
     );
-    // A dispatcher alone on PATH (outside the status run's directory, whose tree is excluded):
-    // status names it as skipped and still exits 0.
+    // A dispatcher alone on PATH (outside the status run's directory, whose tree is excluded).
     let shims = temp("owned-shims");
     fs::write(shims.join("git"), "#!/bin/sh\nexit 0\n").unwrap();
     set_mode(&shims.join("git"), 0o755);
@@ -666,14 +648,11 @@ fn owned_file_status_names_other_binaries() {
     fs::remove_dir_all(root).unwrap();
 }
 
-/// A host added in S2: where its hook lives and what rotter writes there.
 struct New {
     id: &'static str,
-    /// The directory variable, if the host has one.
     var: Option<&'static str>,
     /// Under `root/home` when the variable is unset or relative.
     fallback: &'static str,
-    /// The hook file below the host directory.
     file: &'static str,
     /// The file rotter writes into an empty host directory, for command C and timeout 90.
     document: fn(&str) -> Value,
@@ -727,7 +706,6 @@ fn new_hosts_install_exactly_their_entry_where_their_variable_points() {
     for host in NEW {
         let root = temp("new-install");
         let command = format!("'{EXE}' hook {} || true", host.id);
-        // The variable when absolute, else `~/<fallback>`: unset and relative both fall back.
         let fallback = root.join("home").join(host.fallback);
         let cases = match host.var {
             Some(var) => vec![
@@ -743,7 +721,6 @@ fn new_hosts_install_exactly_their_entry_where_their_variable_points() {
         for (setting, dir) in cases {
             let pairs: Vec<_> = setting.into_iter().collect();
             let env = env(&pairs);
-            // A missing host directory is never created.
             let (code, text) = integration(&root, &["install", host.id], &env);
             assert_eq!((code, text.contains("does not exist")), (2, true), "{text}");
             assert!(!dir.exists(), "{}", dir.display());
@@ -783,7 +760,6 @@ fn new_hosts_install_exactly_their_entry_where_their_variable_points() {
                 "experimental"
             };
             assert_eq!(found["support"], support, "{text}");
-            // Every installed command exits 0 even when the binary it names exits 2.
             let stub = root.join("stub");
             fs::write(&stub, "#!/bin/sh\nexit 2\n").unwrap();
             set_mode(&stub, 0o755);
@@ -823,7 +799,6 @@ fn mode(path: &Path) -> u32 {
     fs::symlink_metadata(path).unwrap().permissions().mode() & 0o777
 }
 
-/// Every install kind, with the host file rotter would write: (host, dir, file, owned).
 fn kinds(root: &Path) -> [(&'static str, PathBuf, PathBuf, bool); 5] {
     [
         (
@@ -866,7 +841,6 @@ fn every_install_kind_refuses_unsafe_or_foreign_targets_and_leaves_them() {
         fs::create_dir_all(file.parent().unwrap()).unwrap();
         set_mode(&dir, 0o700);
         set_mode(file.parent().unwrap(), 0o700);
-        // A symlink at the target: never followed, never replaced.
         let elsewhere = root.join(format!("{host}-elsewhere.json"));
         fs::write(&elsewhere, "{}\n").unwrap();
         std::os::unix::fs::symlink(&elsewhere, &file).unwrap();
@@ -877,7 +851,6 @@ fn every_install_kind_refuses_unsafe_or_foreign_targets_and_leaves_them() {
             assert_eq!(fs::read_to_string(&elsewhere).unwrap(), "{}\n");
         }
         fs::remove_file(&file).unwrap();
-        // A file others can write: refused and untouched.
         fs::write(&file, "{}\n").unwrap();
         set_mode(&file, 0o666);
         let (code, text) = integration(&root, &["install", host], &[]);
@@ -921,7 +894,6 @@ fn every_install_kind_refuses_unsafe_or_foreign_targets_and_leaves_them() {
     fs::remove_dir_all(root).unwrap();
 }
 
-/// The commands of a merged file's Stop groups.
 fn commands_of(host: &str, path: &Path) -> Vec<String> {
     let document = read_json(path);
     let groups = if host == "droid" {
@@ -944,7 +916,6 @@ fn codex_entries_keep_their_positions_and_status_names_the_trust_step() {
     let dir = root.join("codex");
     fs::create_dir(&dir).unwrap();
     let file = dir.join("hooks.json");
-    // Codex keys a hook's trust on its group and handler index.
     let seed = json!({ "hooks": { "Stop": [
         { "hooks": [{ "type": "command", "command": "/a.sh" }] },
         { "hooks": [{ "type": "command", "command": "'/else/rotter' hook codex || true",
@@ -1040,7 +1011,6 @@ fn droid_never_hides_hooks_declared_in_its_settings() {
     );
     fs::remove_dir_all(root).unwrap();
 
-    // Hooks given as an array count as declared unless the array is empty.
     let root = temp("droid-array");
     let dir = root.join("home/.factory");
     fs::create_dir_all(&dir).unwrap();
@@ -1075,9 +1045,7 @@ fn new_hosts_answer_in_their_own_protocol() {
         assert_eq!(keys, ["decision", "reason"], "{host}");
         assert_eq!(reply["decision"], "block");
         assert!(reply["reason"].as_str().unwrap().contains("' --skill`"));
-        // The same report again: silent.
         assert_eq!(stdout(&hook(&root, host, &stop)), "", "{host}");
-        // A continuation the host started, or (Copilot) a stop that ends no turn: silent.
         fs::write(repo.join("a.go"), go(7)).unwrap();
         let mut continuation: Value = serde_json::from_str(&stop).unwrap();
         continuation["stop_hook_active"] = true.into();
@@ -1087,7 +1055,6 @@ fn new_hosts_answer_in_their_own_protocol() {
             other["stopReason"] = "error".into();
             assert_eq!(stdout(&hook(&root, host, &other.to_string())), "");
         }
-        // Notes: a systemMessage for Codex, stderr for the others; the decision is unchanged.
         let config = root.join("xdg-config/rotter");
         fs::create_dir_all(&config).unwrap();
         fs::write(config.join("config.toml"), "parse_timeout_seconds = 0\n").unwrap();
@@ -1113,7 +1080,7 @@ fn new_hosts_answer_in_their_own_protocol() {
 
 /// Codex, Copilot and Droid: a continuation the host itself started, and (Copilot only, since
 /// it is the one of the three with a documented end-reason field) a stop that ends no turn, both
-/// run no git at all — reusing the native recording wrapper from `tests/common`.
+/// run no git at all.
 #[test]
 fn codex_copilot_and_droid_run_no_git_on_a_continuation_or_a_non_end_turn_stop() {
     for (host, input) in [
@@ -1140,7 +1107,6 @@ fn codex_copilot_and_droid_run_no_git_on_a_continuation_or_a_non_end_turn_stop()
         .unwrap();
         let env = [("PATH", Some(path.as_os_str()))];
 
-        // A continuation the host itself started because of a block: silent, no git.
         let mut continuation: Value = serde_json::from_str(&input("c", &repo)).unwrap();
         continuation["stop_hook_active"] = true.into();
         let output = rotter(
@@ -1207,9 +1173,7 @@ fn unsupported_hosts_are_named_and_refused() {
     fs::remove_dir_all(root).unwrap();
 }
 
-/// Every in-scope host (S4): the 15 named in the plan's Host table, each named exactly once in
-/// `status`, whether shipped, experimental or unsupported. China-based agents (kimi, qwen,
-/// qodercli) are deliberately excluded and must never appear.
+/// China-based agents (kimi, qwen, qodercli) are deliberately excluded and must never appear.
 #[test]
 fn status_names_every_in_scope_host_exactly_once() {
     const IN_SCOPE: [&str; 15] = [

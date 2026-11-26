@@ -78,7 +78,6 @@ impl Json {
     }
 }
 
-/// Scalars on one line: `[1, "a", null]`.
 fn write_inline(out: &mut fmt::Formatter<'_>, items: &[Json], indent: usize) -> fmt::Result {
     out.write_char('[')?;
     for (index, item) in items.iter().enumerate() {
@@ -90,8 +89,6 @@ fn write_inline(out: &mut fmt::Formatter<'_>, items: &[Json], indent: usize) -> 
     out.write_char(']')
 }
 
-/// `items` one per line, each indented one level deeper than `indent`, between `open` and
-/// `close`; `item` writes one of them.
 fn write_block<T>(
     out: &mut fmt::Formatter<'_>,
     indent: usize,

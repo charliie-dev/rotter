@@ -55,8 +55,6 @@ fn last_row(node: Node<'_>) -> usize {
     last_row_of(node.start_position(), node.end_position())
 }
 
-/// [`last_row`] for a node spanning `start..end`: an end at column 0 of a later row belongs to
-/// the row before, and a node ending where it starts keeps its own row.
 fn last_row_of(start: Point, end: Point) -> usize {
     if end.column == 0 && end.row > start.row {
         end.row - 1
@@ -98,7 +96,7 @@ struct File<'t> {
     root: Node<'t>,
     line_starts: Vec<usize>,
     comments: Vec<Node<'t>>,
-    /// Standalone comments (only whitespace before them on their first line).
+    /// Standalone comments.
     by_start_row: HashMap<usize, Node<'t>>,
     by_last_row: HashMap<usize, Node<'t>>,
     attribute_rows: BTreeSet<usize>,
@@ -136,7 +134,6 @@ pub fn full_units(grammar: &Grammar, source: &str, tree: &Tree) -> Json {
         let unit = if file.standalone(*comment) {
             file.unit_for(*comment)
         } else {
-            // A trailing comment belongs to the code at the start of its line.
             file.node_at_row(comment.start_position().row)
                 .map_or(*comment, |node| file.unit_for(node))
         };
@@ -221,7 +218,6 @@ pub fn units(grammar: &Grammar, source: &str, tree: &Tree, changes: &[Change]) -
             continue;
         }
         let mut added = 0;
-        // Units past the cap, each counted once however often it uses the name.
         let mut omitted: Vec<Node<'_>> = Vec::new();
         for identifier in &file.identifiers {
             if file.source[identifier.byte_range()] != name || overlaps(item.node, *identifier) {
@@ -291,7 +287,7 @@ impl<'t> File<'t> {
         file
     }
 
-    /// Records one node; returns whether its children are scanned (not a comment's).
+    /// Returns whether its children are scanned (not a comment's).
     fn scan(&mut self, node: Node<'t>) -> bool {
         if node.is_error() || node.is_missing() {
             self.errors.push(node.byte_range());
@@ -351,7 +347,6 @@ impl<'t> File<'t> {
         self.line_starts[row] + line.len() - line.trim_start().len()
     }
 
-    /// Smallest node at the first non-blank character of `row`.
     fn node_at_row(&self, row: usize) -> Option<Node<'t>> {
         let line = self.line(row);
         let column = line.len() - line.trim_start().len();
@@ -539,7 +534,6 @@ impl<'t> File<'t> {
         )
     }
 
-    /// True when a change touches code, not only comment lines.
     fn code_changed(&self, item: &Selected<'_>) -> bool {
         !item.gaps.is_empty()
             || item
@@ -813,7 +807,6 @@ mod tests {
         let at = |row, column| Point { row, column };
         assert_eq!(last_row_of(at(2, 4), at(3, 0)), 2);
         assert_eq!(last_row_of(at(2, 4), at(5, 0)), 4);
-        // Ending later on a row, or empty at column 0 where it starts: its own end row.
         assert_eq!(last_row_of(at(2, 4), at(3, 1)), 3);
         assert_eq!(last_row_of(at(2, 0), at(2, 0)), 2);
     }
@@ -846,12 +839,10 @@ mod tests {
 
     #[test]
     fn errors_touch_a_unit_only_when_they_share_a_byte() {
-        // Unit covers bytes 10..20.
         assert!(!touches(&(20..21), 10..20), "an ERROR right after the unit");
         assert!(!touches(&(9..10), 10..20), "an ERROR right before the unit");
         assert!(touches(&(19..21), 10..20));
         assert!(touches(&(5..11), 10..20));
-        // A zero-width MISSING node inside or on either edge still counts.
         assert!(touches(&(20..20), 10..20));
         assert!(touches(&(10..10), 10..20));
         assert!(touches(&(15..15), 10..20));

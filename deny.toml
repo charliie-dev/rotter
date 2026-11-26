@@ -1,6 +1,3 @@
-# cargo-deny (`mise run sast`): known vulnerabilities, licenses, duplicated or wildcard crates
-# and the sources of every dependency. Started from `cargo deny init` (0.22.0), then trimmed.
-
 [graph]
 all-features = true
 

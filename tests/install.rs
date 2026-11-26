@@ -19,7 +19,6 @@ const EXT: &str = "so";
 
 const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
 
-/// A fresh canonical 0700 directory.
 fn temp(name: &str) -> PathBuf {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     let path = std::env::temp_dir().join(format!(
@@ -33,7 +32,6 @@ fn temp(name: &str) -> PathBuf {
     fs::canonicalize(path).unwrap()
 }
 
-/// The vendored tree-sitter-lua 0.5.0 `src` directory, found without network access.
 fn lua_src() -> PathBuf {
     let output = Command::new(env!("CARGO"))
         .args(["metadata", "--offline", "--format-version", "1"])
@@ -140,7 +138,6 @@ fn keep_coverage(command: &mut Command) {
     }
 }
 
-/// A test world: pinned config, cache, HOME and a cleared environment for every run.
 struct World {
     root: PathBuf,
     config: PathBuf,
@@ -201,7 +198,6 @@ impl World {
         self.command(args).output().unwrap()
     }
 
-    /// `rotter parser install` under `umask`.
     fn install_with_umask(&self, umask: &str, names: &[&str]) -> Output {
         let mut command = Command::new("/bin/sh");
         command
@@ -243,7 +239,6 @@ impl World {
         names
     }
 
-    /// `extract --full` on `repo`: the after side of `path`.
     fn side(&self, repo: &Path, path: &str, extra: &[&str]) -> Value {
         let mut args = vec!["extract", "--full", "-C", repo.to_str().unwrap()];
         args.extend(extra);
@@ -273,7 +268,6 @@ impl Drop for World {
     }
 }
 
-/// The one JSON document on stdout, checked to be rotter's with `schema`.
 fn document(output: &Output, schema: &str) -> Value {
     let value: Value = serde_json::from_slice(&output.stdout)
         .unwrap_or_else(|error| panic!("{error}: {output:?}"));
@@ -282,7 +276,6 @@ fn document(output: &Output, schema: &str) -> Value {
     value
 }
 
-/// Grammar `name` in a `rotter parser list` document.
 fn listed<'a>(list: &'a Value, name: &str) -> &'a Value {
     list["parsers"]
         .as_array()
@@ -311,7 +304,6 @@ fn executable(path: &Path, text: &str) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
-/// `name` resolved from this test process's PATH.
 fn real(name: &str) -> PathBuf {
     std::env::split_paths(&std::env::var_os("PATH").unwrap())
         .map(|dir| dir.join(name))
@@ -319,7 +311,6 @@ fn real(name: &str) -> PathBuf {
         .unwrap()
 }
 
-/// PATH with `dir` first.
 fn path_with(dir: &Path) -> OsString {
     let mut entries = vec![dir.to_owned()];
     entries.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
@@ -349,7 +340,6 @@ fn offline_lua2_install_then_extract() {
         &world.root,
         &[("a.lua2", LUA_FILE), ("b.txt", "-- B.\nlocal b = 1\n")],
     );
-    // Missing cache base two levels deep; TMPDIR unwritable.
     world.cache = world.root.join("fresh/cache");
     world.set("XDG_CACHE_HOME", world.cache.clone());
     let readonly = world.root.join("readonly-tmp");
@@ -479,14 +469,12 @@ fn partial_install_prints_what_was_installed_and_fails() {
         done["notes"][0].as_str().unwrap().contains("in-process"),
         "{done}"
     );
-    // The document is all of stdout; the error, with the ESC and BEL escaped, is on stderr.
     assert!(output.stdout.ends_with(b"}\n"));
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert_eq!(stderr.lines().count(), 1, "{stderr}");
     assert!(stderr.starts_with("rotter: lua3: "), "{stderr}");
     assert!(stderr.contains("gone\\u{1b}]52;c;aGk=\\u{7}"), "{stderr}");
     assert!(!stderr.contains(['\u{1b}', '\u{7}']), "{stderr:?}");
-    // The pretty form of the same run.
     let text = String::from_utf8(
         world
             .run(&[
@@ -536,7 +524,6 @@ fn loader_refuses_unsafe_cache_layouts() {
     refused(&world, "group-writable library");
     fs::set_permissions(&library, fs::Permissions::from_mode(0o700)).unwrap();
 
-    // A private directory where the library belongs is refused before anything loads it.
     let saved = world.root.join("saved-library");
     fs::rename(&library, &saved).unwrap();
     fs::create_dir(&library).unwrap();
@@ -574,7 +561,6 @@ fn loader_refuses_unsafe_cache_layouts() {
 
     fs::set_permissions(&shared, fs::Permissions::from_mode(0o770)).unwrap();
     refused(&world, "group-writable non-sticky ancestor");
-    // A symlinked cache base: into the unsafe directory, then with the target chain safe.
     let link = world.root.join("cache-link");
     symlink(&world.cache, &link).unwrap();
     world.set("XDG_CACHE_HOME", link.clone());
@@ -672,7 +658,6 @@ fn library_inside_the_analysed_repository_is_not_loaded() {
             .contains("inside the repository"),
         "{side}"
     );
-    // Same for a repository rooted at parsers/ itself.
     let parsers = world.parsers();
     fs::remove_dir_all(rotter.join(".git")).unwrap();
     fs::rename(rotter.join("a.lua2"), parsers.join("a.lua2")).unwrap();
@@ -698,7 +683,6 @@ fn changed_header_symbol_or_location_needs_a_reinstall() {
     ok(&world.install(&["lua2"]));
     assert_eq!(world.status(&repo, "a.lua2"), "ok");
 
-    // A header-only change changes the key of a local grammar.
     let mut header = fs::OpenOptions::new()
         .append(true)
         .open(src.join("tree_sitter/alloc.h"))
@@ -710,7 +694,7 @@ fn changed_header_symbol_or_location_needs_a_reinstall() {
     assert_eq!(world.listing("parsers").len(), 2);
 
     // A git grammar's file name covers revision, location and symbol: the lua library placed
-    // under the name for (no location, tree_sitter_lua) loads; any change needs a reinstall.
+    // under the name for (no location, tree_sitter_lua) loads.
     let library = world.parsers().join(&world.listing("parsers")[0]);
     let target = world
         .parsers()
@@ -737,10 +721,10 @@ fn changed_header_symbol_or_location_needs_a_reinstall() {
     );
 }
 
-/// A git grammar installs from its pinned commit. The https remote is played by a local
-/// repository: the git wrapper rewrites that one URL and allows the file protocol for the fetch
-/// only, so everything else runs as against a real remote (init, config, attributes, a depth-1
-/// fetch of the revision, the tree check, checkout, compile and publish).
+/// The https remote is played by a local repository: the git wrapper rewrites that one URL and
+/// allows the file protocol for the fetch only, so everything else runs as against a real remote
+/// (init, config, attributes, a depth-1 fetch of the revision, the tree check, checkout, compile
+/// and publish).
 #[test]
 fn git_grammar_installs_from_its_pinned_commit() {
     let mut world = World::new("gitsrc");
@@ -864,7 +848,6 @@ fn unsafe_local_inputs_are_refused_before_cc_runs() {
     assert!(world.listing("parsers").is_empty() && world.listing("build").is_empty());
 }
 
-/// Records argv, cwd and environment of every call, then runs `target`.
 fn recorder(dir: &Path, name: &str, target: &Path, extra: &str) -> PathBuf {
     fs::create_dir_all(dir).unwrap();
     let log = dir.join(format!("{name}.log"));
@@ -1010,7 +993,6 @@ fn compiler_environment_is_an_allowlist() {
     }
     assert!(world.listing("build").is_empty());
 
-    // A relative DEVELOPER_DIR is dropped.
     fs::remove_file(&log).unwrap();
     world.set("DEVELOPER_DIR", "relative/dev");
     ok(&world.install(&["lua2"]));
@@ -1021,8 +1003,6 @@ fn compiler_environment_is_an_allowlist() {
     );
 }
 
-/// A git wrapper: records every call, requires DEVELOPER_DIR, never fetches, and fakes
-/// `rev-parse --git-common-dir` according to `<dir>/mode`.
 fn git_wrapper(dir: &Path) -> PathBuf {
     let real_git = real("git");
     let extra = format!(
@@ -1074,7 +1054,6 @@ fn git_ignores_ambient_repositories_and_config() {
     git(&canary, &["add", "-A"]);
     git(&canary, &["commit", "-q", "-m", "c"]);
     let before = snapshot(&canary.join(".git"));
-    // A private HOME whose global config points init.templateDir at a template with commondir.
     let home = PathBuf::from(&world.env["HOME"]);
     let template = world.root.join("template");
     fs::create_dir_all(&template).unwrap();
@@ -1259,7 +1238,6 @@ fn registry_dockerfile_detection_by_file_name() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("not enabled"));
 }
 
-/// Runs the hook for `repo` with state, Claude settings and XDG dirs pinned inside the world.
 fn hook(world: &World, repo: &Path) -> String {
     let state = world.root.join("state");
     let mut child = world
@@ -1303,7 +1281,6 @@ fn hook_never_builds_and_uses_installed_grammars() {
     )
     .unwrap();
 
-    // Enabled but not installed: reported, and a cc on PATH is never run.
     let bin = world.root.join("bin");
     fs::create_dir_all(&bin).unwrap();
     let marker = world.root.join("cc-ran");

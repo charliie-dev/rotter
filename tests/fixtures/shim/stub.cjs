@@ -1,5 +1,4 @@
-// A stub rotter for the shim harness (the test prepends a `#!<node>` line). It appends its argv,
-// environment and stdin to `log` next to it and then acts as `mode` there says.
+// A stub rotter for the shim harness (the test prepends a `#!<node>` line).
 const fs = require("node:fs");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
@@ -16,7 +15,6 @@ const big = "x".repeat(70 * 1024);
 
 switch (mode) {
   case "epipe":
-    // Exits before reading stdin.
     record(null);
     process.exit(0);
     break;

@@ -1,7 +1,3 @@
-//! Output formats: `rotter extract`'s default JSON stays byte-identical to the goldens captured
-//! from the binary before `--pretty` existed (9f4f132); `--pretty` extract goldens; the output
-//! flags; and every other command's JSON document.
-//!
 //! Goldens are deterministic: fixture commits use a pinned identity and dates, and exactly one
 //! substitution is applied to stdout, the JSON-escaped canonical repository path to `@REPO@`.
 //! With `ROTTER_BLESS_DIR=<dir>` the tests write what they would compare into `<dir>` instead.
@@ -14,12 +10,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-/// Every string field of the injection fixture carries these (ESC, OSC 52, BEL, CR, BS, DEL, C1
-/// CSI and OSC, bidi overrides).
+/// What the injection fixture puts in a path, a comment and an untracked name: ESC, OSC 52, BEL,
+/// CR, BS, DEL, C1 CSI and OSC, a bidi override and a bidi isolate.
 const EVIL: &str = "\u{1b}[2J\u{1b}]52;c;aGk=\u{7}\r\u{8}\u{7f}\u{9b}\u{9d}\u{202e}\u{2066}";
 
-/// Git isolated from the user's configuration, with a pinned identity and dates so commit ids
-/// are stable.
 fn git(repo: &Path, args: &[&str]) {
     let output = Command::new("git")
         .arg("-C")
@@ -41,8 +35,6 @@ fn git(repo: &Path, args: &[&str]) {
     assert!(output.status.success(), "git {args:?}: {output:?}");
 }
 
-/// A repository under `root` built from `commits`, each a list of `(path, Some(content))` writes
-/// and `(path, None)` removals committed in order.
 fn repo(root: &Path, commits: &[&[(&str, Option<&str>)]]) -> PathBuf {
     let repo = root.join("repo");
     fs::create_dir_all(&repo).unwrap();
@@ -60,7 +52,6 @@ fn repo(root: &Path, commits: &[&[(&str, Option<&str>)]]) -> PathBuf {
     fs::canonicalize(repo).unwrap()
 }
 
-/// A fixture: its repository and the extract arguments it is reported with.
 struct Case {
     name: &'static str,
     args: &'static [&'static str],
@@ -176,7 +167,6 @@ const HEAD_CASES: [Case; 3] = [
     },
 ];
 
-/// `--pretty --color=never` goldens, captured from this binary and reviewed.
 const PRETTY_CASES: [Case; 4] = [
     Case {
         name: "complete",
@@ -204,8 +194,6 @@ const PRETTY_CASES: [Case; 4] = [
     },
 ];
 
-/// `stdout` with every occurrence of the JSON-escaped `repo` replaced by `@REPO@`, the only
-/// normalisation.
 fn substitute(stdout: &[u8], repo: &Path) -> Vec<u8> {
     let escaped = Json::from(repo.to_str().unwrap()).to_string();
     let escaped = &escaped.as_bytes()[1..escaped.len() - 1];
@@ -227,8 +215,6 @@ fn run(root: &Path, repo: &Path, args: &[&str]) -> Output {
     rotter(root, args, repo, "", &[])
 }
 
-/// Compares `actual` with the golden `name` byte for byte (or blesses it), after checking that
-/// no part of the temp path survived the substitution.
 fn check_golden(name: &str, actual: &[u8], root: &Path) {
     let text = String::from_utf8_lossy(actual);
     let temp = std::env::temp_dir();
@@ -262,7 +248,6 @@ fn check_golden(name: &str, actual: &[u8], root: &Path) {
     );
 }
 
-/// The default JSON of each case, in two differently named temp dirs, equals the HEAD golden.
 #[test]
 fn default_extract_output_is_byte_identical_to_head() {
     for case in &HEAD_CASES {
@@ -286,7 +271,6 @@ fn default_extract_output_is_byte_identical_to_head() {
     }
 }
 
-/// The same fixtures rendered with `--pretty --color=never`, byte for byte.
 #[test]
 fn pretty_extract_matches_its_goldens() {
     for case in &PRETTY_CASES {
@@ -315,7 +299,6 @@ fn pretty_extract_matches_its_goldens() {
     }
 }
 
-/// `text` without rotter's own SGR runs (`ESC [ <digits and ;> m`).
 fn strip_sgr(text: &str) -> String {
     let mut out = String::new();
     let mut rest = text;
@@ -337,7 +320,6 @@ fn strip_sgr(text: &str) -> String {
     out
 }
 
-/// No C1, bidi or zero-width character and no ESC, BEL, BS, CR or DEL outside SGR runs.
 fn assert_inert(text: &str, what: &str) {
     for c in strip_sgr(text).chars() {
         assert!(
@@ -373,11 +355,10 @@ fn colour_is_forced_by_always_and_off_through_a_pipe() {
     }
     assert_inert(&text, "--color=always");
     assert!(text.contains("\\u{1b}[2J") && text.contains("\\u{9b}") && text.contains("\\u{a}"));
-    // The CRLF file shows no CR marker; the lone CR in the comment is escaped.
     assert!(text.contains("// G is crlf.\u{1b}[0m"), "{text}");
     assert!(!text.contains("crlf.\\u{d}"), "{text}");
     assert!(text.contains("\\u{d}\\u{8}"), "{text}");
-    // Auto through a pipe (the test's stdout is not a terminal), even with TERM set: no colour.
+    // Auto through a pipe (the test's stdout is not a terminal), even with TERM set.
     for env in [
         &[][..],
         &[("TERM", Some(std::ffi::OsStr::new("xterm-256color")))],
@@ -396,7 +377,6 @@ fn colour_is_forced_by_always_and_off_through_a_pipe() {
     fs::remove_dir_all(root).unwrap();
 }
 
-/// Usage errors: exit 2, the message on stderr, nothing on stdout.
 fn usage_error(output: &Output, message: &str) {
     assert_eq!(output.status.code(), Some(2), "{output:?}");
     assert!(output.stdout.is_empty(), "{output:?}");
@@ -433,7 +413,6 @@ fn output_flags_are_validated_and_stop_at_the_pathspec() {
         &run(&root, &repo, &["integration", "status", "--color=always"]),
         "--color applies only with --pretty",
     );
-    // After `--` they are pathspecs, as is --help.
     for spec in ["--help", "--pretty", "--color=always"] {
         let output = with(&["--", spec]);
         assert_eq!(output.status.code(), Some(0), "{spec}: {output:?}");
@@ -476,11 +455,9 @@ fn output_flags_are_validated_and_stop_at_the_pathspec() {
         String::from_utf8_lossy(&output.stdout).starts_with("full"),
         "{output:?}"
     );
-    // Before `--`, --help still prints the usage.
     let output = run(&root, &repo, &["extract", "--worktree", "--help"]);
     assert_eq!(output.status.code(), Some(0));
     assert!(String::from_utf8_lossy(&output.stdout).starts_with("usage: rotter"));
-    // The hook branch never takes the flags: exactly today's unknown-hook behaviour.
     for args in [
         &["hook", "claude", "--pretty"][..],
         &["hook", "claude", "--color=never"],
@@ -499,7 +476,6 @@ fn output_flags_are_validated_and_stop_at_the_pathspec() {
     fs::remove_dir_all(root).unwrap();
 }
 
-/// The one JSON document on stdout, checked to be rotter's with `schema`.
 fn document(output: &Output, schema: &str) -> serde_json::Value {
     let text = std::str::from_utf8(&output.stdout).unwrap();
     assert!(text.ends_with("}\n"), "{text}");
@@ -667,8 +643,6 @@ fn status_document_covers_every_state() {
             .unwrap()
             .starts_with("git version ")
     );
-    // Only the chosen git's directory on PATH: nothing skipped, so nothing named. A
-    // group-writable directory before it is skipped and named.
     let git_dir = git.parent().unwrap().to_owned();
     let shared = root.join("shared-bin");
     fs::create_dir(&shared).unwrap();
@@ -696,7 +670,6 @@ fn status_document_covers_every_state() {
         serde_json::json!({ "path": exe, "trusted": true, "detail": "safe to register" })
     );
 
-    // Grok's Claude compatibility: found, then unknown.
     let dot = root.join("home/.claude");
     fs::create_dir_all(&dot).unwrap();
     let same = [("CLAUDE_CONFIG_DIR", Some(dot.as_os_str()))];
@@ -723,12 +696,11 @@ fn status_document_covers_every_state() {
         "{status}"
     );
 
-    // --pretty: structural only (paths, git and exe vary); aligned columns, no ESC.
+    // --pretty: structural only (paths, git and exe vary).
     let output = integration(&["status", "--pretty", "--color=never"], &[]);
     assert_eq!(output.status.code(), Some(0), "{output:?}");
     let text = String::from_utf8(output.stdout).unwrap();
     assert!(!text.contains('\u{1b}'));
-    // Host rows: the table up to the first blank line, without the indented details and notes.
     let rows: Vec<&str> = text
         .lines()
         .skip(1)

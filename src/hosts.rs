@@ -1,8 +1,6 @@
 //! The agents rotter integrates with as a turn-end hook: where each keeps its hook, what its hook
-//! input looks like and how it takes a reply. Every host-specific fact lives in this table; the
-//! runtime and the install code only read it. `docs/hosts.md` records where each fact comes from.
+//! input looks like and how it takes a reply. `docs/hosts.md` records where each fact comes from.
 
-/// How rotter's hook is registered with a host.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Install {
     /// One handler in a `{"hooks":[handler]}` group of the event's array in `<host dir>/<file>`,
@@ -44,7 +42,6 @@ pub(crate) enum Notes {
 
 #[derive(Debug)]
 pub struct Host {
-    /// The host id: install targets, messages and loop-cap keys.
     pub(crate) id: &'static str,
     /// The name `rotter hook <name>` is rendered with, also the prefix of the host's state
     /// directories (`claude-stop`, `claude-stop-notes`, …), kept from the first release.
@@ -60,7 +57,6 @@ pub struct Host {
     /// `~/.config`) rather than the home.
     pub(crate) fallback_in_config: bool,
     pub(crate) install: Install,
-    /// The hook event the entry is registered under.
     pub(crate) event: &'static str,
     /// The handler keys holding the shell command and the timeout in seconds.
     pub(crate) command_key: &'static str,
@@ -68,11 +64,11 @@ pub struct Host {
     /// Other files in the host dir whose `"hooks"` the host reads only while `<file>` is missing,
     /// so creating it would silently disable them: install then refuses.
     pub(crate) shadows: &'static [&'static str],
-    /// Whether install also recognises the command without ` || true` (the pre-S0 form).
+    /// Whether install also recognises the command without ` || true`.
     pub(crate) legacy: bool,
     pub(crate) session_keys: &'static [&'static str],
     pub(crate) cwd_keys: &'static [&'static str],
-    /// Whether a Stop without a usable cwd key runs in the hook process's own directory.
+    /// Whether a Stop with no string cwd key runs in the hook process's own directory.
     pub(crate) cwd_fallback: bool,
     /// Keys whose `true` marks a continuation the host started because of a block.
     pub(crate) continuation_keys: &'static [&'static str],
@@ -87,7 +83,6 @@ pub struct Host {
     pub(crate) injectable: bool,
 }
 
-/// Claude Code: `settings.json` Stop hooks.
 pub(crate) const CLAUDE: Host = Host {
     id: "claude",
     hook: "claude-stop",
@@ -116,7 +111,6 @@ pub(crate) const CLAUDE: Host = Host {
     injectable: false,
 };
 
-/// Grok Build: native `hooks/*.json` Stop hooks.
 pub(crate) const GROK: Host = Host {
     id: "grok",
     hook: "grok-stop",
@@ -140,14 +134,12 @@ pub(crate) const GROK: Host = Host {
     cwd_keys: &["cwd", "workspaceRoot"],
     cwd_fallback: false,
     continuation_keys: &["stop_hook_active", "stopHookActive"],
-    // The session-end Stop (`channel_closed`, `shutdown`) ends no turn; its decision is ignored.
     end_reason: Some(("reason", "end_turn")),
     notes: Notes::Stderr,
     default_timeout: 600,
     injectable: false,
 };
 
-/// OpenAI Codex CLI: `$CODEX_HOME/hooks.json` Stop hooks, run once trusted in `/hooks`.
 pub(crate) const CODEX: Host = Host {
     id: "codex",
     hook: "codex",
@@ -175,7 +167,6 @@ pub(crate) const CODEX: Host = Host {
     injectable: false,
 };
 
-/// GitHub Copilot CLI: `$COPILOT_HOME/hooks/*.json` agentStop hooks.
 pub(crate) const COPILOT: Host = Host {
     id: "copilot",
     hook: "copilot",
@@ -205,7 +196,6 @@ pub(crate) const COPILOT: Host = Host {
     injectable: false,
 };
 
-/// Factory Droid: `~/.factory/hooks.json` Stop hooks (no directory variable).
 pub(crate) const DROID: Host = Host {
     id: "droid",
     hook: "droid",
@@ -221,7 +211,6 @@ pub(crate) const DROID: Host = Host {
     event: "Stop",
     command_key: "command",
     timeout_key: "timeout",
-    // Droid reads `hooks` from these only while hooks.json is absent.
     shadows: &["settings.json", "settings.local.json"],
     legacy: false,
     session_keys: &["session_id"],
@@ -234,7 +223,6 @@ pub(crate) const DROID: Host = Host {
     injectable: false,
 };
 
-/// Pi: `$PI_CODING_AGENT_DIR/extensions/*.ts`, an `agent_before_settle` extension.
 pub(crate) const PI: Host = Host {
     id: "pi",
     hook: "pi",
@@ -266,7 +254,6 @@ pub(crate) const PI: Host = Host {
     injectable: true,
 };
 
-/// Letta Code: `~/.letta/mods/*.js`, a `turn_end` mod (no directory variable reaches its loader).
 pub(crate) const LETTA: Host = Host {
     id: "letta",
     hook: "letta",
@@ -296,8 +283,6 @@ pub(crate) const LETTA: Host = Host {
     injectable: true,
 };
 
-/// OpenCode: `$OPENCODE_CONFIG_DIR/plugins/*.js` (a directory OpenCode loads plugins from in
-/// addition to `$XDG_CONFIG_HOME/opencode`), a plugin reacting to `session.idle`.
 pub(crate) const OPENCODE: Host = Host {
     id: "opencode",
     hook: "opencode",
@@ -310,7 +295,6 @@ pub(crate) const OPENCODE: Host = Host {
         dir: "plugins",
         file: "rotter-review.js",
         templates: &[include_str!("shims/opencode-v1.js")],
-        // OpenCode does not await plugin event handlers.
         max_timeout: None,
     },
     event: "session.idle",
@@ -370,12 +354,10 @@ pub fn by_hook(name: &str) -> Option<&'static Host> {
         .find(|host| host.id == name || host.hook == name)
 }
 
-/// The host an `integration` command names, by id.
 pub(crate) fn by_id(name: &str) -> Option<&'static Host> {
     HOSTS.into_iter().find(|host| host.id == name)
 }
 
-/// `claude (claude-stop), grok (grok-stop), codex, …`, for usage errors.
 pub fn names() -> String {
     HOSTS
         .iter()

@@ -18,7 +18,6 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Passed on every git call and written to the temporary repository's config.
 const GIT_FLAGS: [(&str, &str); 8] = [
     ("core.symlinks", "false"),
     ("core.hooksPath", "/dev/null"),
@@ -77,7 +76,6 @@ impl Tool {
     }
 }
 
-/// The absolute entries of the inherited PATH; relative ones are dropped.
 fn absolute_path_entries() -> Vec<PathBuf> {
     std::env::var_os("PATH")
         .map(|path| {
@@ -88,7 +86,6 @@ fn absolute_path_entries() -> Vec<PathBuf> {
         .unwrap_or_default()
 }
 
-/// `git` or `cc` from the absolute PATH entries only.
 fn find_tool(tool: Tool) -> Result<PathBuf, String> {
     absolute_path_entries()
         .into_iter()
@@ -148,7 +145,6 @@ fn child_env(tool: Tool, staging: &Path) -> Vec<(OsString, OsString)> {
     env
 }
 
-/// Tools and the staging directory of one install.
 struct Build {
     staging: PathBuf,
     git: Option<PathBuf>,
@@ -188,7 +184,6 @@ impl Build {
         self.staging.join("src")
     }
 
-    /// `git -C <staging>/src -c … <args>`.
     fn git(&self, args: &[&str]) -> Result<Vec<u8>, String> {
         let src = self.src();
         let mut all: Vec<OsString> = vec!["-C".into(), src.into_os_string()];
@@ -208,7 +203,6 @@ impl Build {
             .map_err(|_| "git printed non-UTF-8 output".to_owned())
     }
 
-    /// Fetches exactly `revision` into `<staging>/src` and checks it out.
     fn fetch(&self, url: &str, revision: &str) -> Result<(), String> {
         make_private_dir(&self.src())?;
         // An empty template: nothing from an ambient init.templateDir (e.g. `commondir`).
@@ -232,7 +226,6 @@ impl Build {
         Ok(())
     }
 
-    /// Compiles each C file separately into `<staging>/obj`, then links `<staging>/lib.tmp`.
     fn compile(&self, dir: &Path, sources: &[&str]) -> Result<PathBuf, String> {
         let obj = self.staging.join("obj");
         make_private_dir(&obj)?;
@@ -261,7 +254,6 @@ impl Build {
     }
 }
 
-/// Removes the staging directory however the install ends.
 struct Staging(PathBuf);
 
 impl Drop for Staging {
@@ -270,7 +262,6 @@ impl Drop for Staging {
     }
 }
 
-/// Creates one directory (never its parents) with mode 0700.
 fn make_private_dir(path: &Path) -> Result<(), String> {
     fs::DirBuilder::new()
         .mode(0o700)
@@ -350,8 +341,6 @@ fn check_tree(listing: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-/// Checks the grammar sources in `dir` (lstat: regular files, no symlinks; no C++ scanner) and
-/// returns the C files to compile.
 fn check_sources(dir: &Path) -> Result<Vec<&'static str>, String> {
     let regular = |path: &Path| match lstat(path) {
         Ok(meta) if meta.kind == Kind::File => Ok(true),
@@ -419,7 +408,6 @@ pub(crate) fn create_base(base: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Creates `path` with mode 0700 unless it exists, then requires [`private_dir`].
 fn ensure_private_dir(path: &Path) -> Result<(), String> {
     match fs::DirBuilder::new().mode(0o700).create(path) {
         Ok(()) => {}
@@ -619,7 +607,6 @@ pub struct ParserEntry {
     pub detail: Option<String>,
 }
 
-/// `rotter.parsers/1`.
 pub fn list_json(parsers: &[ParserEntry]) -> Json {
     let parsers = parsers
         .iter()
@@ -697,7 +684,6 @@ mod tests {
         let dir = temp("sources");
         fs::write(dir.join("parser.c"), "").unwrap();
         assert_eq!(check_sources(&dir), Ok(vec!["parser.c"]));
-        // A header that is a directory.
         fs::create_dir_all(dir.join("tree_sitter/extra.h")).unwrap();
         let error = check_sources(&dir).unwrap_err();
         assert!(error.ends_with("extra.h is not a regular file"), "{error}");
@@ -833,7 +819,6 @@ mod tests {
             missing.contains("cannot be resolved") || missing.contains("rev-parse failed"),
             "{missing}"
         );
-        // A printed path that does not exist is refused by canonicalisation.
         let printed = check_git_dirs(&staging, &src, |_| {
             Ok(root.join("gone").display().to_string())
         })

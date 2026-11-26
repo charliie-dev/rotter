@@ -1,6 +1,6 @@
-# Grammars `languages = [..]` in config.toml can enable. Each is pinned to the commit of its
-# latest release tag (from `git ls-remote`, annotated tags peeled); node kinds come from that
-# commit's src/node-types.json. Pins are trust-on-first-use of upstream: updating one is a
+# Grammars `languages = [..]` in config.toml can enable. Each is pinned to the commit of the
+# release tag named above it (from `git ls-remote`, annotated tags peeled); node kinds come from
+# that commit's src/node-types.json. Pins are trust-on-first-use of upstream: updating one is a
 # code-review event. `location` is the grammar directory (holding src/) inside the checkout.
 
 # tag v0.25.0 (annotated, peeled)

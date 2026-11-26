@@ -1,5 +1,5 @@
-# rotter's own opengrep rules (`mise run sast`). They replace the generic audit rules that flag
-# every use of std::env::args_os, current_exe, temp_dir and unsafe, which rotter uses on purpose.
+# These rules replace the generic audit rules that flag every use of std::env::args_os,
+# current_exe, temp_dir and unsafe, which rotter uses on purpose.
 rules:
   - id: rotter-no-shell
     languages: [rust]

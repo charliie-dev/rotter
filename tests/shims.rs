@@ -1,7 +1,4 @@
-//! The pi, letta and opencode shims: install, ownership and status through the CLI (HOME, XDG_*
-//! and every host directory variable pinned to temp), and each rendered shim run under every
-//! engine its host uses (Node and Bun, pinned in mise.toml) against a stub host API and a stub
-//! rotter. No case runs `rotter hook pi|letta|opencode` on a real stop: those hosts take HOME
+//! No case runs `rotter hook pi|letta|opencode` on a real stop: those hosts take HOME
 //! from the password database.
 
 mod common;
@@ -43,7 +40,6 @@ fn mode(path: &Path) -> u32 {
     fs::symlink_metadata(path).unwrap().permissions().mode() & 0o777
 }
 
-/// The host dir `rotter` (see common) points each host at, and its shim.
 fn paths(root: &Path, host: &str) -> (PathBuf, PathBuf) {
     match host {
         "pi" => (root.join("pi"), root.join("pi/extensions/rotter-review.ts")),
@@ -58,7 +54,6 @@ fn paths(root: &Path, host: &str) -> (PathBuf, PathBuf) {
     }
 }
 
-/// The host's `(state, detail)` in `status`.
 fn status_of(root: &Path, host: &str) -> (String, String) {
     let (_, text) = integration(root, &["status"]);
     let found = status_host(&text, host);
@@ -113,7 +108,6 @@ fn shims_install_exactly_their_render_and_leave_foreign_code_alone() {
             (state.as_str(), detail.as_str()),
             ("installed", "installed (current)")
         );
-        // Another rotter binary's shim: named by status, replaced by install.
         fs::write(&shim, render_shim(host, "/else/rotter", 90).unwrap()).unwrap();
         let (state, detail) = status_of(&root, host);
         assert_eq!(state, "other_binary");
@@ -121,12 +115,10 @@ fn shims_install_exactly_their_render_and_leave_foreign_code_alone() {
         let (code, text) = integration(&root, &["install", host]);
         assert_eq!((code, result(&text).as_str()), (0, "updated"), "{text}");
         assert_eq!(fs::read_to_string(&shim).unwrap(), rendered);
-        // A different timeout is a mismatch.
         fs::write(&shim, render_shim(host, EXE, 61).unwrap()).unwrap();
         let (state, detail) = status_of(&root, host);
         assert_eq!(state, "mismatch");
         assert!(detail.contains("timeout 61, expected 90"), "{detail}");
-        // Foreign code at rotter's path: never rewritten or removed.
         let foreign = rendered.replace("MAX_STDOUT = 65536", "MAX_STDOUT = 99");
         fs::write(&shim, &foreign).unwrap();
         for args in [&["install", host][..], &["uninstall", host]] {
@@ -141,7 +133,6 @@ fn shims_install_exactly_their_render_and_leave_foreign_code_alone() {
             detail.starts_with("foreign code at rotter's path, auto-loaded by"),
             "{detail}"
         );
-        // Bytes that are not UTF-8 are foreign code too, not a read error.
         fs::write(&shim, b"\xff\xfe").unwrap();
         let (state, detail) = status_of(&root, host);
         assert_eq!(state, "foreign", "{detail}");
@@ -149,7 +140,6 @@ fn shims_install_exactly_their_render_and_leave_foreign_code_alone() {
         assert_eq!(code, 2, "{text}");
         assert!(text.contains("foreign code at rotter's path"), "{text}");
         assert_eq!(fs::read(&shim).unwrap(), b"\xff\xfe");
-        // Unsafe permissions and a symlink are refused and left as they are.
         fs::write(&shim, &rendered).unwrap();
         set_mode(&shim, 0o622);
         let (code, text) = integration(&root, &["install", host]);
@@ -210,7 +200,6 @@ fn pi_falls_back_to_home_when_its_variable_is_unset_or_relative() {
 
 #[test]
 fn opencode_falls_back_to_the_xdg_config_base() {
-    // (OPENCODE_CONFIG_DIR, XDG_CONFIG_HOME) → the directory install writes under.
     let cases = [
         (None, Some("xdg"), "xdg/opencode"),
         (Some("relative/oc"), Some("xdg"), "xdg/opencode"),
@@ -252,8 +241,8 @@ fn opencode_falls_back_to_the_xdg_config_base() {
 
 #[test]
 fn golden_renders_are_stable() {
-    // A hostile but accepted path: quotes, a backslash, spaces and non-ASCII. A change to a
-    // shipped template breaks ownership of the files it wrote: add a new version instead.
+    // A change to a shipped template breaks ownership of the files it wrote: add a new version
+    // instead.
     let exe = "/opt/it's \"q\"\\ dir/ünï/rotter";
     for (host, file) in HOSTS {
         let golden = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -270,8 +259,7 @@ fn golden_renders_are_stable() {
     }
 }
 
-/// `tool`'s binary at the version mise.toml pins, from mise's install directory, and that
-/// version. A missing runtime fails the test: no shim ships without running under its engine.
+/// A missing runtime fails the test: no shim ships without running under its engine.
 fn runtime(tool: &str) -> (PathBuf, String) {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let toml = fs::read_to_string(manifest.join("mise.toml")).unwrap();
@@ -303,18 +291,12 @@ fn runtime(tool: &str) -> (PathBuf, String) {
 
 struct Run {
     engine: String,
-    /// OpenCode: how many `session.idle` events the harness emitted.
     idles: u64,
-    /// Each stop's answer (the injected review request or null) and how long it took.
     answers: Vec<(Value, u64)>,
-    /// The stub rotter's calls: argv, environment, stdin.
     calls: Vec<Value>,
     stub: PathBuf,
 }
 
-/// Renders `host`'s shim with a stub rotter (in a directory whose name needs quoting in a shell)
-/// and a 2 s timeout, and runs `scenario` of the harness under `engine`. The stub rotter itself
-/// always runs on Node.
 fn run(host: &str, file: &str, engine: &str, stub_mode: &str, scenario: &str) -> Run {
     let (node, _) = runtime("node");
     let (binary, version) = runtime(engine);
@@ -383,7 +365,6 @@ fn run(host: &str, file: &str, engine: &str, stub_mode: &str, scenario: &str) ->
 
 const REQUEST: &str = "review the comments";
 
-/// Every (host, shim file, engine) the runtime cases run.
 fn cells() -> Vec<(&'static str, &'static str, &'static str)> {
     HOSTS
         .into_iter()
@@ -395,7 +376,6 @@ fn cells() -> Vec<(&'static str, &'static str, &'static str)> {
         .collect()
 }
 
-/// Whether process `pid` still exists.
 fn alive(pid: &str) -> bool {
     Command::new("/bin/kill")
         .args(["-0", pid])
@@ -538,9 +518,8 @@ fn opencode_asks_only_after_a_turn_that_completed() {
 
 #[test]
 fn shims_resolve_quietly_whatever_rotter_does() {
-    // (stub mode, scenario, fastest, slowest) in ms; every answer is null, so OpenCode is never
-    // re-prompted. Under the 2 s timeout, an answer before 1800 ms came without waiting for it;
-    // the margin is for the stub's Node start on a loaded machine (CI, coverage, mutants).
+    // Under the 2 s timeout, an answer before 1800 ms came without waiting for it; the margin is
+    // for the stub's Node start on a loaded machine (CI, coverage, mutants).
     let cases = [
         ("quiet", "once", 0, 1800),
         ("nonstring", "once", 0, 1800),

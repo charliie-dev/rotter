@@ -10,11 +10,5 @@
     "path": "src/git.rs",
     "fingerprint": "6f1ea08113429a4d:1",
     "reason": "A test's assertion message prints a diff error naming a scratch directory resolved by resolve_trusted; a path, not a secret."
-  },
-  {
-    "rule": "rust/cleartext-logging",
-    "path": "src/integration.rs",
-    "fingerprint": "313cb4a5c9759508:1",
-    "reason": "A test's assertion message prints why resolve_trusted refused a state directory; a path and a reason, not a secret."
   }
 ]
