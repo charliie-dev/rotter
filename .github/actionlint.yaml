@@ -1,0 +1,5 @@
+self-hosted-runner:
+  # Not self-hosted: GitHub-hosted since 2026 (actions/runner-images lists `ubuntu-26.04`), but
+  # newer than the runner labels actionlint 1.7.12 knows.
+  labels:
+    - ubuntu-26.04

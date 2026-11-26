@@ -1,5 +1,40 @@
 [tools]
-rust = { version = "1.98.1", profile = "minimal", components = ["rustfmt", "clippy"] }
+# llvm-tools-preview: the LLVM profile tools cargo-llvm-cov runs. rust-src: the standard library
+# sources CodeQL's Rust extractor needs to expand std macros such as format! and assert_eq!.
+rust = { version = "1.100.0", profile = "minimal", components = [
+  "rustfmt",
+  "clippy",
+  "llvm-tools-preview",
+  "rust-src",
+] }
+# The engines the pi, letta and opencode shims run under in tests/shims.rs; the tests read these
+# lines. Node: pi's and letta's npm packages (Node >= 22.19). Bun: the version pi's release binary
+# and opencode's macOS/Linux binaries are compiled with.
+node = "26.13.1"
+bun = "1.4.4"
+# Mutation testing (`mise run mutants`): checks that the tests fail when the code is changed.
+"cargo:cargo-mutants" = "27.1.0"
+# Source-based coverage (`mise run coverage`), including the rotter binary the tests spawn.
+"cargo:cargo-llvm-cov" = "0.9.2"
+# CRAP scores (`mise run crap`); unreleased, so pinned by commit.
+"pypi:git+https://github.com/unclebob/crapper.git" = "c757ec79a6c15dc815238bbd9c2f4601eb54d3cc"
+# Static analysis (`mise run sast`, `mise run codeql`) and workflow linting (`mise run lint`).
+"aqua:opengrep/opengrep" = "2.0.0"
+"aqua:EmbarkStudios/cargo-deny" = "0.22.0"
+"aqua:zizmorcore/zizmor" = "1.33.1"
+"aqua:rhysd/actionlint" = "1.7.12"
+# Reads CodeQL's SARIF (`mise run codeql`).
+"aqua:jqlang/jq" = "1.8.2"
+
+# CodeQL from its per-platform archives: the all-platforms codeql.zip (1.4 GB) is deprecated.
+[tools."github:github/codeql-cli-binaries"]
+version = "2.27.6"
+
+[tools."github:github/codeql-cli-binaries".platforms]
+macos-arm64 = { asset_pattern = "codeql-osx64.zip" }
+macos-x64 = { asset_pattern = "codeql-osx64.zip" }
+linux-x64 = { asset_pattern = "codeql-linux64.zip" }
+linux-arm64 = { asset_pattern = "codeql-linux-arm64.zip" }
 
 [settings.task]
 run_auto_install = false
@@ -13,8 +48,141 @@ description = "Check Rust formatting"
 run = "cargo fmt --all -- --check"
 
 [tasks.lint]
-description = "Lint all Rust targets"
-run = "cargo clippy --all-targets --locked -- -D warnings"
+description = "Lint all Rust targets and the GitHub Actions workflows"
+run = ["cargo clippy --all-targets --locked -- -D warnings", "actionlint"]
+
+[tasks.build]
+description = "Compile every target"
+run = "cargo build --all-targets --locked"
+
+[tasks.sast]
+description = "Fast static analysis: opengrep, cargo-deny and zizmor"
+run = '''
+set -eu
+# Community rules, pinned; fetched once into the cache.
+rules="${XDG_CACHE_HOME:-$HOME/.cache}/rotter/opengrep-rules"
+rev=f1d2b562b414783763fd02a6ed2736eaed622efa
+if [ "$(git -C "$rules" rev-parse HEAD 2>/dev/null || true)" != "$rev" ]; then
+  rm -rf "$rules"
+  git clone --quiet https://github.com/opengrep/opengrep-rules "$rules"
+  git -C "$rules" checkout --quiet "$rev"
+fi
+rust="$rules/rust/lang/security"
+# rotter's own rules (.opengrep/) stand in for the community audit rules that flag every use
+# of args_os, current_exe, temp_dir and unsafe: rotter uses them on purpose.
+opengrep scan --error --quiet --config .opengrep \
+  --config "$rust/args.yml" --config "$rust/insecure-hashes.yml" \
+  --config "$rust/reqwest-accept-invalid.yml" --config "$rust/reqwest-set-sensitive.yml" \
+  --config "$rust/rustls-dangerous.yml" --config "$rust/ssl-verify-none.yml" \
+  --config "$rules/javascript" --config "$rules/typescript" src
+cargo deny check
+zizmor --offline .github/workflows
+'''
+
+[tasks.codeql]
+description = "CodeQL security queries on Rust, the shims' JavaScript and the workflows"
+run = '''
+set -eu
+out=target/codeql
+rm -rf "$out"
+mkdir -p "$out"
+# CodeQL's JVM ignores TMPDIR, and the Rust extractor's cargo builds go to a kept directory.
+jvm="-J-Djava.io.tmpdir=${TMPDIR:-/tmp}"
+codeql database create "$out/db" --db-cluster --language=rust,javascript-typescript,actions \
+  --build-mode=none --source-root=. --threads=0 "$jvm" \
+  --extractor-option="rust.cargo_target_dir=$PWD/target/codeql-cargo" > "$out/create.log"
+# Query packs pinned like the tools: --download fetches the pinned version when it is not cached.
+for pack in rust@0.1.48 javascript@2.5.2 actions@0.6.41; do
+  lang="${pack%@*}"
+  codeql database analyze "$out/db/$lang" \
+    "codeql/$lang-queries@${pack#*@}:codeql-suites/$lang-security-extended.qls" --download \
+    --format=sarif-latest --output="$out/$lang.sarif" --threads=0 "$jvm" > "$out/$lang.log"
+done
+# An extractor that cannot read the code analyses nothing and reports no alerts, so that is a
+# failure: an extraction error anywhere, or a file meant to be analysed that was not extracted.
+errors=$(jq -r '.runs[].invocations[]?.toolExecutionNotifications[]? | select(.level == "error")
+  | "\(.descriptor.id) \(.locations[0].physicalLocation.artifactLocation.uri // "-") \(.message.text)"' \
+  "$out"/*.sarif)
+if [ -n "$errors" ]; then
+  printf 'codeql: extraction errors:\n%s\n' "$errors" >&2
+  exit 1
+fi
+# A Rust file can be extracted and still not analysed: a warning such as "semantic analyzer
+# unavailable" or an unresolved macro call means no macro expansion or types for it. Under src/
+# that fails too (target/ and tests/ do not ship).
+warnings=$(jq -r '.runs[].invocations[]?.toolExecutionNotifications[]?
+  | select(.descriptor.id == "rust/diagnostics/extraction-warnings"
+      or .descriptor.id == "rust/diagnostics/unresolved-macro-calls")
+  | (.locations[0].physicalLocation.artifactLocation.uri // "-") as $path
+  | select($path | startswith("src/"))
+  | "\(.descriptor.id) \($path) \(.message.text)"' "$out"/*.sarif)
+if [ -n "$warnings" ]; then
+  printf 'codeql: extracted without full analysis:\n%s\n' "$warnings" >&2
+  exit 1
+fi
+# Each language's files against its own extractor's list (the JavaScript extractor also reads the
+# workflows' YAML, which must not stand in for the Actions extractor). Through files, not pipes:
+# sh has no pipefail, and a failed git would leave nothing expected. The working tree is what
+# is expected, as before a commit: new files git does not track yet count, and a tracked file
+# already deleted (before the commit that removes it) does not.
+: > "$out/missing"
+for check in 'rust src/*.rs' 'js src/shims/*' 'actions .github/workflows/*'; do
+  extractor="${check%% *}"
+  git -c core.quotePath=false ls-files "${check#* }" > "$out/listed-files"
+  git -c core.quotePath=false ls-files --others --exclude-standard "${check#* }" \
+    >> "$out/listed-files"
+  git -c core.quotePath=false ls-files --deleted "${check#* }" > "$out/deleted"
+  sort -u "$out/listed-files" > "$out/listed-files.sorted"
+  sort -u "$out/deleted" > "$out/deleted.sorted"
+  comm -23 "$out/listed-files.sorted" "$out/deleted.sorted" > "$out/expected"
+  [ -s "$out/expected" ] ||
+    { echo "codeql: no files in the working tree for $extractor" >&2; exit 1; }
+  jq -r --arg id "$extractor/diagnostics/successfully-extracted-files" \
+    '.runs[].invocations[]?.toolExecutionNotifications[]? | select(.descriptor.id == $id)
+    | .locations[0].physicalLocation.artifactLocation.uri' "$out"/*.sarif > "$out/listed"
+  sort -u "$out/listed" > "$out/extracted"
+  comm -23 "$out/expected" "$out/extracted" >> "$out/missing"
+done
+if [ -s "$out/missing" ]; then
+  printf 'codeql: not extracted, so not analysed:\n' >&2
+  cat "$out/missing" >&2
+  exit 1
+fi
+# Not alerts: build output under target/ and test code under tests/ (neither ships), and the
+# false positives in .codeql/suppressions.json, each matched by rule, file and the line-content
+# fingerprint CodeQL computes, so a changed line brings its alert back for review.
+jq -s --slurpfile known .codeql/suppressions.json '[.[].runs[].results[]
+  | (.locations[0].physicalLocation.artifactLocation.uri) as $path
+  | select($path | test("^(target|tests)/") | not)
+  | select([.ruleId, $path, .partialFingerprints.primaryLocationLineHash] as $key
+      | $known[0] | map([.rule, .path, .fingerprint]) | index([$key]) | not)
+  | "\(.ruleId) \($path):\(.locations[0].physicalLocation.region.startLine) \(.message.text)"]' \
+  "$out"/*.sarif > "$out/alerts.json"
+count=$(jq length "$out/alerts.json")
+jq -r '.[]' "$out/alerts.json"
+echo "codeql: $count alert(s); SARIF in $out"
+[ "$count" -eq 0 ]
+'''
+
+[tasks.crap]
+description = "Fail on any Rust function with a CRAP score above 30 (runs coverage first)"
+depends = ["coverage"]
+run = '''
+set -eu
+# Every Rust source under src/, nested ones too (a `src/*.rs` glob stops at the first level); not
+# the shims' JavaScript, which has no coverage report and would score as uncovered.
+files="$(find src -type f -name '*.rs' | sort)"
+[ -n "$files" ] || { echo "crap: no Rust sources under src/" >&2; exit 1; }
+crapper --use-existing-coverage --threshold 30 $files
+'''
+
+[tasks.verify]
+description = "After every code change: format, compile, lint and fast static analysis"
+run = ["mise run fmt", "mise run build", "mise run lint", "mise run sast"]
+
+[tasks.verify-full]
+description = "Before every commit: verify, then CodeQL, CRAP scores and mutation testing"
+run = ["mise run verify", "mise run codeql", "mise run crap", "mise run mutants"]
 
 [tasks.test]
 description = "Run all Rust tests"
@@ -23,6 +191,96 @@ run = "cargo test --all-targets --locked"
 [tasks.test-parsers]
 description = "Verify the seven language parsers"
 run = "cargo test --test parsers --locked"
+
+[tasks.mutants]
+description = "Mutation-test the code changed since a base (default main), committed or not"
+usage = '''
+arg "[base]" default="main"
+flag "--shard <shard>" help="Run only this share of the mutants, as k/n (0-based), as CI does"
+'''
+run = '''
+set -eu
+diff="$(mktemp "${TMPDIR:-/tmp}/mutants.XXXXXX")"
+trap 'rm -f "$diff"' EXIT
+# From where the branch left the base to the working tree, as cargo-mutants copies it: changes not
+# yet committed are mutated too, before the commit (in CI the working tree is the commit).
+# The a/ and b/ prefixes are explicit: cargo-mutants strips only b/, and diff.mnemonicPrefix or
+# diff.srcPrefix/dstPrefix would otherwise turn them into c/ and w/, so no path would match.
+# core.quotePath=false keeps a non-ASCII name as it is, not as octal escapes cargo-mutants cannot
+# read.
+prefixes="--src-prefix=a/ --dst-prefix=b/"
+git -c core.quotePath=false diff --no-color --no-ext-diff $prefixes \
+  "$(git merge-base "${usage_base?}" HEAD)" > "$diff"
+# New source files git does not track yet, listed into a file first: sh has no pipefail, so a
+# failed git in a pipe would go unnoticed. A name git still quotes (a quote, a backslash or a
+# control character in it) is not a file here, and fails rather than going unmutated.
+untracked="$diff.untracked"
+trap 'rm -f "$diff" "$untracked"' EXIT
+git -c core.quotePath=false ls-files --others --exclude-standard -- src > "$untracked"
+while IFS= read -r file; do
+  [ -f "$file" ] || { echo "mutants: cannot read untracked $file" >&2; exit 1; }
+  # Exit 1 from --no-index means the two differ, which a new file always does.
+  git -c core.quotePath=false diff --no-color --no-ext-diff $prefixes --no-index \
+    -- /dev/null "$file" >> "$diff" || [ $? -eq 1 ]
+done < "$untracked"
+status=0
+cargo mutants --in-diff "$diff" ${usage_shard:+--shard "$usage_shard"} -- --all-targets --locked ||
+  status=$?
+# A timeout counts as caught: the mutant hung the tests (a loop that no longer advances), which
+# the same bug in real code would do too. cargo-mutants exits 3 when any mutant timed out even if
+# others were missed, so a timeout run passes only when missed.txt is there and empty.
+if [ "$status" -eq 3 ]; then
+  missed=mutants.out/missed.txt
+  [ -f "$missed" ] || { echo "mutants: exit 3 but no $missed" >&2; exit 3; }
+  if [ -s "$missed" ]; then
+    echo "mutants: $(grep -c '' "$missed") missed (see $missed)" >&2
+    exit 2
+  fi
+  echo "mutants: $(grep -c '' mutants.out/timeout.txt) timeout(s), counted as caught"
+  status=0
+fi
+exit "$status"
+'''
+
+[tasks.coverage]
+description = "Line and region coverage of all tests, as a summary and LCOV"
+run = '''
+set -eu
+dir=target/llvm-cov-target
+# After a toolchain change the other Cargo's build-dir layout leaves binaries that cargo-llvm-cov
+# 0.9.2 still reports, which drops region coverage and makes the LCOV export disagree with the
+# summary (taiki-e/cargo-llvm-cov#536); start from an empty directory then.
+toolchain="$(rustc -vV)"
+if [ "$(cat "$dir/.rotter-rustc" 2>/dev/null || true)" != "$toolchain" ]; then
+  rm -rf "$dir"
+fi
+# Profiles of earlier runs are never removed by --no-report runs and would be merged in.
+rm -f "$dir"/*.profraw
+cargo llvm-cov --no-report --all-targets --locked
+printf '%s\n' "$toolchain" > "$dir/.rotter-rustc"
+# A test that kills rotter while it exits leaves a truncated profile, and one unreadable profile
+# fails the whole merge: drop those (never all of them blindly), then report.
+profdata="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/bin/llvm-profdata"
+test -x "$profdata" || { echo "coverage: no llvm-profdata at $profdata" >&2; exit 1; }
+total=0
+dropped=0
+for profile in target/llvm-cov-target/*.profraw; do
+  total=$((total + 1))
+  "$profdata" show "$profile" > /dev/null 2>&1 || {
+    echo "coverage: dropping unreadable $profile" >&2
+    rm -f "$profile"
+    dropped=$((dropped + 1))
+  }
+done
+# More than a stray truncated profile means the report would rest on missing data.
+if [ $((dropped * 100)) -gt "$total" ]; then
+  echo "coverage: $dropped of $total profiles were unreadable; not reporting" >&2
+  exit 1
+fi
+mkdir -p target/coverage/rust
+cargo llvm-cov report --lcov --output-path target/coverage/rust/lcov.info
+cargo llvm-cov report --summary-only
+'''
 
 [tasks.check]
 description = "Check formatting, lint, and tests"

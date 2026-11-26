@@ -1,0 +1,26 @@
+base  HEAD~1 (5101f911c68f) → worktree  @REPO@
+
+■ crlf.go  modified  go  ok
+  before
+    function_declaration G L4–4  changed 4
+      3 │ // G is crlf.
+      4~│ func G() int { return 1 }
+  after
+    function_declaration G L4–4  changed 4
+      3 │ // G is crlf.
+      4~│ func G() int { return 2 }
+
+■ e\u{1b}[2J\u{1b}]52;c;aGk=\u{7}\u{d}\u{8}\u{7f}\u{9b}\u{9d}\u{202e}\u{2066}\u{a}.go  modified  go  ok
+  before
+    function_declaration F L4–4  changed 3, 4
+      3~│ // F says hi.
+      4~│ func F() int { return 1 }
+  after
+    function_declaration F L4–4  changed 3, 4
+      3~│ // F says \u{1b}[2J\u{1b}]52;c;aGk=\u{7}\u{d}\u{8}\u{7f}\u{9b}\u{9d}\u{202e}\u{2066} hi.
+      4~│ func F() int { return 2 }
+
+untracked, not covered:
+  u\u{1b}[2J\u{1b}]52;c;aGk=\u{7}\u{d}\u{8}\u{7f}\u{9b}\u{9d}\u{202e}\u{2066}\u{a}.txt
+
+2 files · 4 units · complete

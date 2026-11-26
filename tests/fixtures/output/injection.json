@@ -1,0 +1,208 @@
+{
+  "tool": "rotter",
+  "schema": "rotter.extract.poc/0",
+  "stage": "extraction",
+  "semantic_verification": "not_performed",
+  "mode": "base",
+  "repository": "@REPO@",
+  "before": {
+    "rev": "HEAD~1",
+    "commit": "5101f911c68f9e4a42d4418c7dd0cfe22df16286",
+    "empty_initial": false
+  },
+  "pathspec": [],
+  "after": "worktree",
+  "untracked": {
+    "included": false,
+    "not_covered": ["u\u001b[2J\u001b]52;c;aGk=\u0007\r\u0008‮⁦\n.txt"]
+  },
+  "complete": true,
+  "files": [
+    {
+      "change": "modified",
+      "similarity": null,
+      "old_path": "crlf.go",
+      "new_path": "crlf.go",
+      "complete": true,
+      "hunks": [
+        {
+          "before": [4, 1],
+          "after": [4, 1]
+        }
+      ],
+      "before": {
+        "path": "crlf.go",
+        "language": "go",
+        "dialect": "go",
+        "blob": "1ee6c7166ef4d8c011b92cdc716caa9873efe9ed",
+        "status": "ok",
+        "detail": null,
+        "units": [
+          {
+            "kind": "function_declaration",
+            "name": "G",
+            "range": {
+              "lines": [4, 4],
+              "bytes": [28, 53]
+            },
+            "selected_by": "change",
+            "referenced_name": null,
+            "omitted_reference_units": 0,
+            "changed_lines": [4],
+            "gaps_between_lines": [],
+            "enclosing": [],
+            "overlaps_syntax_error": false,
+            "text": "func G() int { return 1 }",
+            "text_truncated": false,
+            "comments": [
+              {
+                "relation": "leading",
+                "style": "line",
+                "directive": null,
+                "changed": false,
+                "range": {
+                  "lines": [3, 3],
+                  "bytes": [13, 27]
+                },
+                "text": "// G is crlf.\r"
+              }
+            ]
+          }
+        ]
+      },
+      "after": {
+        "path": "crlf.go",
+        "language": "go",
+        "dialect": "go",
+        "blob": "506057b47e7688f33cfcc834c32094044967641d",
+        "status": "ok",
+        "detail": null,
+        "units": [
+          {
+            "kind": "function_declaration",
+            "name": "G",
+            "range": {
+              "lines": [4, 4],
+              "bytes": [28, 53]
+            },
+            "selected_by": "change",
+            "referenced_name": null,
+            "omitted_reference_units": 0,
+            "changed_lines": [4],
+            "gaps_between_lines": [],
+            "enclosing": [],
+            "overlaps_syntax_error": false,
+            "text": "func G() int { return 2 }",
+            "text_truncated": false,
+            "comments": [
+              {
+                "relation": "leading",
+                "style": "line",
+                "directive": null,
+                "changed": false,
+                "range": {
+                  "lines": [3, 3],
+                  "bytes": [13, 27]
+                },
+                "text": "// G is crlf.\r"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "change": "modified",
+      "similarity": null,
+      "old_path": "e\u001b[2J\u001b]52;c;aGk=\u0007\r\u0008‮⁦\n.go",
+      "new_path": "e\u001b[2J\u001b]52;c;aGk=\u0007\r\u0008‮⁦\n.go",
+      "complete": true,
+      "hunks": [
+        {
+          "before": [3, 2],
+          "after": [3, 2]
+        }
+      ],
+      "before": {
+        "path": "e\u001b[2J\u001b]52;c;aGk=\u0007\r\u0008‮⁦\n.go",
+        "language": "go",
+        "dialect": "go",
+        "blob": "e56e93603c93130f7357e9d52c530ba9e5eb4aa2",
+        "status": "ok",
+        "detail": null,
+        "units": [
+          {
+            "kind": "function_declaration",
+            "name": "F",
+            "range": {
+              "lines": [4, 4],
+              "bytes": [25, 50]
+            },
+            "selected_by": "change",
+            "referenced_name": null,
+            "omitted_reference_units": 0,
+            "changed_lines": [3, 4],
+            "gaps_between_lines": [],
+            "enclosing": [],
+            "overlaps_syntax_error": false,
+            "text": "func F() int { return 1 }",
+            "text_truncated": false,
+            "comments": [
+              {
+                "relation": "leading",
+                "style": "line",
+                "directive": null,
+                "changed": true,
+                "range": {
+                  "lines": [3, 3],
+                  "bytes": [11, 24]
+                },
+                "text": "// F says hi."
+              }
+            ]
+          }
+        ]
+      },
+      "after": {
+        "path": "e\u001b[2J\u001b]52;c;aGk=\u0007\r\u0008‮⁦\n.go",
+        "language": "go",
+        "dialect": "go",
+        "blob": "8fd9a2e83ba8aba7b8f08aecb6217d3e858db328",
+        "status": "ok",
+        "detail": null,
+        "units": [
+          {
+            "kind": "function_declaration",
+            "name": "F",
+            "range": {
+              "lines": [4, 4],
+              "bytes": [55, 80]
+            },
+            "selected_by": "change",
+            "referenced_name": null,
+            "omitted_reference_units": 0,
+            "changed_lines": [3, 4],
+            "gaps_between_lines": [],
+            "enclosing": [],
+            "overlaps_syntax_error": false,
+            "text": "func F() int { return 2 }",
+            "text_truncated": false,
+            "comments": [
+              {
+                "relation": "leading",
+                "style": "line",
+                "directive": null,
+                "changed": true,
+                "range": {
+                  "lines": [3, 3],
+                  "bytes": [11, 54]
+                },
+                "text": "// F says \u001b[2J\u001b]52;c;aGk=\u0007\r\u0008‮⁦ hi."
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

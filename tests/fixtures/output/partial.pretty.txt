@@ -1,0 +1,17 @@
+base  HEAD~1 (a14f81cef437) → worktree  @REPO@
+
+■ b.go  modified  go  before ok · after partial
+  after partial: syntax errors near lines 6
+  before
+    function_declaration G L4–4  changed 4
+      3 │ // G is fine.
+      4~│ func G() int { return 1 }
+  after
+    function_declaration G L4–4  changed 4
+      3 │ // G is fine.
+      4~│ func G() int { return 2 }
+    ERROR L6–6  changed 6
+      overlaps a syntax error
+      6~│ func H( {
+
+1 file · 3 units · incomplete

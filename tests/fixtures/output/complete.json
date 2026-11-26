@@ -1,0 +1,302 @@
+{
+  "tool": "rotter",
+  "schema": "rotter.extract.poc/0",
+  "stage": "extraction",
+  "semantic_verification": "not_performed",
+  "mode": "base",
+  "repository": "@REPO@",
+  "before": {
+    "rev": "HEAD~1",
+    "commit": "465908616efb6c0084ad11d599000cbbe1dc0c77",
+    "empty_initial": false
+  },
+  "pathspec": [],
+  "after": "worktree",
+  "untracked": {
+    "included": false,
+    "not_covered": []
+  },
+  "complete": true,
+  "files": [
+    {
+      "change": "modified",
+      "similarity": null,
+      "old_path": "a.go",
+      "new_path": "a.go",
+      "complete": true,
+      "hunks": [
+        {
+          "before": [3, 1],
+          "after": [3, 1]
+        },
+        {
+          "before": [5, 1],
+          "after": [5, 1]
+        }
+      ],
+      "before": {
+        "path": "a.go",
+        "language": "go",
+        "dialect": "go",
+        "blob": "acf78647625763dcec9651e875d4876ba41cd03b",
+        "status": "ok",
+        "detail": null,
+        "units": [
+          {
+            "kind": "function_declaration",
+            "name": "F",
+            "range": {
+              "lines": [4, 6],
+              "bytes": [29, 55]
+            },
+            "selected_by": "change",
+            "referenced_name": null,
+            "omitted_reference_units": 0,
+            "changed_lines": [3, 5],
+            "gaps_between_lines": [],
+            "enclosing": [],
+            "overlaps_syntax_error": false,
+            "text": "func F() int {\n\treturn 1\n}",
+            "text_truncated": false,
+            "comments": [
+              {
+                "relation": "leading",
+                "style": "line",
+                "directive": null,
+                "changed": true,
+                "range": {
+                  "lines": [3, 3],
+                  "bytes": [11, 28]
+                },
+                "text": "// F returns one."
+              }
+            ]
+          }
+        ]
+      },
+      "after": {
+        "path": "a.go",
+        "language": "go",
+        "dialect": "go",
+        "blob": "4a3da04fe223058e9bd4972a1f960d9fb3a6f63d",
+        "status": "ok",
+        "detail": null,
+        "units": [
+          {
+            "kind": "function_declaration",
+            "name": "F",
+            "range": {
+              "lines": [4, 6],
+              "bytes": [29, 55]
+            },
+            "selected_by": "change",
+            "referenced_name": null,
+            "omitted_reference_units": 0,
+            "changed_lines": [3, 5],
+            "gaps_between_lines": [],
+            "enclosing": [],
+            "overlaps_syntax_error": false,
+            "text": "func F() int {\n\treturn 2\n}",
+            "text_truncated": false,
+            "comments": [
+              {
+                "relation": "leading",
+                "style": "line",
+                "directive": null,
+                "changed": true,
+                "range": {
+                  "lines": [3, 3],
+                  "bytes": [11, 28]
+                },
+                "text": "// F returns two."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "change": "deleted",
+      "similarity": null,
+      "old_path": "gone.go",
+      "new_path": null,
+      "complete": true,
+      "hunks": [
+        {
+          "before": [1, 4],
+          "after": [0, 0]
+        }
+      ],
+      "before": {
+        "path": "gone.go",
+        "language": "go",
+        "dialect": "go",
+        "blob": "66b048db4f3adb6372d83459183a536d563952b8",
+        "status": "ok",
+        "detail": null,
+        "units": [
+          {
+            "kind": "package_clause",
+            "name": null,
+            "range": {
+              "lines": [1, 1],
+              "bytes": [0, 9]
+            },
+            "selected_by": "change",
+            "referenced_name": null,
+            "omitted_reference_units": 0,
+            "changed_lines": [1],
+            "gaps_between_lines": [],
+            "enclosing": [],
+            "overlaps_syntax_error": false,
+            "text": "package p",
+            "text_truncated": false,
+            "comments": []
+          },
+          {
+            "kind": "function_declaration",
+            "name": "Gone",
+            "range": {
+              "lines": [4, 4],
+              "bytes": [25, 39]
+            },
+            "selected_by": "change",
+            "referenced_name": null,
+            "omitted_reference_units": 0,
+            "changed_lines": [3, 4],
+            "gaps_between_lines": [],
+            "enclosing": [],
+            "overlaps_syntax_error": false,
+            "text": "func Gone() {}",
+            "text_truncated": false,
+            "comments": [
+              {
+                "relation": "leading",
+                "style": "line",
+                "directive": null,
+                "changed": true,
+                "range": {
+                  "lines": [3, 3],
+                  "bytes": [11, 24]
+                },
+                "text": "// Gone goes."
+              }
+            ]
+          }
+        ]
+      },
+      "after": null
+    },
+    {
+      "change": "renamed",
+      "similarity": 83,
+      "old_path": "old.go",
+      "new_path": "new.go",
+      "complete": true,
+      "hunks": [
+        {
+          "before": [5, 1],
+          "after": [5, 1]
+        }
+      ],
+      "before": {
+        "path": "old.go",
+        "language": "go",
+        "dialect": "go",
+        "blob": "a38ac189509ce0d9fd17b27e36c753b15b1ef1c4",
+        "status": "ok",
+        "detail": null,
+        "units": [
+          {
+            "kind": "function_declaration",
+            "name": "Old",
+            "range": {
+              "lines": [4, 6],
+              "bytes": [30, 58]
+            },
+            "selected_by": "change",
+            "referenced_name": null,
+            "omitted_reference_units": 0,
+            "changed_lines": [5],
+            "gaps_between_lines": [],
+            "enclosing": [],
+            "overlaps_syntax_error": false,
+            "text": "func Old() int {\n\treturn 1\n}",
+            "text_truncated": false,
+            "comments": [
+              {
+                "relation": "leading",
+                "style": "line",
+                "directive": null,
+                "changed": false,
+                "range": {
+                  "lines": [3, 3],
+                  "bytes": [11, 29]
+                },
+                "text": "// Old is renamed."
+              }
+            ]
+          }
+        ]
+      },
+      "after": {
+        "path": "new.go",
+        "language": "go",
+        "dialect": "go",
+        "blob": "8d67a514339f1c33498afe7b380e44897961ac21",
+        "status": "ok",
+        "detail": null,
+        "units": [
+          {
+            "kind": "function_declaration",
+            "name": "Old",
+            "range": {
+              "lines": [4, 6],
+              "bytes": [30, 58]
+            },
+            "selected_by": "change",
+            "referenced_name": null,
+            "omitted_reference_units": 0,
+            "changed_lines": [5],
+            "gaps_between_lines": [],
+            "enclosing": [],
+            "overlaps_syntax_error": false,
+            "text": "func Old() int {\n\treturn 3\n}",
+            "text_truncated": false,
+            "comments": [
+              {
+                "relation": "leading",
+                "style": "line",
+                "directive": null,
+                "changed": false,
+                "range": {
+                  "lines": [3, 3],
+                  "bytes": [11, 29]
+                },
+                "text": "// Old is renamed."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "change": "modified",
+      "similarity": null,
+      "old_path": "notes.txt",
+      "new_path": "notes.txt",
+      "complete": true,
+      "hunks": [],
+      "before": {
+        "path": "notes.txt",
+        "status": "not_in_scope",
+        "detail": null
+      },
+      "after": {
+        "path": "notes.txt",
+        "status": "not_in_scope",
+        "detail": null
+      }
+    }
+  ]
+}

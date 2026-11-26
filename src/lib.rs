@@ -1,4 +1,23 @@
+mod comments;
+pub mod config;
+mod git;
+mod grammar;
+pub mod hosts;
+pub mod install;
+pub mod integration;
+pub mod json;
+pub mod render;
+
+pub use comments::{Change, error_lines, full_units, units};
+pub use git::{Git, Mode, Options, Report, extract, extract_with, toplevel};
+pub use grammar::{ExternalSource, Grammar, Languages};
+
+use std::collections::HashSet;
 use std::fmt;
+use std::ops::ControlFlow;
+use std::path::Path;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Language {
@@ -11,11 +30,292 @@ pub enum Language {
     Rust,
 }
 
+impl Language {
+    /// Parses a `--lang` value; `sh` means a POSIX script parsed with the Bash grammar.
+    pub fn from_name(name: &str) -> Option<(Self, &'static str)> {
+        Some(match name {
+            "go" => (Self::Go, "go-by-override"),
+            "lua" => (Self::Lua, "lua-by-override"),
+            "nix" => (Self::Nix, "nix-by-override"),
+            "bash" => (Self::Bash, "bash-by-override"),
+            "sh" => (Self::Bash, "sh-parsed-as-bash-by-override"),
+            "yaml" => (Self::Yaml, "yaml-by-override"),
+            "toml" => (Self::Toml, "toml-by-override"),
+            "rust" => (Self::Rust, "rust-by-override"),
+            _ => return None,
+        })
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Go => "go",
+            Self::Lua => "lua",
+            Self::Nix => "nix",
+            Self::Bash => "bash",
+            Self::Yaml => "yaml",
+            Self::Toml => "toml",
+            Self::Rust => "rust",
+        }
+    }
+
+    pub(crate) fn ts(self) -> tree_sitter::Language {
+        match self {
+            Self::Go => tree_sitter_go::LANGUAGE,
+            Self::Lua => tree_sitter_lua::LANGUAGE,
+            Self::Nix => tree_sitter_nix::LANGUAGE,
+            Self::Bash => tree_sitter_bash::LANGUAGE,
+            Self::Yaml => tree_sitter_yaml::LANGUAGE,
+            Self::Toml => tree_sitter_toml_ng::LANGUAGE,
+            Self::Rust => tree_sitter_rust::LANGUAGE,
+        }
+        .into()
+    }
+
+    /// Node kinds treated as a unit that comments can belong to.
+    pub(crate) fn unit_kinds(self) -> &'static [&'static str] {
+        match self {
+            Self::Go => &[
+                "function_declaration",
+                "method_declaration",
+                "type_declaration",
+                "type_spec",
+                "type_alias",
+                "field_declaration",
+                "method_elem",
+                "const_declaration",
+                "const_spec",
+                "var_declaration",
+                "var_spec",
+                "import_declaration",
+            ],
+            Self::Lua => &[
+                "function_declaration",
+                "variable_declaration",
+                "assignment_statement",
+                "field",
+            ],
+            Self::Nix => &["binding", "inherit", "inherit_from"],
+            Self::Bash => &["function_definition"],
+            Self::Yaml => &["block_mapping_pair", "block_sequence_item", "flow_pair"],
+            Self::Toml => &["pair", "table", "table_array_element"],
+            Self::Rust => &[
+                "function_item",
+                "function_signature_item",
+                "struct_item",
+                "enum_item",
+                "union_item",
+                "enum_variant",
+                "field_declaration",
+                "impl_item",
+                "trait_item",
+                "mod_item",
+                "const_item",
+                "static_item",
+                "type_item",
+                "macro_definition",
+                "use_declaration",
+            ],
+        }
+    }
+
+    /// Unit kinds whose bodies are one unit: smaller units nested inside them are ignored.
+    pub(crate) fn function_kinds(self) -> &'static [&'static str] {
+        match self {
+            Self::Go => &["function_declaration", "method_declaration"],
+            Self::Lua => &["function_declaration"],
+            Self::Bash => &["function_definition"],
+            Self::Rust => &["function_item"],
+            Self::Nix | Self::Yaml | Self::Toml => &[],
+        }
+    }
+
+    /// Function values (closures, lambdas); inside a unit they make that unit the function.
+    pub(crate) fn function_value_kinds(self) -> &'static [&'static str] {
+        match self {
+            Self::Go => &["func_literal"],
+            Self::Lua => &["function_definition"],
+            Self::Nix => &["function_expression"],
+            Self::Rust => &["closure_expression"],
+            Self::Bash | Self::Yaml | Self::Toml => &[],
+        }
+    }
+
+    /// Lines of these kinds may sit between a leading comment and its unit.
+    pub(crate) fn attribute_kinds(self) -> &'static [&'static str] {
+        match self {
+            Self::Rust => &["attribute_item"],
+            _ => &[],
+        }
+    }
+}
+
+/// Result of mapping a path (and optionally its first line) to a grammar.
+#[derive(Clone, Debug)]
+pub enum Detected {
+    Supported(Arc<Grammar>, String),
+    UnsupportedDialect(String),
+    NotInScope,
+    /// The extension alone is not enough; call [`Languages::detect_content`] with the first line.
+    NeedsContent,
+}
+
+/// The last component of a shebang word: `/bin/bash` names `bash`.
+fn basename(word: &str) -> &str {
+    word.rsplit('/').next().unwrap_or(word)
+}
+
+/// The command `env` runs: the first word that is neither an option nor a NAME=VALUE assignment.
+/// The operand of `-u`/`--unset`, `-C`/`--chdir` and BSD's `-P` (altpath) goes with its option;
+/// words after `-S` are read like any other.
+fn env_command<'a>(words: &mut impl Iterator<Item = &'a str>) -> Option<&'a str> {
+    while let Some(word) = words.next() {
+        if matches!(word, "-u" | "--unset" | "-C" | "--chdir" | "-P") {
+            words.next();
+        } else if !word.starts_with('-') && !word.contains('=') {
+            return Some(word);
+        }
+    }
+    None
+}
+
+impl Languages {
+    fn supported(&self, language: Language, dialect: &str) -> Detected {
+        Detected::Supported(self.builtin(language), dialect.to_owned())
+    }
+
+    /// Builtin extensions win; external file names and then extensions come after them.
+    pub fn detect_path(&self, path: &Path) -> Detected {
+        let Some(extension) = path.extension() else {
+            return Detected::NeedsContent;
+        };
+        match extension.to_str().unwrap_or_default() {
+            "go" => self.supported(Language::Go, "go"),
+            "lua" => self.supported(Language::Lua, "lua"),
+            "nix" => self.supported(Language::Nix, "nix"),
+            "rs" => self.supported(Language::Rust, "rust"),
+            "yaml" | "yml" => self.supported(Language::Yaml, "yaml"),
+            "toml" => self.supported(Language::Toml, "toml"),
+            "bash" => self.supported(Language::Bash, "bash"),
+            "sh" => Detected::NeedsContent,
+            "dash" => self.supported(Language::Bash, "dash-parsed-as-bash"),
+            dialect @ ("zsh" | "ksh" | "fish" | "csh" | "tcsh") => {
+                Detected::UnsupportedDialect(dialect.to_owned())
+            }
+            _ => self.detect_external(path),
+        }
+    }
+
+    /// Decides shell scripts by shebang. POSIX sh family scripts are parsed with the Bash grammar
+    /// and labelled so; Bash-only syntax in them is not reported. Without a builtin match the
+    /// external file names and extensions decide.
+    pub fn detect_content(&self, path: &Path, first_line: &str) -> Detected {
+        let is_sh = path.extension().is_some_and(|extension| extension == "sh");
+        let Some(command) = first_line.strip_prefix("#!") else {
+            return if is_sh {
+                self.supported(Language::Bash, "bash-assumed")
+            } else {
+                self.detect_external(path)
+            };
+        };
+        let mut words = command.split_whitespace();
+        let mut interpreter = words.next().map(basename);
+        if interpreter == Some("env") {
+            interpreter = env_command(&mut words).map(basename);
+        }
+        if interpreter == Some("busybox") {
+            // BusyBox runs the applet its first argument names; only its shells are shell scripts.
+            // Its `bash` applet is ash too (BASH_IS_ASH).
+            return match words.next().map(basename) {
+                Some("sh" | "ash" | "bash") => self.supported(Language::Bash, "ash-parsed-as-bash"),
+                _ => self.detect_external(path),
+            };
+        }
+        match interpreter.unwrap_or_default() {
+            "bash" => self.supported(Language::Bash, "bash"),
+            "sh" => self.supported(Language::Bash, "sh-parsed-as-bash"),
+            "dash" => self.supported(Language::Bash, "dash-parsed-as-bash"),
+            "ash" => self.supported(Language::Bash, "ash-parsed-as-bash"),
+            // The shells detect_path refuses by extension, and mksh.
+            dialect @ ("zsh" | "ksh" | "mksh" | "fish" | "csh" | "tcsh") => {
+                Detected::UnsupportedDialect(dialect.to_owned())
+            }
+            _ => self.detect_external(path),
+        }
+    }
+
+    /// First enabled external whose `filenames` match the base name, else whose extension matches.
+    fn detect_external(&self, path: &Path) -> Detected {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        let extension = path.extension().and_then(|extension| extension.to_str());
+        self.externals
+            .iter()
+            .find(|grammar| {
+                grammar
+                    .filenames
+                    .iter()
+                    .any(|pattern| glob_match(pattern, name))
+            })
+            .or_else(|| {
+                self.externals.iter().find(|grammar| {
+                    extension.is_some_and(|extension| {
+                        grammar.extensions.iter().any(|known| known == extension)
+                    })
+                })
+            })
+            .map_or(Detected::NotInScope, |grammar| {
+                Detected::Supported(Arc::clone(grammar), grammar.name.clone())
+            })
+    }
+}
+
+/// Matches a repository-relative path: `*` and `?` stay within one path component, `**`
+/// crosses components (`**/` also matches no directory).
+pub fn glob_match(pattern: &str, path: &str) -> bool {
+    // Remembers the (pattern suffix, path suffix) pairs already known not to match, so each
+    // pair is tried once: backtracking over several `*` stays polynomial instead of exponential
+    // (`*a*a*a…*b` against `aaa…`).
+    fn matches(pattern: &[char], path: &[char], failed: &mut HashSet<(usize, usize)>) -> bool {
+        let key = (pattern.len(), path.len());
+        if failed.contains(&key) {
+            return false;
+        }
+        let found = match pattern {
+            [] => path.is_empty(),
+            ['*', '*', '/', rest @ ..] => (0..=path.len())
+                .filter(|&index| index == 0 || path[index - 1] == '/')
+                .any(|index| matches(rest, &path[index..], failed)),
+            ['*', '*', rest @ ..] => {
+                (0..=path.len()).any(|index| matches(rest, &path[index..], failed))
+            }
+            ['*', rest @ ..] => (0..=path.len())
+                .take_while(|&index| index == 0 || path[index - 1] != '/')
+                .any(|index| matches(rest, &path[index..], failed)),
+            ['?', rest @ ..] => {
+                matches!(path, [first, ..] if *first != '/') && matches(rest, &path[1..], failed)
+            }
+            [first, rest @ ..] => path.first() == Some(first) && matches(rest, &path[1..], failed),
+        };
+        if !found {
+            failed.insert(key);
+        }
+        found
+    }
+    // Chars, not bytes, so `?` consumes one character of a non-ASCII name.
+    let pattern: Vec<char> = pattern.chars().collect();
+    let path: Vec<char> = path.chars().collect();
+    matches(&pattern, &path, &mut HashSet::new())
+}
+
 #[derive(Debug)]
 pub enum ParseError {
     GrammarLoad(tree_sitter::LanguageError),
     NoTree,
     Syntax,
+    /// The parse was cancelled at its deadline.
+    Timeout,
 }
 
 impl fmt::Display for ParseError {
@@ -24,6 +324,7 @@ impl fmt::Display for ParseError {
             Self::GrammarLoad(error) => write!(formatter, "failed to load grammar: {error}"),
             Self::NoTree => formatter.write_str("parser returned no tree"),
             Self::Syntax => formatter.write_str("source contains syntax errors"),
+            Self::Timeout => formatter.write_str("parse did not finish before its deadline"),
         }
     }
 }
@@ -32,28 +333,306 @@ impl std::error::Error for ParseError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::GrammarLoad(error) => Some(error),
-            Self::NoTree | Self::Syntax => None,
+            Self::NoTree | Self::Syntax | Self::Timeout => None,
         }
     }
 }
 
 pub fn parse(language: Language, source: &str) -> Result<tree_sitter::Tree, ParseError> {
-    let grammar = match language {
-        Language::Go => tree_sitter_go::LANGUAGE,
-        Language::Lua => tree_sitter_lua::LANGUAGE,
-        Language::Nix => tree_sitter_nix::LANGUAGE,
-        Language::Bash => tree_sitter_bash::LANGUAGE,
-        Language::Yaml => tree_sitter_yaml::LANGUAGE,
-        Language::Toml => tree_sitter_toml_ng::LANGUAGE,
-        Language::Rust => tree_sitter_rust::LANGUAGE,
-    };
-    let mut parser = tree_sitter::Parser::new();
-    parser
-        .set_language(&grammar.into())
-        .map_err(ParseError::GrammarLoad)?;
-    let tree = parser.parse(source, None).ok_or(ParseError::NoTree)?;
+    let tree = parse_partial(language, source)?;
     if tree.root_node().has_error() {
         return Err(ParseError::Syntax);
     }
     Ok(tree)
+}
+
+/// Like [`parse`], but keeps a tree that contains syntax errors so the rest can still be used.
+pub fn parse_partial(language: Language, source: &str) -> Result<tree_sitter::Tree, ParseError> {
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(&language.ts())
+        .map_err(ParseError::GrammarLoad)?;
+    parser.parse(source, None).ok_or(ParseError::NoTree)
+}
+
+/// Parses with a fresh parser (a cancelled one would resume its old parse), stopping once
+/// `should_stop` returns true; tree-sitter asks it about every 100 parse operations.
+pub(crate) fn parse_with_stop(
+    grammar: &Grammar,
+    source: &str,
+    mut should_stop: impl FnMut() -> bool,
+) -> Result<tree_sitter::Tree, ParseError> {
+    // Run::load reports grammars that fail to load before anything is parsed.
+    let language = grammar.language().map_err(|_| ParseError::NoTree)?;
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(language)
+        .map_err(ParseError::GrammarLoad)?;
+    let bytes = source.as_bytes();
+    let mut progress = |_: &tree_sitter::ParseState| {
+        if should_stop() {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    };
+    parser
+        .parse_with_options(
+            &mut |index, _| bytes.get(index..).unwrap_or_default(),
+            None,
+            Some(tree_sitter::ParseOptions::new().progress_callback(&mut progress)),
+        )
+        .ok_or(ParseError::NoTree)
+}
+
+/// Like [`parse_partial`] for any grammar, cancelled with [`ParseError::Timeout`] after `limit`.
+pub fn parse_with_deadline(
+    grammar: &Grammar,
+    source: &str,
+    limit: Duration,
+) -> Result<tree_sitter::Tree, ParseError> {
+    // An overflowing deadline means none.
+    let deadline = Instant::now().checked_add(limit);
+    parse_until(grammar, source, || {
+        deadline.is_some_and(|deadline| Instant::now() >= deadline)
+    })
+}
+
+/// [`parse_with_stop`] cancelled with [`ParseError::Timeout`] once `passed` says the deadline
+/// has passed: before parsing, or when the parse stopped without a tree.
+fn parse_until(
+    grammar: &Grammar,
+    source: &str,
+    mut passed: impl FnMut() -> bool,
+) -> Result<tree_sitter::Tree, ParseError> {
+    // Progress is only checked every 100 operations, so a small file could outrun a zero limit.
+    if passed() {
+        return Err(ParseError::Timeout);
+    }
+    match parse_with_stop(grammar, source, &mut passed) {
+        Err(ParseError::NoTree) if passed() => Err(ParseError::Timeout),
+        result => result,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        Grammar, Language, ParseError, glob_match, parse_until, parse_with_deadline,
+        parse_with_stop,
+    };
+    use std::time::Duration;
+
+    /// A detection as `language/dialect`, `unsupported <dialect>`, or the variant's name.
+    fn label(detected: super::Detected) -> String {
+        match detected {
+            super::Detected::Supported(grammar, dialect) => format!("{}/{dialect}", grammar.name()),
+            super::Detected::UnsupportedDialect(dialect) => format!("unsupported {dialect}"),
+            super::Detected::NotInScope => "not in scope".to_owned(),
+            super::Detected::NeedsContent => "needs content".to_owned(),
+        }
+    }
+
+    #[test]
+    fn shell_extensions_and_shebangs_choose_the_bash_grammar_or_an_unsupported_dialect() {
+        let languages = super::Languages::default();
+        let path = |name: &str| label(languages.detect_path(std::path::Path::new(name)));
+        assert_eq!(path("a.bash"), "bash/bash");
+        assert_eq!(path("a.dash"), "bash/dash-parsed-as-bash");
+        for dialect in ["zsh", "ksh", "fish", "csh", "tcsh"] {
+            assert_eq!(
+                path(&format!("a.{dialect}")),
+                format!("unsupported {dialect}")
+            );
+        }
+        assert_eq!(path("a.sh"), "needs content");
+        let content = |name: &str, line: &str| {
+            label(languages.detect_content(std::path::Path::new(name), line))
+        };
+        // Only a .sh file without a shebang is assumed Bash; another name is not in scope.
+        assert_eq!(content("a.sh", "echo hi"), "bash/bash-assumed");
+        assert_eq!(content("a.txt", "echo hi"), "not in scope");
+        assert_eq!(content("x", "#!/bin/dash"), "bash/dash-parsed-as-bash");
+        assert_eq!(content("x", "#!/bin/ash"), "bash/ash-parsed-as-bash");
+        assert_eq!(content("x", "#!/bin/busybox sh"), "bash/ash-parsed-as-bash");
+        assert_eq!(
+            content("x", "#!/bin/busybox ash"),
+            "bash/ash-parsed-as-bash"
+        );
+        assert_eq!(
+            content("x", "#!/bin/busybox bash"),
+            "bash/ash-parsed-as-bash"
+        );
+        // BusyBox's other applets are not shells, and BusyBox alone runs nothing.
+        assert_eq!(
+            content("x", "#!/usr/bin/env -S busybox awk -f"),
+            "not in scope"
+        );
+        assert_eq!(content("x", "#!/bin/busybox"), "not in scope");
+        // env's options, their operands and assignments are not the interpreter.
+        assert_eq!(content("x", "#!/usr/bin/env -S bash -e"), "bash/bash");
+        assert_eq!(content("x", "#!/usr/bin/env FOO=1 bash"), "bash/bash");
+        assert_eq!(
+            content("x", "#!/usr/bin/env -S -u BASH_ENV bash"),
+            "bash/bash"
+        );
+        assert_eq!(
+            content("x", "#!/usr/bin/env --unset BASH_ENV bash"),
+            "bash/bash"
+        );
+        assert_eq!(content("x", "#!/usr/bin/env -C /tmp bash"), "bash/bash");
+        assert_eq!(
+            content("x", "#!/usr/bin/env --chdir /tmp bash"),
+            "bash/bash"
+        );
+        assert_eq!(
+            content("x", "#!/usr/bin/env -u FOO sh"),
+            "bash/sh-parsed-as-bash"
+        );
+        assert_eq!(
+            content("x", "#!/usr/bin/env -P /usr/local/bin bash"),
+            "bash/bash"
+        );
+        assert_eq!(content("x", "#!/usr/bin/env -u"), "not in scope");
+        // A shebang names the same unsupported shells as an extension, and mksh.
+        for dialect in ["zsh", "ksh", "mksh", "fish", "csh", "tcsh"] {
+            assert_eq!(
+                content("script.sh", &format!("#!/usr/bin/env {dialect}")),
+                format!("unsupported {dialect}")
+            );
+            assert_eq!(
+                content("x", &format!("#!/bin/{dialect}")),
+                format!("unsupported {dialect}")
+            );
+        }
+        // A path names its last component.
+        assert_eq!(content("x", "#!/usr/bin/env /bin/bash"), "bash/bash");
+        assert_eq!(content("x", "#!/usr/bin/env -S /bin/bash -eu"), "bash/bash");
+    }
+
+    #[test]
+    fn every_builtin_name_is_a_lang_value() {
+        for language in [
+            Language::Go,
+            Language::Lua,
+            Language::Nix,
+            Language::Bash,
+            Language::Yaml,
+            Language::Toml,
+            Language::Rust,
+        ] {
+            let dialect = format!("{}-by-override", language.name());
+            assert_eq!(
+                Language::from_name(language.name()),
+                Some((language, dialect.as_str())),
+            );
+        }
+    }
+
+    #[test]
+    fn a_parse_stopped_by_its_deadline_is_a_timeout_and_a_parse_without_a_tree_is_not() {
+        let go = Grammar::builtin(Language::Go);
+        let source = format!("package p\n{}", "var x = 1\n".repeat(2000));
+        // Not passed before the parse, passed at the first progress check.
+        let mut calls = 0;
+        let stopped = parse_until(&go, &source, || {
+            calls += 1;
+            calls > 1
+        });
+        assert!(matches!(stopped, Err(ParseError::Timeout)), "{stopped:?}");
+        // A grammar that cannot load gives no tree, and no deadline has passed.
+        let missing = Grammar::external(crate::grammar::Definition {
+            name: "missing".to_owned(),
+            source: crate::grammar::ExternalSource::Path("/nonexistent".into()),
+            symbol: "tree_sitter_missing".to_owned(),
+            unit_kinds: Vec::new(),
+            function_kinds: Vec::new(),
+            value_kinds: Vec::new(),
+            attribute_kinds: Vec::new(),
+            comment_kinds: Vec::new(),
+            directives: Vec::new(),
+            references: false,
+            extensions: Vec::new(),
+            filenames: Vec::new(),
+            repo: None,
+            cache: None,
+        });
+        let none = parse_until(&missing, &source, || false);
+        assert!(matches!(none, Err(ParseError::NoTree)), "{none:?}");
+    }
+
+    #[test]
+    fn parse_errors_say_what_failed() {
+        use std::error::Error;
+        let load = ParseError::GrammarLoad(tree_sitter::LanguageError::Version(1));
+        let inner = tree_sitter::LanguageError::Version(1).to_string();
+        assert_eq!(load.to_string(), format!("failed to load grammar: {inner}"));
+        assert_eq!(load.source().map(ToString::to_string), Some(inner));
+        for (error, text) in [
+            (ParseError::NoTree, "parser returned no tree"),
+            (ParseError::Syntax, "source contains syntax errors"),
+            (
+                ParseError::Timeout,
+                "parse did not finish before its deadline",
+            ),
+        ] {
+            assert_eq!(error.to_string(), text);
+            assert!(error.source().is_none(), "{text}");
+        }
+    }
+
+    #[test]
+    fn zero_limit_times_out_before_parsing() {
+        let go = Grammar::builtin(Language::Go);
+        assert!(matches!(
+            parse_with_deadline(&go, "package p\n", Duration::ZERO),
+            Err(ParseError::Timeout)
+        ));
+    }
+
+    #[test]
+    fn cancelled_parse_leaves_the_next_parse_correct() {
+        let go = Grammar::builtin(Language::Go);
+        let long: String = (0..1000)
+            .map(|index| format!("func f{index}() int {{ return {index} }}\n"))
+            .collect();
+        let long = format!("package p\n{long}");
+        let mut asked = 0;
+        let stopped = parse_with_stop(&go, &long, || {
+            asked += 1;
+            true
+        });
+        assert!(matches!(stopped, Err(ParseError::NoTree)));
+        assert!(asked > 0, "the progress callback ran");
+        let tree = parse_with_deadline(&go, "package q\n\nvar x = 1\n", Duration::MAX).unwrap();
+        assert!(!tree.root_node().has_error());
+        assert_eq!(tree.root_node().kind(), "source_file");
+        assert_eq!(tree.root_node().named_child_count(), 2);
+    }
+
+    #[test]
+    fn globs_respect_path_components() {
+        assert!(glob_match(".mise/tasks/lib/*", ".mise/tasks/lib/render"));
+        assert!(!glob_match(
+            ".mise/tasks/lib/*",
+            ".mise/tasks/lib/sub/render"
+        ));
+        assert!(glob_match("**/lib/*", ".mise/tasks/lib/render"));
+        assert!(glob_match("**/lib/*", "lib/render"));
+        assert!(!glob_match("**/lib/*", "xlib/render"));
+        assert!(glob_match("scripts/**", "scripts/a/b.sh"));
+        assert!(glob_match("?.go", "é.go"));
+        assert!(!glob_match("?.go", "éé.go"));
+        assert!(glob_match("*é.go", "xé.go"));
+        // Many `*` against a long near-miss: each suffix pair is tried once, not exponentially.
+        // Polynomial takes milliseconds; exponential would never finish. The bound only has to
+        // tell the two apart, with room for a loaded machine and coverage instrumentation.
+        let pattern = format!("{}*b", "*a".repeat(30));
+        let started = std::time::Instant::now();
+        assert!(!glob_match(&pattern, &"a".repeat(200)));
+        assert!(glob_match(&pattern, &format!("{}b", "a".repeat(200))));
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        assert!(glob_match("a?c", "abc") && !glob_match("a?c", "a/c"));
+        assert!(!glob_match("*.sh", "dir/a.sh"));
+    }
 }

@@ -1,0 +1,41 @@
+base  HEAD~1 (465908616efb) → worktree  @REPO@
+
+■ a.go  modified  go  ok
+  before
+    function_declaration F L4–6  changed 3, 5
+      3~│ // F returns one.
+      4 │ func F() int {
+      5~│ 	return 1
+      6 │ }
+  after
+    function_declaration F L4–6  changed 3, 5
+      3~│ // F returns two.
+      4 │ func F() int {
+      5~│ 	return 2
+      6 │ }
+
+■ gone.go  deleted  go  ok
+  before
+    package_clause L1–1  changed 1
+      1~│ package p
+    function_declaration Gone L4–4  changed 3, 4
+      3~│ // Gone goes.
+      4~│ func Gone() {}
+
+■ old.go → new.go  renamed 83%  go  ok
+  before
+    function_declaration Old L4–6  changed 5
+      3 │ // Old is renamed.
+      4 │ func Old() int {
+      5~│ 	return 1
+      6 │ }
+  after
+    function_declaration Old L4–6  changed 5
+      3 │ // Old is renamed.
+      4 │ func Old() int {
+      5~│ 	return 3
+      6 │ }
+
+■ notes.txt  modified  not_in_scope
+
+4 files · 6 units · complete

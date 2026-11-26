@@ -1,0 +1,24 @@
+{
+  "model": "x",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "other"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "'@ROTTER@' hook claude-stop || true",
+            "timeout": 90
+          }
+        ]
+      }
+    ]
+  }
+}

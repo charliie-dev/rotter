@@ -1,0 +1,8 @@
+# cargo-mutants (`mise run mutants`): mutants that are equivalent to the original code, so no test
+# can tell them apart. Each is excluded by its full name, line and column included: once the code
+# moves, the name no longer matches, the mutant is tested again, and a survivor must be
+# re-examined rather than staying excluded by accident.
+exclude_re = [
+  # O_NOFOLLOW and O_NONBLOCK share no bits, so `^` equals `|`.
+  '^src/grammar\.rs:338:47: replace \| with \^$',
+]
