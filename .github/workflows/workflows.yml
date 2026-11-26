@@ -1,5 +1,5 @@
-# Lints the GitHub Actions workflows (actionlint) and checks their security (zizmor), only when a
-# pull request changes something under .github/ or mise.toml (where both tools are pinned).
+# Only when a pull request changes something under .github/ or mise.toml (where both tools are
+# pinned).
 name: workflows
 
 on:
