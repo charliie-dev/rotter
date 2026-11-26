@@ -1,6 +1,6 @@
 ---
 name: rotter-comment-review
-description: Check whether code comments still match the code and are worth keeping, after a change or across a codebase. Runs `rotter extract` for one explicitly chosen mode, then reports concrete contradictions between comments and code, with evidence, and comments that carry nothing the code does not already say. In a hook review of the agent's own changes it also removes those unnecessary comments. Use when asked to review comments against a diff, or when a hook asks for a comment review of the current changes.
+description: Check whether code comments still match the code and are worth keeping, after a change or across a codebase. Runs `rotter extract` for one explicitly chosen mode, then reports concrete contradictions between comments and code, with evidence, and comments that carry nothing the code does not already say. In a hook review it also removes those unnecessary comments that the agent itself added or changed. Use when asked to review comments against a diff, or when a hook asks for a comment review of the current changes.
 ---
 
 # Rotter comment review
