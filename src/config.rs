@@ -24,7 +24,6 @@ const BUILTIN_EXTENSIONS: [&str; 15] = [
     "csh", "tcsh",
 ];
 
-/// An environment variable that holds an absolute path; relative values are ignored.
 pub(crate) fn absolute_var(name: &str) -> Option<PathBuf> {
     std::env::var_os(name)
         .map(PathBuf::from)
@@ -39,7 +38,7 @@ pub(crate) fn home() -> Option<PathBuf> {
 /// only source of them (no function below it reads the environment). The binary builds it with
 /// [`Sources::from_env`] or, for hosts whose project configuration can set the hook's
 /// environment, [`Sources::injectable`]; the host's `injectable` flag alone chooses, and nothing
-/// in the environment or a file does. Tests build it directly.
+/// in the environment or a file does.
 #[derive(Clone, Debug)]
 pub struct Sources {
     pub(crate) home: Option<PathBuf>,
@@ -101,7 +100,6 @@ impl Sources {
         }
     }
 
-    /// [`Sources::injectable`] for injectable hosts, else [`Sources::from_env`].
     pub fn for_host(host: &crate::hosts::Host) -> Self {
         if host.injectable {
             Self::injectable()
@@ -110,7 +108,6 @@ impl Sources {
         }
     }
 
-    /// An absolute host directory variable.
     pub(crate) fn var(&self, name: &str) -> Option<&Path> {
         self.vars
             .iter()
@@ -119,7 +116,6 @@ impl Sources {
     }
 }
 
-/// `rotter/config.toml` under `Sources::config`; None without one.
 pub fn location(sources: &Sources) -> Option<PathBuf> {
     sources
         .config
@@ -293,7 +289,6 @@ fn default_references() -> bool {
     true
 }
 
-/// `^[a-z][a-z0-9_]*$`
 fn is_identifier(text: &str) -> bool {
     text.starts_with(|first: char| first.is_ascii_lowercase())
         && text
@@ -402,12 +397,11 @@ fn registry() -> BTreeMap<String, RawLanguage> {
     toml::from_str(REGISTRY).expect("the bundled registry is valid")
 }
 
-/// Registry language names, for `rotter parser list`.
 pub fn registry_names() -> Vec<String> {
     registry().into_keys().collect()
 }
 
-/// Parses and validates config text; relative `path` values resolve against `base`.
+/// Relative `path` values resolve against `base`.
 #[cfg(test)]
 pub(crate) fn parse(text: &str, base: &Path) -> Result<Config, String> {
     parse_in(text, base, None, None)
@@ -599,7 +593,6 @@ pub(crate) struct Meta {
 }
 
 impl Meta {
-    /// The trust checks' view of metadata in hand: from `lstat`, or from an open descriptor.
     pub(crate) fn of(meta: &fs::Metadata) -> Self {
         let kind = meta.file_type();
         Meta {
@@ -834,7 +827,6 @@ pub(crate) fn trusted_file(
     trusted_file_entered(path, user, lstat).map(|(resolved, _)| resolved)
 }
 
-/// [`trusted_file`], with the directories [`resolve_trusted_entered`] entered on the way.
 fn trusted_file_entered(
     path: &Path,
     user: u32,
@@ -870,7 +862,6 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// `home_from` over scripted lookups: the home and the buffer sizes it asked with.
     fn scripted(
         answer: impl Fn(usize) -> Result<Option<Vec<u8>>, i32>,
     ) -> (Option<PathBuf>, Vec<usize>) {
@@ -908,7 +899,6 @@ mod tests {
                 1 << 20
             ]
         );
-        // Another error, no entry, or a relative directory: no home, after one call.
         for answer in [Err(5), Ok(None), home("home/u"), home("")] {
             let (found, sizes) = scripted(|_| answer.clone());
             assert_eq!(found, None, "{answer:?}");
@@ -1029,7 +1019,6 @@ units = ["function_declaration"]
         assert_eq!(config.parse_timeout_seconds, 5);
         let names: Vec<&str> = config.externals.iter().map(|g| g.name()).collect();
         assert_eq!(names, ["lua2", "alpha"]);
-        // References are on unless a language turns them off.
         assert!(config.externals[0].references);
         let off = parse(
             &language("path = \"p\"\nreferences = false"),
@@ -1157,7 +1146,6 @@ units = ["function_declaration"]
             }
             other => panic!("{other:?}"),
         }
-        // A registry grammar may not claim a builtin extension or collide with a config one.
         let clash = LUA2.replace("\"lua2\"", "\"py\"");
         assert!(
             parse(
@@ -1231,7 +1219,6 @@ units = ["x"]
         |path| lstat(path)
     }
 
-    /// The real lstat with owner and mode replaced for the given paths.
     fn with(overrides: Vec<(PathBuf, u32, u32)>) -> impl Fn(&Path) -> std::io::Result<Meta> {
         move |path| {
             let mut meta = lstat(path)?;
@@ -1251,7 +1238,6 @@ units = ["x"]
         fs::create_dir_all(root.join("real")).unwrap();
         fs::write(root.join("real/config.toml"), "").unwrap();
         symlink("../x/../real/config.toml", root.join("cfg/config.toml")).unwrap();
-        // A relative link whose target goes through `x/..`.
         let resolved = trusted_file(&root.join("cfg/config.toml"), user(), &real()).unwrap();
         assert_eq!(resolved, root.join("real/config.toml"));
         let dotted = root.join("cfg/./../real/config.toml");
@@ -1320,7 +1306,6 @@ units = ["x"]
             root.join("safe/payload.toml")
         );
 
-        // A group-writable non-sticky directory holding a link to a root-owned file.
         let unsafe_dir = with(vec![
             (root.join("x/shared"), user(), 0o40775),
             (root.join("safe/payload.toml"), 0, 0o100444),
@@ -1391,7 +1376,6 @@ units = ["x"]
             (root.join("store/payload.toml"), 0, 0o100444),
         ]);
         assert!(trusted_file(&config, user(), &sticky_store).is_ok());
-        // Root-owned but writable by everyone without the sticky bit: refused.
         let open_store = with(vec![
             (root.join("store"), 0, 0o40777),
             (root.join("store/payload.toml"), 0, 0o100444),
