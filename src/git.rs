@@ -617,6 +617,15 @@ pub fn git_dir(git: &Git, top: &Path) -> Result<PathBuf, String> {
     )?))
 }
 
+pub fn common_dir(git: &Git, top: &Path) -> Result<PathBuf, String> {
+    Ok(PathBuf::from(git_text(
+        git,
+        top,
+        &[],
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )?))
+}
+
 /// The repository's top-level directory as git reports it; git's version is checked first, and
 /// a top level holding the chosen git or its PATH entries stops the run.
 pub fn toplevel(git: &Git, dir: &Path) -> Result<PathBuf, String> {

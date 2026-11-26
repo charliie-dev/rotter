@@ -187,6 +187,22 @@ fn mcp_reads_only_repositories_under_its_roots() {
     );
     fs::rename(swapped.join(".git"), swapped.join("git-file")).unwrap();
     std::os::unix::fs::symlink(swapped.join("git-file"), swapped.join(".git")).unwrap();
+    // An ordinary repository inside the root whose `.git/commondir` points at the other one: git
+    // would read the other repository's refs and objects.
+    let forged = allowed.join("forged");
+    fs::create_dir_all(&forged).unwrap();
+    common::git(&forged, &["init", "-q", "-b", "main"]);
+    fs::write(
+        forged.join(".git/commondir"),
+        format!("{}\n", other.join(".git").display()),
+    )
+    .unwrap();
+    // A worktree of the repository inside the root.
+    let inner = allowed.join("inner");
+    common::git(
+        &allowed,
+        &["worktree", "add", "-q", &inner.display().to_string()],
+    );
     let input = [
         call(1, &allowed),
         call(2, &other),
@@ -197,6 +213,8 @@ fn mcp_reads_only_repositories_under_its_roots() {
         call(7, &allowed.join("relative")),
         call(8, &linked),
         call(9, &swapped),
+        call(10, &forged),
+        call(11, &inner),
     ]
     .concat();
     let allowed_arg = allowed.display().to_string();
@@ -235,6 +253,16 @@ fn mcp_reads_only_repositories_under_its_roots() {
         refused(&results[8]),
         "a registered worktree whose .git became a symlink: {}",
         results[8]
+    );
+    assert!(
+        refused(&results[9]),
+        "a commondir pointing outside the roots: {}",
+        results[9]
+    );
+    assert!(
+        results[10].get("isError").is_none(),
+        "a worktree of a repository inside the root: {}",
+        results[10]
     );
     fs::remove_dir_all(&root).unwrap();
 }

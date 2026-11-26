@@ -2,7 +2,8 @@ use rotter::config::{self, Config, Sources};
 use rotter::json::Json;
 use rotter::render::{self, Color, clean};
 use rotter::{
-    Git, Mode, Options, Report, extract_with, git_dir, hosts, install, integration, mcp, toplevel,
+    Git, Mode, Options, Report, common_dir, extract_with, git_dir, hosts, install, integration,
+    mcp, toplevel,
 };
 use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
@@ -300,19 +301,26 @@ fn mcp_extract(
     Ok((text, notes))
 }
 
-/// The top level must be inside a root, and so must the git directory, unless the git directory
-/// is the entry of a linked worktree that its repository registered for this very top level.
+/// The top level must be inside a root, and so must the git directory and the common git
+/// directory (a `commondir` file can point an ordinary `.git` at another repository), unless the
+/// git directory is the entry of a linked worktree that its repository registered for this very
+/// top level.
 fn check_repository(roots: &[PathBuf], git: &Git, top: &Path) -> Result<(), String> {
     within(roots, top)?;
     let git_dir = git_dir(git, top)?;
-    if within(roots, &git_dir).is_ok() || registered_worktree(&git_dir, top) {
+    if registered_worktree(&git_dir, top) {
         return Ok(());
     }
-    Err(format!(
-        "the git directory {} of {} is outside the roots this server may read",
-        git_dir.display(),
-        top.display()
-    ))
+    for dir in [git_dir, common_dir(git, top)?] {
+        if within(roots, &dir).is_err() {
+            return Err(format!(
+                "the git directory {} of {} is outside the roots this server may read",
+                dir.display(),
+                top.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Git writes a linked worktree's `.git` path into the worktree entry's `gitdir` file; a `.git`

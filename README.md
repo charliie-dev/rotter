@@ -305,9 +305,9 @@ server，只支援協定 2026-07-28：沒有 `initialize` 握手，每個請求�
 MCP server 由 client 啟動，不受 host 的讀取限制與沙箱約束，所以 tool 只讀取頂層目錄位於
 `--root` 之內的 repo（可重複指定；未指定時為工作目錄所屬的 repo，連同它位在頂層之外的 git 目錄，
 例如 submodule 或 `--separate-git-dir`；git 在那裡找不到 repo 時則為工作目錄
-本身）。`directory` 先解析成實際路徑、確認在 root 內，才在那裡執行 git；repo 的 git 目錄也須在 root
-內，唯一的例外是 linked worktree：git 目錄在 root 外時，須是主 repo 為這個 worktree 登記的項目
-（其 `gitdir` 檔指回這個 worktree）。`--root` 指向 repo 的子目錄時，該 repo 不在範圍內。擷取時會
+本身）。`directory` 先解析成實際路徑、確認在 root 內，才在那裡執行 git；repo 的 git 目錄與共用 git
+目錄（`commondir` 可把一般的 `.git` 指向別的 repo）也須在 root 內，唯一的例外是主 repo 為這個
+worktree 登記的 linked worktree（其 `.git` 是一般檔案，登記項目的 `gitdir` 檔指回它）。`--root` 指向 repo 的子目錄時，該 repo 不在範圍內。擷取時會
 確認讀到的仍是檢查過的那個 repo。這是防止模型讀到範圍外 repo 的界線，不是沙箱：能在 root 內同時
 改動檔案系統的程式，仍可能在檢查與讀取之間把路徑換掉；linked worktree 的共用 git 目錄也不在檢查範圍。
 
