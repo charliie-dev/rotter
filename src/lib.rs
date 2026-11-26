@@ -31,7 +31,7 @@ pub enum Language {
 }
 
 impl Language {
-    /// Parses a `--lang` value; `sh` means a POSIX script parsed with the Bash grammar.
+    /// Parses a `--lang` value.
     pub fn from_name(name: &str) -> Option<(Self, &'static str)> {
         Some(match name {
             "go" => (Self::Go, "go-by-override"),
@@ -159,14 +159,12 @@ pub enum Detected {
     NeedsContent,
 }
 
-/// The last component of a shebang word: `/bin/bash` names `bash`.
 fn basename(word: &str) -> &str {
     word.rsplit('/').next().unwrap_or(word)
 }
 
-/// The command `env` runs: the first word that is neither an option nor a NAME=VALUE assignment.
-/// The operand of `-u`/`--unset`, `-C`/`--chdir` and BSD's `-P` (altpath) goes with its option;
-/// words after `-S` are read like any other.
+/// The command `env` runs. The operand of BSD's `-P` (altpath) goes with its option; words after
+/// `-S` are read like any other.
 fn env_command<'a>(words: &mut impl Iterator<Item = &'a str>) -> Option<&'a str> {
     while let Some(word) = words.next() {
         if matches!(word, "-u" | "--unset" | "-C" | "--chdir" | "-P") {
@@ -205,9 +203,9 @@ impl Languages {
         }
     }
 
-    /// Decides shell scripts by shebang. POSIX sh family scripts are parsed with the Bash grammar
-    /// and labelled so; Bash-only syntax in them is not reported. Without a builtin match the
-    /// external file names and extensions decide.
+    /// Decides shell scripts by shebang. POSIX sh family scripts are parsed with the Bash grammar;
+    /// Bash-only syntax in them is not reported. Without a builtin match the external file names
+    /// and extensions decide.
     pub fn detect_content(&self, path: &Path, first_line: &str) -> Detected {
         let is_sh = path.extension().is_some_and(|extension| extension == "sh");
         let Some(command) = first_line.strip_prefix("#!") else {
@@ -223,8 +221,8 @@ impl Languages {
             interpreter = env_command(&mut words).map(basename);
         }
         if interpreter == Some("busybox") {
-            // BusyBox runs the applet its first argument names; only its shells are shell scripts.
-            // Its `bash` applet is ash too (BASH_IS_ASH).
+            // BusyBox runs the applet its first argument names. Its `bash` applet is ash too
+            // (BASH_IS_ASH).
             return match words.next().map(basename) {
                 Some("sh" | "ash" | "bash") => self.supported(Language::Bash, "ash-parsed-as-bash"),
                 _ => self.detect_external(path),
@@ -235,7 +233,6 @@ impl Languages {
             "sh" => self.supported(Language::Bash, "sh-parsed-as-bash"),
             "dash" => self.supported(Language::Bash, "dash-parsed-as-bash"),
             "ash" => self.supported(Language::Bash, "ash-parsed-as-bash"),
-            // The shells detect_path refuses by extension, and mksh.
             dialect @ ("zsh" | "ksh" | "mksh" | "fish" | "csh" | "tcsh") => {
                 Detected::UnsupportedDialect(dialect.to_owned())
             }
@@ -243,7 +240,6 @@ impl Languages {
         }
     }
 
-    /// First enabled external whose `filenames` match the base name, else whose extension matches.
     fn detect_external(&self, path: &Path) -> Detected {
         let name = path
             .file_name()
@@ -314,7 +310,6 @@ pub enum ParseError {
     GrammarLoad(tree_sitter::LanguageError),
     NoTree,
     Syntax,
-    /// The parse was cancelled at its deadline.
     Timeout,
 }
 
@@ -355,8 +350,7 @@ pub fn parse_partial(language: Language, source: &str) -> Result<tree_sitter::Tr
     parser.parse(source, None).ok_or(ParseError::NoTree)
 }
 
-/// Parses with a fresh parser (a cancelled one would resume its old parse), stopping once
-/// `should_stop` returns true; tree-sitter asks it about every 100 parse operations.
+/// Parses with a fresh parser (a cancelled one would resume its old parse).
 pub(crate) fn parse_with_stop(
     grammar: &Grammar,
     source: &str,
@@ -398,8 +392,6 @@ pub fn parse_with_deadline(
     })
 }
 
-/// [`parse_with_stop`] cancelled with [`ParseError::Timeout`] once `passed` says the deadline
-/// has passed: before parsing, or when the parse stopped without a tree.
 fn parse_until(
     grammar: &Grammar,
     source: &str,
@@ -423,7 +415,6 @@ mod tests {
     };
     use std::time::Duration;
 
-    /// A detection as `language/dialect`, `unsupported <dialect>`, or the variant's name.
     fn label(detected: super::Detected) -> String {
         match detected {
             super::Detected::Supported(grammar, dialect) => format!("{}/{dialect}", grammar.name()),
@@ -449,7 +440,6 @@ mod tests {
         let content = |name: &str, line: &str| {
             label(languages.detect_content(std::path::Path::new(name), line))
         };
-        // Only a .sh file without a shebang is assumed Bash; another name is not in scope.
         assert_eq!(content("a.sh", "echo hi"), "bash/bash-assumed");
         assert_eq!(content("a.txt", "echo hi"), "not in scope");
         assert_eq!(content("x", "#!/bin/dash"), "bash/dash-parsed-as-bash");
@@ -463,13 +453,11 @@ mod tests {
             content("x", "#!/bin/busybox bash"),
             "bash/ash-parsed-as-bash"
         );
-        // BusyBox's other applets are not shells, and BusyBox alone runs nothing.
         assert_eq!(
             content("x", "#!/usr/bin/env -S busybox awk -f"),
             "not in scope"
         );
         assert_eq!(content("x", "#!/bin/busybox"), "not in scope");
-        // env's options, their operands and assignments are not the interpreter.
         assert_eq!(content("x", "#!/usr/bin/env -S bash -e"), "bash/bash");
         assert_eq!(content("x", "#!/usr/bin/env FOO=1 bash"), "bash/bash");
         assert_eq!(
@@ -494,7 +482,6 @@ mod tests {
             "bash/bash"
         );
         assert_eq!(content("x", "#!/usr/bin/env -u"), "not in scope");
-        // A shebang names the same unsupported shells as an extension, and mksh.
         for dialect in ["zsh", "ksh", "mksh", "fish", "csh", "tcsh"] {
             assert_eq!(
                 content("script.sh", &format!("#!/usr/bin/env {dialect}")),
@@ -505,7 +492,6 @@ mod tests {
                 format!("unsupported {dialect}")
             );
         }
-        // A path names its last component.
         assert_eq!(content("x", "#!/usr/bin/env /bin/bash"), "bash/bash");
         assert_eq!(content("x", "#!/usr/bin/env -S /bin/bash -eu"), "bash/bash");
     }
@@ -540,7 +526,6 @@ mod tests {
             calls > 1
         });
         assert!(matches!(stopped, Err(ParseError::Timeout)), "{stopped:?}");
-        // A grammar that cannot load gives no tree, and no deadline has passed.
         let missing = Grammar::external(crate::grammar::Definition {
             name: "missing".to_owned(),
             source: crate::grammar::ExternalSource::Path("/nonexistent".into()),
@@ -624,7 +609,6 @@ mod tests {
         assert!(glob_match("?.go", "é.go"));
         assert!(!glob_match("?.go", "éé.go"));
         assert!(glob_match("*é.go", "xé.go"));
-        // Many `*` against a long near-miss: each suffix pair is tried once, not exponentially.
         // Polynomial takes milliseconds; exponential would never finish. The bound only has to
         // tell the two apart, with room for a loaded machine and coverage instrumentation.
         let pattern = format!("{}*b", "*a".repeat(30));

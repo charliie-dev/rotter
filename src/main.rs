@@ -72,10 +72,8 @@ type LangArgs = Vec<(String, String)>;
 /// even when it looks like one (`-C --pretty` names a directory).
 const VALUE_OPTIONS: [&str; 3] = ["--base", "--lang", "-C"];
 
-/// A report larger than this (5 MiB) gets a note on stderr suggesting a pathspec.
 const LARGE_REPORT: usize = 5 << 20;
 
-/// The note for a report of `len` bytes, when it is larger than [`LARGE_REPORT`].
 fn size_note(len: usize) -> Option<String> {
     (len > LARGE_REPORT).then(|| {
         format!(
@@ -88,8 +86,7 @@ fn size_note(len: usize) -> Option<String> {
 /// Indexes of extract's arguments in flag position: after `extract`, before the first `--` that
 /// is not an option's value, and not an option's value themselves.
 ///
-/// One pass over `args` with no index arithmetic, so no change to it can loop forever (a mutant
-/// that kept the index in place once filled a CI runner's memory).
+/// One pass over `args` with no index arithmetic, so no change to it can loop forever.
 fn flag_positions(args: &[String]) -> Vec<usize> {
     let mut positions = Vec::new();
     let mut value_next = false;
@@ -142,8 +139,6 @@ fn parse_args(args: &[String]) -> Result<(PathBuf, Options, LangArgs), String> {
     Ok((dir, options, languages))
 }
 
-/// The mode `arg` chooses (`--base` takes the next argument as its revision), or None when it
-/// chooses none.
 fn mode_arg(arg: &str, rest: &mut std::slice::Iter<'_, String>) -> Result<Option<Mode>, String> {
     Ok(Some(match arg {
         "--staged" => Mode::Staged,
@@ -157,7 +152,6 @@ fn mode_arg(arg: &str, rest: &mut std::slice::Iter<'_, String>) -> Result<Option
     }))
 }
 
-/// A `--lang` value: `<glob>=<language>`, split at the last `=`.
 fn lang_arg(value: Option<&String>) -> Result<(String, String), String> {
     let value = value.ok_or("--lang needs <glob>=<language>")?;
     let (pattern, name) = value
@@ -212,7 +206,7 @@ fn output_flags(args: &mut Vec<String>) -> Result<Option<Color>, String> {
     }
 }
 
-/// Loads the config for a CLI command; an untrusted config is reported and ignored.
+/// An untrusted config is reported and ignored.
 fn cli_config(repo: Option<&Path>) -> Result<Config, String> {
     let loaded = config::load(repo, &Sources::from_env())?;
     if let Some(note) = loaded.note {
@@ -221,7 +215,7 @@ fn cli_config(repo: Option<&Path>) -> Result<Config, String> {
     Ok(loaded.config)
 }
 
-/// Applies the config and resolves `--lang` names; `--lang` globs come before `[overrides]`.
+/// `--lang` globs come before `[overrides]`.
 fn configure(
     git: &Git,
     dir: &Path,
@@ -244,9 +238,8 @@ fn configure(
     Ok(())
 }
 
-/// Writes `text` to stdout. A reader that closed the pipe early (`rotter extract | head`) is not an
-/// error, so the run keeps the exit status it earned; any other write failure is reported and
-/// becomes exit 2.
+/// A reader that closed the pipe early (`rotter extract | head`) is not an error, so the run keeps
+/// the exit status it earned.
 fn emit(text: &str, earned: ExitCode) -> ExitCode {
     let mut stdout = std::io::stdout().lock();
     match stdout
@@ -284,7 +277,6 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    // The document, or with --pretty its rendering (Some(colour)).
     let show = |json: &Json, rendered: &dyn Fn(bool) -> String| match pretty {
         Some(color) => rendered(color),
         None => format!("{json}\n"),
@@ -300,8 +292,6 @@ fn main() -> ExitCode {
     }
 }
 
-/// The arguments after the program name; any that is not UTF-8 is an error, with the exit code
-/// to return.
 fn utf8_args() -> Result<Vec<String>, ExitCode> {
     let args: Result<Vec<String>, _> = std::env::args_os()
         .skip(1)
@@ -319,7 +309,6 @@ fn utf8_args() -> Result<Vec<String>, ExitCode> {
     })
 }
 
-/// `rotter hook <name> [--timeout <seconds>]`.
 fn hook(rest: &[&str]) -> ExitCode {
     // A hook must never fail the host's turn: every `rotter hook …` exits 0, even on a
     // panic, and problems surface as a systemMessage or on stderr, per host.
@@ -328,7 +317,7 @@ fn hook(rest: &[&str]) -> ExitCode {
             if let Some(host) = hosts::by_hook(name)
                 && matches!(rest, [] | ["--timeout", _]) =>
         {
-            // A shim's own timeout; anything but a positive integer is ignored.
+            // A shim's own timeout.
             let timeout = match rest {
                 ["--timeout", value] => value.parse().ok().filter(|value| *value > 0),
                 _ => None,
@@ -394,7 +383,6 @@ fn document(words: &[&str], show: Show<'_>) -> Option<Result<(String, Option<Str
     }
 }
 
-/// Prints a document command's text, then its error if any: exit 0, or 2 on an error.
 fn finish(result: Result<(String, Option<String>), String>) -> ExitCode {
     let error = match result {
         Ok((text, error)) => {
