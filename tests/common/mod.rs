@@ -222,7 +222,7 @@ pub fn grok_input(session: &str, cwd: &Path) -> String {
     .to_string()
 }
 
-/// Codex's Stop input (codex-rs/hooks/src/events/stop.rs).
+/// Codex's Stop input.
 pub fn codex_input(session: &str, cwd: &Path) -> String {
     serde_json::json!({ "session_id": session, "turn_id": "t1", "transcript_path": null,
         "cwd": cwd, "hook_event_name": "Stop", "model": "m", "permission_mode": "default",
@@ -230,7 +230,7 @@ pub fn codex_input(session: &str, cwd: &Path) -> String {
     .to_string()
 }
 
-/// GitHub Copilot CLI's agentStop input (hooks reference, camelCase event).
+/// GitHub Copilot CLI's agentStop input.
 pub fn copilot_input(session: &str, cwd: &Path) -> String {
     serde_json::json!({ "sessionId": session, "timestamp": 1_700_000_000_000_u64, "cwd": cwd,
         "transcriptPath": "/nonexistent/transcript.jsonl", "stopReason": "end_turn",
@@ -238,7 +238,7 @@ pub fn copilot_input(session: &str, cwd: &Path) -> String {
     .to_string()
 }
 
-/// Factory Droid's Stop input (hooks reference: common fields plus `stop_hook_active`).
+/// Factory Droid's Stop input.
 pub fn droid_input(session: &str, cwd: &Path) -> String {
     serde_json::json!({ "session_id": session, "transcript_path": "/nonexistent/t.jsonl",
         "cwd": cwd, "permission_mode": "default", "hook_event_name": "Stop",

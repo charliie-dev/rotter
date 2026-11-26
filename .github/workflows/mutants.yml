@@ -3,8 +3,8 @@
 # in .cargo/mutants.toml). A missed mutant fails the check (a timeout counts as caught), and the
 # shard's mutants.out is kept as an artifact.
 #
-# The mutants are split over 8 jobs to stay within a job's 6 hours when a pull request changes most
-# of the code. Linux amd64 runners.
+# The mutants are split over 8 jobs so that a pull request that changes most of the code stays
+# within the job time limit. Linux amd64 runners.
 name: mutants
 
 on:
@@ -57,8 +57,7 @@ jobs:
           BASE_REF: ${{ github.base_ref }}
           SHARD: ${{ matrix.shard }}
         run: mise run mutants "origin/$BASE_REF" --shard "$SHARD/8"
-      # Also when the job is cancelled (a runner shut down mid-shard once): the mutants it did
-      # test are kept.
+      # Also when the job is cancelled: the mutants it did test are kept.
       - if: failure() || cancelled()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

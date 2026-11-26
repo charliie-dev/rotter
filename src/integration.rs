@@ -17,7 +17,7 @@ use std::os::unix::fs::{DirBuilderExt, FileExt, MetadataExt, OpenOptionsExt, Per
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-/// The smallest hook timeout rotter installs (Claude Code's own default).
+/// The smallest hook timeout rotter installs.
 const MIN_HOOK_TIMEOUT: u64 = 60;
 /// Seconds of the hook timeout kept free for git and reporting after the per-file phases.
 const HOOK_RESERVE: u64 = 15;
@@ -1005,7 +1005,7 @@ fn remove_ours(host: &Host, settings: &mut Value, exe: &str) -> usize {
 
 /// Visits rotter's entries in file order; `keep` may rewrite one in place and keep it (true)
 /// or have it removed (false). Returns how many rotter entries there were. Only groups this
-/// emptied are removed, so other groups keep their positions (Codex keys hook trust on them).
+/// emptied are removed, so other groups keep their positions.
 fn prune_ours(
     host: &Host,
     settings: &mut Value,
@@ -1893,8 +1893,7 @@ fn compat_status(sources: &Sources, exe: &str) -> (&'static str, Option<String>)
 
 /// What Codex needs besides the entry: its `hooks` feature (on unless `[features]` in
 /// `config.toml` turns off `hooks` or its older name `codex_hooks`) and a `/hooks` review, which
-/// Codex records by the hook's hash and rotter does not check. Read-only; any problem reading
-/// the file is "unknown".
+/// rotter does not check. Read-only; any problem reading the file is "unknown".
 fn codex_status(dir: &Path) -> String {
     let path = dir.join("config.toml");
     let feature = match open_regular(&path) {
@@ -2852,8 +2851,8 @@ mod tests {
     /// reserve, so the budget is `Duration::ZERO`) the file is skipped as `parse_timeout` before
     /// rotter opens it, so nothing is found and the report is only reported as incomplete. A
     /// mutation of the `evaluate` call site that stops passing `timeout` through to
-    /// `run_budget`/`shortened` (verified in a scratch copy of this crate) turns the second
-    /// assertion into the first outcome, and the test fails.
+    /// `run_budget`/`shortened` turns the second assertion into the first outcome, and the test
+    /// fails.
     #[test]
     fn a_shim_passed_timeout_actually_shortens_the_run() {
         let root = temp();

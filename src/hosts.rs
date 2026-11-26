@@ -139,14 +139,13 @@ pub(crate) const GROK: Host = Host {
     cwd_keys: &["cwd", "workspaceRoot"],
     cwd_fallback: false,
     continuation_keys: &["stop_hook_active", "stopHookActive"],
-    // The session-end Stop (`channel_closed`, `shutdown`) ends no turn; its decision is ignored.
     end_reason: Some(("reason", "end_turn")),
     notes: Notes::Stderr,
     default_timeout: 600,
     injectable: false,
 };
 
-/// OpenAI Codex CLI: `$CODEX_HOME/hooks.json` Stop hooks, run once trusted in `/hooks`.
+/// OpenAI Codex CLI: `$CODEX_HOME/hooks.json` Stop hooks.
 pub(crate) const CODEX: Host = Host {
     id: "codex",
     hook: "codex",
@@ -220,7 +219,6 @@ pub(crate) const DROID: Host = Host {
     event: "Stop",
     command_key: "command",
     timeout_key: "timeout",
-    // Droid reads `hooks` from these only while hooks.json is absent.
     shadows: &["settings.json", "settings.local.json"],
     legacy: false,
     session_keys: &["session_id"],
@@ -265,7 +263,7 @@ pub(crate) const PI: Host = Host {
     injectable: true,
 };
 
-/// Letta Code: `~/.letta/mods/*.js`, a `turn_end` mod (no directory variable reaches its loader).
+/// Letta Code: `~/.letta/mods/*.js`, a `turn_end` mod.
 pub(crate) const LETTA: Host = Host {
     id: "letta",
     hook: "letta",
@@ -295,8 +293,7 @@ pub(crate) const LETTA: Host = Host {
     injectable: true,
 };
 
-/// OpenCode: `$OPENCODE_CONFIG_DIR/plugins/*.js` (a directory OpenCode loads plugins from in
-/// addition to `$XDG_CONFIG_HOME/opencode`), a plugin reacting to `session.idle`.
+/// OpenCode: `$OPENCODE_CONFIG_DIR/plugins/*.js`, a plugin reacting to `session.idle`.
 pub(crate) const OPENCODE: Host = Host {
     id: "opencode",
     hook: "opencode",
@@ -309,7 +306,6 @@ pub(crate) const OPENCODE: Host = Host {
         dir: "plugins",
         file: "rotter-review.js",
         templates: &[include_str!("shims/opencode-v1.js")],
-        // OpenCode does not await plugin event handlers.
         max_timeout: None,
     },
     event: "session.idle",

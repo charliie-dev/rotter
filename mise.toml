@@ -8,8 +8,7 @@ rust = { version = "1.100.0", profile = "minimal", components = [
   "rust-src",
 ] }
 # The engines the pi, letta and opencode shims run under in tests/shims.rs; the tests read these
-# lines. Node: pi's and letta's npm packages (Node >= 22.19). Bun: the version pi's release binary
-# and opencode's macOS/Linux binaries are compiled with.
+# lines.
 node = "26.13.1"
 bun = "1.4.4"
 # Mutation testing (`mise run mutants`): checks that the tests fail when the code is changed.
@@ -26,7 +25,7 @@ bun = "1.4.4"
 # Reads CodeQL's SARIF (`mise run codeql`).
 "aqua:jqlang/jq" = "1.8.2"
 
-# CodeQL from its per-platform archives: the all-platforms codeql.zip (1.4 GB) is deprecated.
+# CodeQL from its per-platform archives, not the all-platforms codeql.zip.
 [tools."github:github/codeql-cli-binaries"]
 version = "2.27.6"
 

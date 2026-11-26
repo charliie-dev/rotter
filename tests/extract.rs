@@ -1078,7 +1078,7 @@ fn non_utf8_paths_are_reported_by_their_bytes_and_not_analysed() {
         .git(&["hash-object", "-w", "seed.go"])
         .trim()
         .to_owned();
-    // macOS rejects such names on disk, so they live only in the index.
+    // They live only in the index, so no file system has to accept such names.
     let mut entries = Vec::new();
     for byte in [0x80u8, 0x81] {
         entries.extend_from_slice(format!("100644 {oid}\t").as_bytes());

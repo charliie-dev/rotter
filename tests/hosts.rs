@@ -944,7 +944,6 @@ fn codex_entries_keep_their_positions_and_status_names_the_trust_step() {
     let dir = root.join("codex");
     fs::create_dir(&dir).unwrap();
     let file = dir.join("hooks.json");
-    // Codex keys a hook's trust on its group and handler index.
     let seed = json!({ "hooks": { "Stop": [
         { "hooks": [{ "type": "command", "command": "/a.sh" }] },
         { "hooks": [{ "type": "command", "command": "'/else/rotter' hook codex || true",
@@ -1207,7 +1206,7 @@ fn unsupported_hosts_are_named_and_refused() {
     fs::remove_dir_all(root).unwrap();
 }
 
-/// Every in-scope host (S4): the 15 named in the plan's Host table, each named exactly once in
+/// Every in-scope host: the 15 in `HOSTS` and `UNSUPPORTED` (src/hosts.rs), each named once in
 /// `status`, whether shipped, experimental or unsupported. China-based agents (kimi, qwen,
 /// qodercli) are deliberately excluded and must never appear.
 #[test]

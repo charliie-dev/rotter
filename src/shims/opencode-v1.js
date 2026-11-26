@@ -130,16 +130,10 @@ export const RotterReview = async (input) => {
           }
           const id = event.properties?.sessionID;
           if (inFlight || typeof id !== "string") return;
-          // A child (subagent) session ends inside its parent's turn.
           const found = await client.session.get({ path: { id } });
           const info = found?.data;
           if (info === null || typeof info !== "object" || info.parentID != null) return;
-          // A cancelled or failed turn ends in session.idle too, and a cancelled subtask or step
-          // leaves no error. Ask only when the last message is an assistant message that ended
-          // the turn: it completed with no error, and it meets the three conditions of OpenCode's
-          // loop exit (prompt.ts): a finish reason other than "tool-calls" or "unknown"; no tool
-          // part that the provider did not run, apart from the interrupted ones cleanup() marks
-          // after a retry; and a parentID that names the last user message.
+          // Ask only after a turn that ended normally (docs/hosts.md lists the conditions).
           const listed = await client.session.messages({ path: { id } });
           const messages = Array.isArray(listed?.data) ? listed.data : [];
           const entry = messages[messages.length - 1];

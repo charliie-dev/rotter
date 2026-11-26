@@ -515,7 +515,7 @@ impl Git {
             .args(args)
             // Never write the index opportunistically; the checked repository stays untouched.
             .env("GIT_OPTIONAL_LOCKS", "0")
-            // A missing object is an error, never a promisor fetch (honoured from git 2.45.1).
+            // A missing object is an error, never a promisor fetch.
             .env("GIT_NO_LAZY_FETCH", "1")
             .env("ROTTER_EMPTY_VALUE", "")
             .stdin(if input { Stdio::piped() } else { Stdio::null() })
@@ -638,8 +638,7 @@ fn promisor_gate(git: &Git, top: &Path, version: &str) -> Result<(), String> {
 /// `--config-env` resets from `git config --null --name-only` keys under `filter.` and `hook.`:
 /// every filter driver name gets empty `clean`, `smudge`, `process` and `required`, every hook
 /// name with an `event` key empty events. The name is the text up to the last dot, so `=` and
-/// `.` in it survive (git splits `--config-env` at the last `=`). A middle-less key is skipped,
-/// except `hook.event`, which refuses: git 2.54 builds a hook from it.
+/// `.` in it survive. A middle-less key is skipped, except `hook.event`, which refuses.
 fn guard_args(keys: &[u8]) -> Result<Vec<String>, String> {
     let keys = std::str::from_utf8(keys).map_err(|_| "non-UTF-8 filter or hook name")?;
     let mut filters: Vec<&str> = Vec::new();

@@ -94,7 +94,6 @@ impl Sources {
             config: under(".config"),
             cache: under(".cache"),
             state: under(".local/state/rotter"),
-            // Not confstr(_CS_DARWIN_USER_TEMP_DIR): it falls back to reading TMPDIR.
             temp: PathBuf::from("/tmp"),
             path: std::env::var_os("PATH"),
             vars: Vec::new(),
