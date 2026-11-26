@@ -59,8 +59,9 @@ run = "cargo build --all-targets --locked"
 description = "Fast static analysis: opengrep, cargo-deny and zizmor"
 run = '''
 set -eu
-# Community rules, pinned; fetched once into the cache.
-rules="${XDG_CACHE_HOME:-$HOME/.cache}/rotter/opengrep-rules"
+# Community rules, pinned; fetched once into the cache. Not under rotter/: `rotter parser install`
+# refuses that directory unless it is 0700, and git clone would create it with the umask's mode.
+rules="${XDG_CACHE_HOME:-$HOME/.cache}/rotter-dev/opengrep-rules"
 rev=f1d2b562b414783763fd02a6ed2736eaed622efa
 if [ "$(git -C "$rules" rev-parse HEAD 2>/dev/null || true)" != "$rev" ]; then
   rm -rf "$rules"
