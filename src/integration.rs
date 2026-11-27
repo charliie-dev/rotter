@@ -231,28 +231,28 @@ struct Outcome {
     record: Option<(PathBuf, String)>,
 }
 
-/// The session id from the host input, mapped to a file name (`[A-Za-z0-9._-]`, others `_`).
-/// A missing, empty, `.`, `..` or over-255-byte id is None: neither the loop cap nor dedupe
-/// can be kept, so the Stop is silent.
+/// The session id from the host input, as a file name: `[A-Za-z0-9._-]` stay, every other byte
+/// becomes `%XX`. `%` is not among the kept characters, so two ids never share a name (and a
+/// state file of an id in that alphabet keeps its name). A missing, empty, `.` or `..` id, or one
+/// whose name exceeds 255 bytes, is None: neither the loop cap nor dedupe can be kept, so the Stop
+/// is silent.
 fn session(host: &Host, input: &Value) -> Option<String> {
     let raw = host
         .session_keys
         .iter()
         .find_map(|key| input[key].as_str())?;
-    if raw.is_empty() || raw == "." || raw == ".." || raw.len() > 255 {
+    if raw.is_empty() || raw == "." || raw == ".." {
         return None;
     }
-    Some(
-        raw.chars()
-            .map(|character| {
-                if character.is_ascii_alphanumeric() || "._-".contains(character) {
-                    character
-                } else {
-                    '_'
-                }
-            })
-            .collect(),
-    )
+    let mut name = String::new();
+    for byte in raw.bytes() {
+        if byte.is_ascii_alphanumeric() || b"._-".contains(&byte) {
+            name.push(char::from(byte));
+        } else {
+            name.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    (name.len() <= 255).then_some(name)
 }
 
 fn cwd(host: &Host, input: &Value) -> Option<PathBuf> {
@@ -2401,13 +2401,21 @@ mod tests {
     #[test]
     fn session_ids_are_mapped_or_missing() {
         let id = |value: Value| session(&CLAUDE, &json!({ "session_id": value }));
-        assert_eq!(id(json!("s/1 x")), Some("s_1_x".to_owned()));
+        assert_eq!(id(json!("s/1 x")), Some("s%2F1%20x".to_owned()));
+        // Ids that used to share `a_b` now differ, and no escaped id equals a kept one.
+        assert_eq!(id(json!("a/b")), Some("a%2Fb".to_owned()));
+        assert_eq!(id(json!("a?b")), Some("a%3Fb".to_owned()));
+        assert_eq!(id(json!("a_b")), Some("a_b".to_owned()));
+        assert_eq!(id(json!("a%2Fb")), Some("a%252Fb".to_owned()));
+        assert_eq!(id(json!("é")), Some("%C3%A9".to_owned()));
         assert_eq!(id(json!("a".repeat(255))), Some("a".repeat(255)));
+        assert_eq!(id(json!("/".repeat(85))), Some("%2F".repeat(85)));
         for missing in [
             json!(""),
             json!("."),
             json!(".."),
             json!("a".repeat(256)),
+            json!("/".repeat(86)),
             json!(7),
         ] {
             assert_eq!(id(missing.clone()), None, "{missing}");
