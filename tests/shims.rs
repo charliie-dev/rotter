@@ -298,6 +298,18 @@ struct Run {
 }
 
 fn run(host: &str, file: &str, engine: &str, stub_mode: &str, scenario: &str) -> Run {
+    run_with(host, file, engine, stub_mode, scenario, 2)
+}
+
+/// `timeout` is the shim's, in seconds.
+fn run_with(
+    host: &str,
+    file: &str,
+    engine: &str,
+    stub_mode: &str,
+    scenario: &str,
+    timeout: u64,
+) -> Run {
     let (node, _) = runtime("node");
     let (binary, version) = runtime(engine);
     let root = temp("shim-run");
@@ -315,7 +327,11 @@ fn run(host: &str, file: &str, engine: &str, stub_mode: &str, scenario: &str) ->
         stub.clone()
     };
     let shim = root.join(file);
-    fs::write(&shim, render_shim(host, exe.to_str().unwrap(), 2).unwrap()).unwrap();
+    fs::write(
+        &shim,
+        render_shim(host, exe.to_str().unwrap(), timeout).unwrap(),
+    )
+    .unwrap();
     let cwd = root.join("work");
     fs::create_dir(&cwd).unwrap();
     let output = Command::new(&binary)
@@ -518,23 +534,24 @@ fn opencode_asks_only_after_a_turn_that_completed() {
 
 #[test]
 fn shims_resolve_quietly_whatever_rotter_does() {
-    // Under the 2 s timeout, an answer before 1800 ms came without waiting for it; the margin is
-    // for the stub's Node start on a loaded machine (CI, coverage, mutants).
+    // (stub mode, scenario, shim timeout in seconds, fastest and slowest answer in ms). Under a
+    // 10 s timeout, an answer before 9000 ms came without waiting for it, however slowly a loaded
+    // machine (CI, coverage, mutants) starts the stub's Node.
     let cases = [
-        ("quiet", "once", 0, 1800),
-        ("nonstring", "once", 0, 1800),
-        ("garbage", "once", 0, 1800),
-        ("epipe", "once", 0, 1800),
-        ("missing", "once", 0, 1800),
-        ("big", "once", 0, 1800),
-        ("bigexit", "once", 0, 1800),
-        ("hang", "once", 1900, 4000),
-        ("reply", "skipped", 0, 100),
-        ("reply", "throwing", 0, 100),
+        ("quiet", "once", 10, 0, 9000),
+        ("nonstring", "once", 10, 0, 9000),
+        ("garbage", "once", 10, 0, 9000),
+        ("epipe", "once", 10, 0, 9000),
+        ("missing", "once", 10, 0, 9000),
+        ("big", "once", 10, 0, 9000),
+        ("bigexit", "once", 10, 0, 9000),
+        ("hang", "once", 2, 1900, 4000),
+        ("reply", "skipped", 2, 0, 100),
+        ("reply", "throwing", 2, 0, 100),
     ];
     for (host, file, engine) in cells() {
-        for (stub_mode, scenario, fastest, slowest) in cases {
-            let run = run(host, file, engine, stub_mode, scenario);
+        for (stub_mode, scenario, timeout, fastest, slowest) in cases {
+            let run = run_with(host, file, engine, stub_mode, scenario, timeout);
             let [(answer, ms)] = run.answers.as_slice() else {
                 panic!("{host} {engine} {stub_mode}: {:?}", run.answers);
             };
