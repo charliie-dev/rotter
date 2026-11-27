@@ -311,6 +311,9 @@ worktree 登記的 linked worktree（登記項目位在主 repo 的 `worktrees/`
 worktree，而 worktree 的 `.git` 是一般檔案）。`--root` 指向 repo 的子目錄時，該 repo 不在範圍內。擷取時會
 確認讀到的仍是檢查過的那個 repo。這是防止模型讀到範圍外 repo 的界線，不是沙箱：能在 root 內同時
 改動檔案系統的程式，仍可能在檢查與讀取之間把路徑換掉；linked worktree 的共用 git 目錄也不在檢查範圍。
+檢查只看 top level、git 目錄與共用 git 目錄的位置，不看 git 目錄的內容：其中的 `objects`、`refs`
+若是指向 root 外的 symlink，或 `objects/info/alternates` 指向 root 外的物件庫，git 仍會讀到外部 repo
+的資料。
 
 | 功能 | 內容 |
 | --- | --- |
