@@ -201,7 +201,7 @@ functions = ["function_declaration"]
 function_values = ["function_definition"]
 attributes = []
 comments = ["comment"]            # 預設 ["comment"]
-directives = { "---@" = "lua_annotation" }   # 註解前綴 → directive 標籤
+directives = { "---@" = "lua_annotation" }   # 註解前綴 → directive 標籤；標籤 "shebang" 只在第 1 行成立，且與內建 shebang 一樣屬於整個檔案、不歸給下一個單元
 references = true                 # 是否加入同檔案引用，預設 true
 
 [overrides]
