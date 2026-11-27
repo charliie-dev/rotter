@@ -1730,15 +1730,18 @@ fn unsafe_disk_path(top: &Path, relative: &Path) -> Option<Unread> {
     through_symlink(top, relative).then_some(Unread::Symlink)
 }
 
-/// Whether a directory between the top level and `relative` is a symlink.
+/// Whether a directory between the top level and `relative` is a symlink. The outermost comes
+/// first, so nothing past the first symlink is looked up.
 fn through_symlink(top: &Path, relative: &Path) -> bool {
-    relative
+    let mut dirs: Vec<&Path> = relative
         .ancestors()
         .skip(1)
         .filter(|dir| !dir.as_os_str().is_empty())
-        .any(|dir| {
-            fs::symlink_metadata(top.join(dir)).is_ok_and(|meta| meta.file_type().is_symlink())
-        })
+        .collect();
+    dirs.reverse();
+    dirs.into_iter().any(|dir| {
+        fs::symlink_metadata(top.join(dir)).is_ok_and(|meta| meta.file_type().is_symlink())
+    })
 }
 
 /// Git keeps a linked worktree's entry in `<common git directory>/worktrees/` and writes the
