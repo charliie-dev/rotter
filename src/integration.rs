@@ -2688,6 +2688,27 @@ mod tests {
     }
 
     #[test]
+    fn shipped_shim_templates_still_render_their_goldens() {
+        // A file an older rotter wrote stays rotter's only while its template is unchanged.
+        let exe = "/opt/it's \"q\"\\ dir/\u{fc}n\u{ef}/rotter";
+        let goldens = [
+            (&PI, include_str!("../tests/fixtures/shim/pi-v1.golden.ts")),
+            (
+                &LETTA,
+                include_str!("../tests/fixtures/shim/letta-v1.golden.js"),
+            ),
+            (
+                &OPENCODE,
+                include_str!("../tests/fixtures/shim/opencode-v1.golden.js"),
+            ),
+        ];
+        for (host, golden) in goldens {
+            let v1 = templates(host).last().unwrap();
+            assert_eq!(render_template(v1, exe, 90).unwrap(), golden, "{}", host.id);
+        }
+    }
+
+    #[test]
     fn shim_templates_use_only_the_allowed_process_apis() {
         for host in [&PI, &LETTA, &OPENCODE] {
             for template in templates(host) {

@@ -248,7 +248,7 @@ fn golden_renders_are_stable() {
         let golden = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/shim")
             .join(format!(
-                "{host}-v1.golden{}",
+                "{host}-v2.golden{}",
                 &file[file.rfind('.').unwrap()..]
             ));
         assert_eq!(
@@ -292,6 +292,8 @@ fn runtime(tool: &str) -> (PathBuf, String) {
 struct Run {
     engine: String,
     idles: u64,
+    /// OpenCode: the `limit` of each message listing, or null.
+    limits: Vec<Value>,
     answers: Vec<(Value, u64)>,
     calls: Vec<Value>,
     stub: PathBuf,
@@ -373,6 +375,7 @@ fn run_with(
     Run {
         engine: report["engine"].as_str().unwrap().to_owned(),
         idles: report["idles"].as_u64().unwrap(),
+        limits: report["limits"].as_array().unwrap().clone(),
         answers,
         calls,
         stub: stub_dir,
@@ -457,6 +460,60 @@ fn shims_leave_the_cap_to_rotter_and_run_one_at_a_time() {
         // second count that would silence one more); only the concurrent stop did not.
         assert_eq!(run.calls.len(), 5, "{host} {engine}");
         let _ = fs::remove_dir_all(run.stub.parent().unwrap());
+    }
+}
+
+#[test]
+fn shims_run_one_stop_at_a_time_per_session_only() {
+    for (host, file, engine) in cells() {
+        let run = run_with(host, file, engine, "reply", "twosessions", 10);
+        let answers: Vec<&Value> = run.answers.iter().map(|(answer, _)| answer).collect();
+        assert_eq!(answers, [REQUEST, REQUEST], "{host} {engine}");
+        assert_eq!(run.calls.len(), 2, "{host} {engine}");
+        let _ = fs::remove_dir_all(run.stub.parent().unwrap());
+    }
+}
+
+#[test]
+fn shims_end_what_rotter_leaves_holding_stdout() {
+    for (host, file, engine) in cells() {
+        // The stub answers and exits, but its grandchild keeps stdout open: without ending the
+        // group at rotter's exit, the answer would wait for the 10 s timeout and be lost.
+        let run = run_with(host, file, engine, "linger", "once", 10);
+        let pid = fs::read_to_string(run.stub.join("grandchild")).unwrap();
+        let survived = alive(pid.trim());
+        if survived {
+            let _ = Command::new("/bin/kill").args(["-9", pid.trim()]).status();
+        }
+        let [(answer, ms)] = run.answers.as_slice() else {
+            panic!("{host} {engine}: {:?}", run.answers);
+        };
+        assert_eq!(answer, REQUEST, "{host} {engine}");
+        assert!(*ms < 9000, "{host} {engine}: {ms} ms");
+        assert!(!survived, "{host} {engine}: the grandchild {pid} survived");
+        let _ = fs::remove_dir_all(run.stub.parent().unwrap());
+    }
+}
+
+#[test]
+fn opencode_reads_only_the_newest_messages() {
+    for engine in engines("opencode") {
+        // (scenario, limits): the newest 50 hold the turn, then one to check the last message.
+        // A 60-step turn's user message is older than the newest 50, so the whole history is read.
+        for (scenario, limits) in [
+            ("once", serde_json::json!([50, 1])),
+            ("long", serde_json::json!([50, null, 1])),
+        ] {
+            let run = run("opencode", "rotter-review.js", engine, "reply", scenario);
+            assert_eq!(run.answers.len(), 1, "{engine} {scenario}");
+            assert_eq!(run.answers[0].0, REQUEST, "{engine} {scenario}");
+            assert_eq!(
+                Value::from(run.limits.clone()),
+                limits,
+                "{engine} {scenario}"
+            );
+            let _ = fs::remove_dir_all(run.stub.parent().unwrap());
+        }
     }
 }
 

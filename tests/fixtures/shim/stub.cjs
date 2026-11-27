@@ -27,6 +27,14 @@ switch (mode) {
     setTimeout(() => {}, 30000);
     break;
   }
+  case "linger": {
+    record(fs.readFileSync(0, "utf8"));
+    // A grandchild in the same process group that holds stdout open after rotter exits.
+    const child = spawn("/bin/sleep", ["300"], { stdio: ["ignore", "inherit", "ignore"] });
+    fs.writeFileSync(path.join(dir, "grandchild"), String(child.pid));
+    process.stdout.write(reply, () => process.exit(0));
+    break;
+  }
   case "big":
     record(fs.readFileSync(0, "utf8"));
     process.stdout.write(big);

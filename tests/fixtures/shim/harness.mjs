@@ -21,10 +21,12 @@ process.env.GIT_DIR = "/nonexistent/git";
 const module = await import(pathToFileURL(shim).href);
 let handler = null;
 
-// OpenCode: what the stub client was asked to prompt, every session.idle, and every event
-// promise (OpenCode does not await them; the harness waits only to know when a chain ends).
+// OpenCode: what the stub client was asked to prompt, every session.idle, the `limit` of every
+// message listing, and every event promise (OpenCode does not await them; the harness waits only
+// to know when a chain ends).
 const prompts = [];
 let idles = 0;
+const limits = [];
 const events = [];
 const emit = (event) => {
   if (event.type === "session.idle") idles += 1;
@@ -62,9 +64,16 @@ if (host === "pi") {
         if (scenario === "throwing") throw new Error("host API failure");
         return { data: path.id === "child" ? { id: path.id, parentID: "parent" } : { id: path.id } };
       },
+      // Like OpenCode, a `limit` returns only the newest messages, oldest first.
+      async messages({ query } = {}) {
+        limits.push(query?.limit ?? null);
+        const listed = await this.history();
+        const limit = query?.limit;
+        return { data: limit ? listed.data.slice(-limit) : listed.data };
+      },
       // In "laterturn" and "laterthrowing", the user starts and cancels another turn while rotter
       // runs: the second listing (after rotter answered) ends with that cancelled turn, or fails.
-      async messages() {
+      async history() {
         listings += 1;
         if (scenario === "messagesthrowing") throw new Error("host API failure");
         const done = { created: 1, completed: 2 };
@@ -115,7 +124,15 @@ if (host === "pi") {
           orphantool: [tool(undefined, { status: "error", metadata: { interrupted: true } })],
         }[scenario] ?? [];
         const user = { info: { id: "u1", role: "user", time: { created: 0 }, ...first }, parts: [] };
-        return { data: scenario === "nomessages" ? [] : [user, { info: last, parts }] };
+        // A turn of 60 steps: its user message is older than the newest 50 messages.
+        const steps =
+          scenario === "long"
+            ? Array.from({ length: 59 }, (_, step) => ({
+                info: { ...ended, id: `s${step}`, finish: "tool-calls" },
+                parts: [],
+              }))
+            : [];
+        return { data: scenario === "nomessages" ? [] : [user, ...steps, { info: last, parts }] };
       },
       async promptAsync({ path, body }) {
         const [part, ...extra] = body.parts;
@@ -195,6 +212,11 @@ switch (scenario) {
     answers.push(first, second);
     break;
   }
+  case "twosessions": {
+    // Stops of two sessions at once: each runs rotter.
+    answers.push(...(await Promise.all([timed(stop("a")), timed(stop("b"))])));
+    break;
+  }
   case "chain": {
     // OpenCode: one idle, then whatever the injected prompts cause, until nothing is pending.
     const start = Date.now();
@@ -221,6 +243,6 @@ switch (scenario) {
 // Keep the loop alive a while so late callbacks (kills, closes, timers) still run.
 setTimeout(() => {
   const engine = typeof Bun === "undefined" ? `node ${process.versions.node}` : `bun ${Bun.version}`;
-  const report = JSON.stringify({ engine, answers, idles, fired });
+  const report = JSON.stringify({ engine, answers, idles, limits, fired });
   process.stdout.write(`${report}\n`, () => process.exit(0));
 }, 1200);
