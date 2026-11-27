@@ -390,7 +390,27 @@ impl<'t> File<'t> {
         node
     }
 
+    /// The item that an attribute holding `node` decorates: its next sibling past further
+    /// attributes and comments.
+    fn decorated(&self, node: Node<'t>) -> Option<Node<'t>> {
+        let mut attribute = node;
+        while !has(&self.grammar.attribute_kinds, attribute.kind()) {
+            attribute = attribute.parent()?;
+        }
+        let mut next = attribute.next_named_sibling();
+        while let Some(sibling) = next {
+            let kind = sibling.kind();
+            if !has(&self.grammar.attribute_kinds, kind) && !has(&self.grammar.comment_kinds, kind)
+            {
+                return Some(sibling);
+            }
+            next = sibling.next_named_sibling();
+        }
+        None
+    }
+
     fn unit_or_top_level(&self, node: Node<'t>) -> Node<'t> {
+        let node = self.decorated(node).unwrap_or(node);
         self.chain(node)
             .first()
             .copied()
@@ -835,6 +855,46 @@ mod tests {
         );
         let tree = parse_partial(Language::Rust, &broken).unwrap();
         assert_eq!(error_lines(&tree), [1]);
+    }
+
+    /// (kind, name, first line, last line, comment texts) of one unit.
+    type Summary = (String, Option<String>, u64, u64, Vec<String>);
+
+    fn picked(language: Language, source: &str, rows: std::ops::Range<usize>) -> Vec<Summary> {
+        let tree = parse_partial(language, source).unwrap();
+        let grammar = Grammar::builtin(language);
+        let report = units(&grammar, source, &tree, &[Change::Rows(rows)]);
+        report.as_arr().iter().map(summary).collect()
+    }
+
+    fn summary(unit: &Json) -> Summary {
+        let lines = unit.get("range").get("lines").as_arr();
+        (
+            unit.get("kind").as_str().unwrap().to_owned(),
+            unit.get("name").as_str().map(str::to_owned),
+            lines[0].as_u64().unwrap(),
+            lines[1].as_u64().unwrap(),
+            unit.get("comments")
+                .as_arr()
+                .iter()
+                .map(|comment| comment.get("text").as_str().unwrap().to_owned())
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn an_identifier_in_an_attribute_selects_the_item_it_decorates() {
+        let source = "pub fn foo() -> u8 { 2 }\n#[foo]\nfn g() {\n    foo();\n}\n";
+        let found = picked(Language::Rust, source, 0..1);
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert_eq!(found[1].0, "function_item");
+        assert_eq!(found[1].1.as_deref(), Some("g"));
+        assert_eq!((found[1].2, found[1].3), (2, 5));
+        // Past further attributes and comments between the attribute and the item.
+        let source = "pub fn foo() -> u8 { 2 }\n#[foo]\n// c\n#[inline]\nfn g() {}\n";
+        let found = picked(Language::Rust, source, 0..1);
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert_eq!(found[1].1.as_deref(), Some("g"));
     }
 
     #[test]
