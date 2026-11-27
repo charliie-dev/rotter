@@ -1715,9 +1715,11 @@ fn diff_args<'a>(mode: &Mode, tree: &'a str) -> Vec<&'a str> {
 
 /// Why a path the index lists must not be touched on disk, if it must not. Git refuses `..` and
 /// paths through a symlinked directory, but an index written by other means can list them, and
-/// every disk access to such a path (`read_disk`, `drop_stat_only`, `snapshot_entries`) would
-/// leave the working tree. The component check comes first, so the ancestors of a path with `..`
-/// are never looked up: they can lie outside the working tree.
+/// every disk access rotter makes to such a path (`read_disk`, `drop_stat_only`,
+/// `snapshot_entries`) would leave the working tree. Git's own diff in worktree and base modes
+/// still looks such a path up; README lists that among what the root check does not cover. The
+/// component check comes first, so the ancestors of a path with `..` are never looked up: they
+/// can lie outside the working tree.
 fn unsafe_disk_path(top: &Path, relative: &Path) -> Option<Unread> {
     if relative
         .components()

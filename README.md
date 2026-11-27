@@ -313,7 +313,8 @@ worktree，而 worktree 的 `.git` 是一般檔案）。`--root` 指向 repo 的
 改動檔案系統的程式，仍可能在檢查與讀取之間把路徑換掉；linked worktree 的共用 git 目錄也不在檢查範圍。
 檢查只看 top level、git 目錄與共用 git 目錄的位置，不看 git 目錄的內容：其中的 `objects`、`refs`
 若是指向 root 外的 symlink，或 `objects/info/alternates` 指向 root 外的物件庫，git 仍會讀到外部 repo
-的資料。
+的資料。index 也在 git 目錄裡：被改寫成列出 `../x` 這類路徑時，rotter 自己不讀它，但 worktree 與 base
+模式的 `git diff` 仍會查詢甚至讀取該路徑，報告因此可能顯示 root 外的檔案是否存在、與 tree 內檔案多相似。
 
 | 功能 | 內容 |
 | --- | --- |
