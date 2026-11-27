@@ -653,6 +653,127 @@ fn stat_only_check_stops_at_the_run_deadline() {
             .as_str(),
         Some("a.go")
     );
+
+    let mut options = Options::new(Mode::Worktree);
+    options.cancel = Some(Arc::new(std::sync::atomic::AtomicBool::new(true)));
+    let report = extract(&repo.0, &options).unwrap();
+    assert_eq!(
+        report.json.get("files").as_arr().len(),
+        1,
+        "kept unchecked once the run was cancelled"
+    );
+}
+
+#[test]
+fn a_cancelled_run_skips_the_files_it_has_not_started() {
+    let repo = Repo::new();
+    repo.write("a.go", "package p\n");
+    repo.commit();
+    repo.write("a.go", "package p\n\n// F.\nfunc F() {}\n");
+    let mut options = Options::new(Mode::Worktree);
+    options.cancel = Some(Arc::new(std::sync::atomic::AtomicBool::new(true)));
+    let report = extract(&repo.0, &options).unwrap();
+    assert!(!report.complete);
+    let file = &report.json.get("files").as_arr()[0];
+    assert_eq!(
+        file.get("after").get("status").as_str(),
+        Some("parse_timeout"),
+        "{file}"
+    );
+    options.cancel = Some(Arc::new(std::sync::atomic::AtomicBool::new(false)));
+    assert!(extract(&repo.0, &options).unwrap().complete);
+}
+
+#[test]
+fn full_mode_does_not_read_through_a_symlinked_directory() {
+    let repo = Repo::new();
+    repo.write("d/x.go", "package p\n\n// F.\nfunc F() {}\n");
+    repo.commit();
+    let outside = repo.0.with_extension("outside");
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(
+        outside.join("x.go"),
+        "package p\n\n// SECRET outside the repository.\nfunc F() {}\n",
+    )
+    .unwrap();
+    fs::remove_dir_all(repo.0.join("d")).unwrap();
+    std::os::unix::fs::symlink(&outside, repo.0.join("d")).unwrap();
+    let report = repo.extract(Mode::Full, false);
+    let text = report.json.to_string();
+    assert!(!text.contains("SECRET"), "{text}");
+    let file = &report.json.get("files").as_arr()[0];
+    assert_eq!(
+        file.get("after").get("status").as_str(),
+        Some("skipped_symlink"),
+        "{file}"
+    );
+    fs::remove_dir_all(&outside).unwrap();
+}
+
+#[test]
+fn a_path_the_index_lists_outside_the_working_tree_is_not_read() {
+    let repo = Repo::new();
+    let name = format!(
+        "{}-outside.go",
+        repo.0.file_name().unwrap().to_str().unwrap()
+    );
+    let outside = repo.0.parent().unwrap().join(&name);
+    fs::write(
+        &outside,
+        "package p\n\n// SECRET outside the repository.\nfunc F() {}\n",
+    )
+    .unwrap();
+    repo.write(&format!("zz/{name}"), "package p\n");
+    repo.git(&["add", "-A"]);
+    // Git refuses `..` in a path it adds, so the index is rewritten: same length, and a zero
+    // trailing hash, which git does not verify.
+    let index_path = repo.0.join(".git/index");
+    let mut index = fs::read(&index_path).unwrap();
+    let legit = format!("zz/{name}").into_bytes();
+    let at = index
+        .windows(legit.len())
+        .position(|window| window == legit.as_slice())
+        .unwrap();
+    index[at..at + 2].copy_from_slice(b"..");
+    let len = index.len();
+    index[len - 20..].fill(0);
+    fs::write(&index_path, &index).unwrap();
+    assert!(repo.git(&["ls-files"]).contains(&format!("../{name}")));
+
+    let report = repo.extract(Mode::Full, false);
+    let text = report.json.to_string();
+    assert!(!text.contains("SECRET"), "{text}");
+    assert!(!report.complete);
+    let file = &report.json.get("files").as_arr()[0];
+    assert_eq!(
+        file.get("after").get("status").as_str(),
+        Some("read_error"),
+        "{file}"
+    );
+
+    // Whether something exists where the path leads does not show in the report.
+    fs::remove_file(&outside).unwrap();
+    let without = repo.extract(Mode::Full, false);
+    assert_eq!(
+        without.json.to_string(),
+        text,
+        "the same report without the outside file"
+    );
+}
+
+#[test]
+fn a_top_level_other_than_the_expected_one_is_refused() {
+    let repo = Repo::new();
+    repo.write("a.go", "package p\n");
+    repo.commit();
+    let mut options = Options::new(Mode::Worktree);
+    options.expect_top = Some(PathBuf::from("/elsewhere"));
+    let Err(error) = extract(&repo.0, &options) else {
+        panic!("a different top level was accepted");
+    };
+    assert!(error.contains("not the checked repository"), "{error}");
+    options.expect_top = Some(repo.0.canonicalize().unwrap());
+    assert!(extract(&repo.0, &options).is_ok());
 }
 
 #[test]

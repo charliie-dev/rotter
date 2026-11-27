@@ -7,12 +7,19 @@ use crate::config::{
     Kind, Meta, Untrusted, check_symbol, lstat, resolve_trusted, resolve_trusted_entered,
     through_repository, user,
 };
+use std::collections::HashMap;
 use std::fmt;
 use std::fs;
 use std::io::Read;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+
+/// Libraries this process has loaded, by path and symbol. A library is never unloaded (see
+/// `Grammar::open`), and `rotter mcp` builds new grammars per call: without this a call would
+/// open again each external library it uses and leak one more handle. A library's file name
+/// carries its grammar's identity, so the same path is the same grammar.
+static LOADED: OnceLock<Mutex<HashMap<(PathBuf, String), tree_sitter::Language>>> = OnceLock::new();
 
 /// Where an external grammar's C sources come from: `rotter parser install` builds from them, and
 /// a local path is also read, to hash its sources, whenever its library is looked up.
@@ -195,12 +202,24 @@ impl Grammar {
     fn load(&self, symbol: &str) -> Result<tree_sitter::Language, String> {
         let path = self.library()?;
         check_symbol(symbol)?;
+        let mut loaded = LOADED
+            .get_or_init(Mutex::default)
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let key = (path, symbol.to_owned());
+        if let Some(language) = loaded.get(&key) {
+            return Ok(language.clone());
+        }
+        let language = Self::open(&key.0, symbol)?;
+        loaded.insert(key, language.clone());
+        Ok(language)
+    }
+
+    fn open(path: &Path, symbol: &str) -> Result<tree_sitter::Language, String> {
         // SAFETY: the library was built by `rotter parser install` from sources the user enabled,
         // and every directory from / to it is checked; its constructors run here (documented).
-        let library = unsafe { libloading::Library::new(&path) }
+        let library = unsafe { libloading::Library::new(path) }
             .map_err(|error| format!("cannot load {}: {error}", path.display()))?;
-        // Leaked so the returned Language, which points into it, can never outlive it.
-        let library: &'static libloading::Library = Box::leak(Box::new(library));
         // SAFETY: tree-sitter grammars export `const TSLanguage *tree_sitter_<name>(void)`.
         let raw = unsafe {
             let function = library
@@ -214,6 +233,8 @@ impl Grammar {
                 path.display()
             ));
         }
+        // Leaked only now: a failure above closes it; the Language pointing into it stays valid.
+        std::mem::forget(library);
         // SAFETY: a non-null TSLanguage from the grammar; its ABI is checked by set_language.
         Ok(unsafe { tree_sitter::Language::from_raw(raw) })
     }

@@ -1340,3 +1340,72 @@ fn fifo_parser_source_does_not_block_the_hook() {
     assert!(output.contains("could not be analysed"), "{output}");
     assert_eq!(world.status(&repo, "a.lua2"), "parser_not_installed");
 }
+
+/// `rotter mcp` keeps using the external library it loaded: a call after the library on disk is
+/// replaced still parses with it, while a new process cannot load the replacement. The dynamic
+/// loader may hand back the loaded image for the same path too, so this does not tell its cache
+/// from rotter's.
+#[test]
+fn mcp_keeps_using_the_library_it_loaded() {
+    use std::io::{BufRead, BufReader, Write};
+    let world = World::new("mcp-load");
+    let src = world.root.join("lua-src");
+    copy_lua(&src);
+    world.write_config(&lua2(&src));
+    let repo = repo(&world.root, &[("a.lua2", "-- A.\nlocal a = 1\n")]);
+    ok(&world.install(&["lua2"]));
+    let library = fs::read_dir(world.parsers())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.extension()
+                .is_some_and(|ext| ext == "so" || ext == "dylib")
+        })
+        .unwrap();
+    let root = repo.display().to_string();
+    let mut child = world
+        .command(&["mcp", "--root", &root])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    // Lines are read on another thread so a server that never answers fails the test instead of
+    // hanging it.
+    let stdout = BufReader::new(child.stdout.take().unwrap());
+    let (lines, responses) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in stdout.lines() {
+            if lines.send(line.unwrap()).is_err() {
+                return;
+            }
+        }
+    });
+    let mut call = |id: i64| -> Value {
+        let request = serde_json::json!({ "jsonrpc": "2.0", "id": id, "method": "tools/call",
+            "params": { "name": "extract", "arguments": { "mode": "full", "directory": root },
+                "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientCapabilities": {} } } });
+        writeln!(stdin, "{request}").unwrap();
+        let line = responses
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("the server answered");
+        let response: Value = serde_json::from_str(&line).unwrap();
+        response["result"]["structuredContent"]["files"][0]["after"]["status"].clone()
+    };
+    assert_eq!(call(1), "ok");
+    // A new file renamed over the old one, as `rotter parser install` does: truncating the file
+    // the server has mapped would fault it on Linux instead of testing the cache.
+    let replacement = library.with_extension("replacement");
+    fs::write(&replacement, b"not a library").unwrap();
+    fs::set_permissions(&replacement, fs::Permissions::from_mode(0o644)).unwrap();
+    fs::rename(&replacement, &library).unwrap();
+    assert_eq!(call(2), "ok", "the second call reused the loaded library");
+    drop(stdin);
+    assert!(child.wait().unwrap().success());
+    assert_ne!(
+        world.status(&repo, "a.lua2"),
+        "ok",
+        "a new process cannot load it"
+    );
+}

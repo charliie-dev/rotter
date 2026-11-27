@@ -14,7 +14,7 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Which pair of snapshots to compare; there is deliberately no default.
@@ -44,6 +44,11 @@ pub struct Options {
     pub parse_timeout: Duration,
     /// Soft run-wide deadline: files not started by then are skipped as `parse_timeout`.
     pub deadline: Option<Instant>,
+    /// Set from another thread to end the run as if its deadline had passed.
+    pub cancel: Option<Arc<AtomicBool>>,
+    /// The top level a caller already checked; finding another one is an error before anything
+    /// in it is read.
+    pub expect_top: Option<PathBuf>,
 }
 
 impl Options {
@@ -57,7 +62,15 @@ impl Options {
             grammars: Languages::default(),
             parse_timeout: Duration::from_secs(crate::config::DEFAULT_PARSE_TIMEOUT),
             deadline: None,
+            cancel: None,
+            expect_top: None,
         }
+    }
+
+    fn cancelled(&self) -> bool {
+        self.cancel
+            .as_ref()
+            .is_some_and(|cancel| cancel.load(Ordering::Relaxed))
     }
 }
 
@@ -595,6 +608,24 @@ fn git_text(git: &Git, dir: &Path, guard: &[String], args: &[&str]) -> Result<St
         .map_err(|_| "git printed non-UTF-8 output".to_owned())
 }
 
+pub fn git_dir(git: &Git, top: &Path) -> Result<PathBuf, String> {
+    Ok(PathBuf::from(git_text(
+        git,
+        top,
+        &[],
+        &["rev-parse", "--absolute-git-dir"],
+    )?))
+}
+
+pub fn common_dir(git: &Git, top: &Path) -> Result<PathBuf, String> {
+    Ok(PathBuf::from(git_text(
+        git,
+        top,
+        &[],
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )?))
+}
+
 /// The repository's top-level directory as git reports it; git's version is checked first, and
 /// a top level holding the chosen git or its PATH entries stops the run.
 pub fn toplevel(git: &Git, dir: &Path) -> Result<PathBuf, String> {
@@ -696,14 +727,15 @@ const HASH_BATCH: usize = 500;
 
 /// Drops the entries that differ from their before blob only in stat data. Each candidate is read
 /// through rotter's own no-follow descriptor into a private scratch copy, and the copies are
-/// hashed without filters, many per git call; any doubt keeps the entry. Once `deadline` passes
-/// the remaining candidates are kept unchecked, so the run still ends near its deadline.
+/// hashed without filters, many per git call; any doubt keeps the entry. Once `passed` (the run's
+/// deadline or its cancellation) is true the remaining candidates are kept unchecked, so the run
+/// still ends soon after.
 fn drop_stat_only(
     git: &Git,
     top: &Path,
     entries: &mut Vec<Entry>,
     guard: &[String],
-    deadline: Option<Instant>,
+    passed: &dyn Fn() -> bool,
 ) -> Result<(), String> {
     let candidates: Vec<(usize, &str)> = entries
         .iter()
@@ -714,7 +746,6 @@ fn drop_stat_only(
         return Ok(());
     }
     let dir = git.scratch.diff_dir()?;
-    let passed = || deadline.is_some_and(|deadline| Instant::now() >= deadline);
     let mut dropped = vec![false; entries.len()];
     for batch in candidates.chunks(HASH_BATCH) {
         if passed() {
@@ -728,7 +759,11 @@ fn drop_stat_only(
             let Some((path, _)) = stat_candidate(&entries[*index]) else {
                 continue;
             };
-            let Ok(Some(mut file)) = open_regular(&top.join(OsStr::from_bytes(path))) else {
+            let relative = Path::new(OsStr::from_bytes(path));
+            if unsafe_disk_path(top, relative).is_some() {
+                continue;
+            }
+            let Ok(Some(mut file)) = open_regular(&top.join(relative)) else {
                 continue;
             };
             let mut bytes = Vec::new();
@@ -1169,15 +1204,19 @@ impl Run<'_> {
         let args = args_with(&diff_args(&self.options.mode, tree), specs);
         let mut entries = parse_raw(&git_in(git, dir, &args, None, &[0], index, guard)?)?;
         if matches!(self.options.mode, Mode::Worktree | Mode::Base(_)) {
-            drop_stat_only(git, self.top, &mut entries, guard, self.options.deadline)?;
+            drop_stat_only(git, self.top, &mut entries, guard, &|| {
+                self.deadline_passed()
+            })?;
         }
         Ok(entries)
     }
 
     fn deadline_passed(&self) -> bool {
-        self.options
-            .deadline
-            .is_some_and(|deadline| Instant::now() >= deadline)
+        self.options.cancelled()
+            || self
+                .options
+                .deadline
+                .is_some_and(|deadline| Instant::now() >= deadline)
     }
 
     fn load(&self, path: &[u8], mode: &str, source: Source<'_>) -> Side {
@@ -1290,6 +1329,9 @@ impl Run<'_> {
     }
 
     fn read_disk(&self, relative: &Path, detected: &Detected) -> Result<Vec<u8>, Unread> {
+        if let Some(unread) = unsafe_disk_path(self.top, relative) {
+            return Err(unread);
+        }
         let full = self.top.join(relative);
         let meta = fs::symlink_metadata(&full).map_err(|error| Unread::Error(error.to_string()))?;
         if meta.file_type().is_symlink() {
@@ -1465,6 +1507,16 @@ pub fn extract(dir: &Path, options: &Options) -> Result<Report, String> {
 /// holds the index copy).
 pub fn extract_with(git: &Git, dir: &Path, options: &Options) -> Result<Report, String> {
     let top = toplevel(git, dir)?;
+    if let Some(expected) = &options.expect_top
+        && *expected != top
+    {
+        return Err(format!(
+            "{} now belongs to {}, not the checked repository {}",
+            dir.display(),
+            top.display(),
+            expected.display()
+        ));
+    }
     // Before any object is read: the promisor gate for older git, then the filter and hook
     // resets that every later call carries.
     let (class, version) = git.class()?;
@@ -1661,7 +1713,74 @@ fn diff_args<'a>(mode: &Mode, tree: &'a str) -> Vec<&'a str> {
     args
 }
 
-/// One `F` entry per tracked file still on disk, from `git ls-files -s -z` output.
+/// Why a path the index lists must not be touched on disk, if it must not. Git refuses `..` and
+/// paths through a symlinked directory, but an index written by other means can list them, and
+/// every disk access rotter makes to such a path (`read_disk`, `drop_stat_only`,
+/// `snapshot_entries`) would leave the working tree. Git's own diff in worktree and base modes
+/// still looks such a path up; README lists that among what the root check does not cover. The
+/// component check comes first, so the ancestors of a path with `..` are never looked up: they
+/// can lie outside the working tree.
+fn unsafe_disk_path(top: &Path, relative: &Path) -> Option<Unread> {
+    if relative
+        .components()
+        .any(|part| !matches!(part, std::path::Component::Normal(_)))
+    {
+        return Some(Unread::Error(
+            "the index names a path outside the working tree".to_owned(),
+        ));
+    }
+    through_symlink(top, relative).then_some(Unread::Symlink)
+}
+
+/// Whether a directory between the top level and `relative` is a symlink. The outermost comes
+/// first, so nothing past the first symlink is looked up.
+fn through_symlink(top: &Path, relative: &Path) -> bool {
+    let mut dirs: Vec<&Path> = relative
+        .ancestors()
+        .skip(1)
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .collect();
+    dirs.reverse();
+    dirs.into_iter().any(|dir| {
+        fs::symlink_metadata(top.join(dir)).is_ok_and(|meta| meta.file_type().is_symlink())
+    })
+}
+
+/// Git keeps a linked worktree's entry in `<common git directory>/worktrees/` and writes the
+/// worktree's `.git` path into the entry's `gitdir` file. A `.git` file someone points at another
+/// repository has no entry pointing back, and an entry someone writes elsewhere, with a
+/// `commondir` of its choice, is not one a repository keeps. Git writes that `.git` as a regular
+/// file, so a symlink in its place is not what git registered.
+pub fn registered_worktree(git_dir: &Path, common: &Path, top: &Path) -> bool {
+    let resolved = |path: &Path| path.canonicalize().ok();
+    let kept = git_dir
+        .parent()
+        .and_then(resolved)
+        .is_some_and(|parent| Some(parent) == resolved(&common.join("worktrees")));
+    let is_file = fs::symlink_metadata(top.join(".git")).is_ok_and(|meta| meta.is_file());
+    if !kept || !is_file {
+        return false;
+    }
+    // The entry can be anything a `.git` file names: no link is followed, a FIFO is not waited
+    // on, and only a path's worth is read.
+    let Ok(Some(file)) = open_regular(&git_dir.join("gitdir")) else {
+        return false;
+    };
+    let mut back = String::new();
+    if file.take(4096).read_to_string(&mut back).is_err() {
+        return false;
+    }
+    // A relative entry (`git worktree add --relative-paths`) is relative to the entry's directory.
+    let back = git_dir.join(back.trim_end());
+    back.file_name() == Some(OsStr::new(".git"))
+        && back
+            .parent()
+            .and_then(resolved)
+            .is_some_and(|worktree| Some(worktree) == resolved(top))
+}
+
+/// One `F` entry per tracked file still on disk, and per path that must not be looked up on disk,
+/// from `git ls-files -s -z` output.
 fn snapshot_entries(top: &Path, listed: &[u8]) -> Result<Vec<Entry>, String> {
     let mut entries: Vec<Entry> = Vec::new();
     for record in listed
@@ -1674,8 +1793,12 @@ fn snapshot_entries(top: &Path, listed: &[u8]) -> Result<Vec<Entry>, String> {
             .ok_or("unexpected ls-files record")?;
         let mode = String::from_utf8_lossy(&record[..6]).into_owned();
         let path = record[tab + 1..].to_vec();
-        // Tracked files deleted from the working tree are not part of this snapshot.
-        let on_disk = fs::symlink_metadata(top.join(OsStr::from_bytes(&path))).is_ok();
+        // Tracked files deleted from the working tree are not part of this snapshot. A path that
+        // must not be read is kept, for read_disk to report, so the report never shows whether
+        // something exists where it leads.
+        let relative = Path::new(OsStr::from_bytes(&path));
+        let on_disk = unsafe_disk_path(top, relative).is_some()
+            || fs::symlink_metadata(top.join(relative)).is_ok();
         if on_disk
             && entries
                 .last()
@@ -1782,8 +1905,9 @@ fn report_json(
 #[cfg(test)]
 mod tests {
     use super::{
-        Change, Git, GitClass, Hunk, changes, classify, diff, guard_args, identity, linux_native,
-        macos_native, parse_raw, select, temp_root, timeout_detail, walk, write_new,
+        Change, Entry, Git, GitClass, Hunk, changes, classify, diff, drop_stat_only, guard_args,
+        identity, linux_native, macos_native, parse_raw, select, temp_root, timeout_detail, walk,
+        write_new,
     };
     use std::ffi::OsString;
     use std::fs;
@@ -1797,6 +1921,66 @@ mod tests {
         fs::create_dir_all(&path).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
         fs::canonicalize(path).unwrap()
+    }
+
+    #[test]
+    fn stat_only_checks_never_read_a_path_that_leaves_the_working_tree() {
+        let root = temp("stat-escape");
+        let repo = root.join("repo");
+        fs::create_dir(&repo).unwrap();
+        let status = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&repo)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let content = "package p\n";
+        for file in [root.join("x.go"), repo.join("y.go")] {
+            fs::write(file, content).unwrap();
+        }
+        symlink(&root, repo.join("link")).unwrap();
+        let oid = String::from_utf8(
+            std::process::Command::new("git")
+                .args(["hash-object", "--stdin"])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .and_then(|mut child| {
+                    use std::io::Write;
+                    child.stdin.take().unwrap().write_all(content.as_bytes())?;
+                    child.wait_with_output()
+                })
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_owned();
+        let entry = |path: &str| Entry {
+            status: "M".to_owned(),
+            old: Some((path.as_bytes().to_vec(), "100644".to_owned(), oid.clone())),
+            new: Some((
+                path.as_bytes().to_vec(),
+                "100644".to_owned(),
+                "0".repeat(oid.len()),
+            )),
+        };
+        let git = Git::cli(&repo).unwrap();
+        // Content equal to the before blob would drop the entry; outside the tree it is never read.
+        let mut entries = vec![entry("../x.go"), entry("link/x.go"), entry("y.go")];
+        drop_stat_only(&git, &repo, &mut entries, &[], &|| false).unwrap();
+        let kept: Vec<_> = entries
+            .iter()
+            .map(|entry| String::from_utf8_lossy(&entry.new.as_ref().unwrap().0).into_owned())
+            .collect();
+        assert_eq!(
+            kept,
+            ["../x.go", "link/x.go"],
+            "y.go is the positive control"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

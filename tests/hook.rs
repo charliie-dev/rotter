@@ -200,11 +200,19 @@ fn finish_env(config: &Path, mut command: Command, env: &[(&str, Option<&str>)])
             None => command.env_remove(key),
         };
     }
-    let child = command
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    // A test that just copied the binary can still have it open for writing in a child another
+    // test thread forked; until that child execs, exec of the copy fails with ETXTBSY.
+    let mut tries = 0;
+    let child = loop {
+        match command.spawn() {
+            Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy && tries < 50 => {
+                tries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            spawned => break spawned.unwrap(),
+        }
+    };
     let output = wait(child, "rotter integration");
     let text =
         String::from_utf8(output.stdout).unwrap() + &String::from_utf8(output.stderr).unwrap();
