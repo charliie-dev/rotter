@@ -11,7 +11,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fmt::Write;
 
-/// `--color=<auto|always|never>`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Color {
     Auto,
@@ -228,7 +227,6 @@ pub fn status(status: &Status, color: bool) -> String {
     finish(lines)
 }
 
-/// `rotter integration install|uninstall`.
 pub fn integration(done: &IntegrationResult, color: bool) -> String {
     let style = Style(color);
     let result = match done.result {

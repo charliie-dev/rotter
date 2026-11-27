@@ -35,7 +35,6 @@ pub enum Language {
 }
 
 impl Language {
-    /// Parses a `--lang` value.
     pub fn from_name(name: &str) -> Option<(Self, &'static str)> {
         Some(match name {
             "go" => (Self::Go, "go-by-override"),

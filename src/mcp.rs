@@ -42,7 +42,6 @@ type Pending = Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>;
 /// line is a request.
 type Read = (Vec<u8>, Option<(String, Arc<AtomicBool>)>);
 
-/// Tells a model that got the skill through MCP how its CLI steps map onto the `extract` tool.
 const MCP_GUIDE: &str = "You reach rotter through MCP: call the `extract` tool where the steps \
 below run `rotter extract`. The mode flags become `mode` (`staged`, `worktree`, `full`, or `base` \
 with the revision in `base`); `-C <dir>` becomes `directory`, `-- <pathspec>...` becomes `paths`, \
@@ -59,7 +58,6 @@ impl RpcError {
     }
 }
 
-/// Serves requests read from `input` until it ends, writing every message to `output`.
 pub fn serve<R, W>(input: R, mut output: W, extract: Extract, skill: &str) -> std::io::Result<()>
 where
     R: BufRead + Send + 'static,
@@ -162,7 +160,6 @@ fn is_request_id(id: &Value) -> bool {
     id.is_string() || id.is_i64() || id.is_u64()
 }
 
-/// The key of a request's id, or None when the line is not a request.
 fn request_key(line: &[u8]) -> Option<String> {
     let message = serde_json::from_slice::<Value>(line).ok()?;
     message["method"].as_str()?;
@@ -325,7 +322,6 @@ fn no_cursor(params: &Map<String, Value>) -> Result<(), RpcError> {
     }
 }
 
-/// Adds the fields every result carries.
 fn complete(mut result: Value) -> Value {
     result["resultType"] = "complete".into();
     result["_meta"] = json!({
@@ -577,7 +573,6 @@ mod tests {
         json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params })
     }
 
-    /// Serves `input` as it stands; returns the responses.
     fn serve_bytes(input: &[u8], extract: &Extract<'_>) -> Vec<Value> {
         let mut output = Vec::new();
         let ignoring = |args, _| extract(args);
@@ -588,7 +583,6 @@ mod tests {
             .collect()
     }
 
-    /// Serves `lines`, one message per line; returns the responses.
     fn run(lines: &[Value], extract: &Extract<'_>) -> Vec<Value> {
         let input: String = lines.iter().map(|line| format!("{line}\n")).collect();
         serve_bytes(input.as_bytes(), extract)

@@ -1,6 +1,5 @@
 use std::fmt::{self, Write};
 
-/// Minimal JSON value; the report is small enough that a dependency is not worth it.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Json {
     Null,

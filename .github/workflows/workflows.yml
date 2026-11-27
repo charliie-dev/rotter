@@ -1,5 +1,4 @@
-# Only when a pull request changes something under .github/ or mise.toml (where both tools are
-# pinned).
+# mise.toml is among the paths because both tools are pinned there.
 name: workflows
 
 on:

@@ -1,5 +1,3 @@
-//! `rotter mcp` end to end: the binary on a real repository, over stdin and stdout.
-
 mod common;
 
 use serde_json::{Value, json};
@@ -44,7 +42,6 @@ fn mcp_serves_extract_and_the_skill_until_stdin_closes() {
     let output = common::rotter(&root, &["mcp"], &root, &input, &[]);
     assert_eq!(output.status.code(), Some(0), "{output:?}");
     let stdout = String::from_utf8(output.stdout).unwrap();
-    // stdout carries only the four responses, one JSON object per line.
     let responses: Vec<Value> = stdout
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
@@ -128,7 +125,6 @@ fn mcp_reads_only_repositories_under_its_roots() {
     let other = root.join("other");
     common::changed_repo(&allowed);
     common::changed_repo(&other);
-    // A `.git` file inside the root that points at the other repository.
     let pointer = allowed.join("pointer");
     fs::create_dir_all(&pointer).unwrap();
     fs::write(
@@ -136,7 +132,6 @@ fn mcp_reads_only_repositories_under_its_roots() {
         format!("gitdir: {}\n", other.join(".git").display()),
     )
     .unwrap();
-    // A symlink inside the root that leads out of it.
     std::os::unix::fs::symlink(&other, allowed.join("link")).unwrap();
     // A worktree of the other repository, inside the root: git registered it there.
     common::git(
@@ -197,7 +192,6 @@ fn mcp_reads_only_repositories_under_its_roots() {
         format!("{}\n", other.join(".git").display()),
     )
     .unwrap();
-    // A worktree of the repository inside the root.
     let inner = allowed.join("inner");
     common::git(
         &allowed,
@@ -440,7 +434,6 @@ fn mcp_cancellation_stops_a_running_extract() {
     fs::remove_dir_all(&root).unwrap();
 }
 
-/// A worktree entry whose `gitdir` is a FIFO: the server must answer instead of waiting on it.
 #[test]
 fn mcp_does_not_wait_on_a_fifo_worktree_entry() {
     use std::io::Write;
