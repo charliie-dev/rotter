@@ -1129,6 +1129,97 @@ fn an_omitted_unit_stays_counted_when_only_a_nested_unit_is_selected() {
 }
 
 #[test]
+fn a_changed_unit_inside_another_still_pulls_in_its_users() {
+    let repo = Repo::new();
+    let source = |header: &str, value: u8| {
+        format!(
+            "struct C;\nimpl{header} C {{\n    fn runner() -> u32 {{ {value} }}\n}}\nfn u1() {{ C::runner(); }}\nfn u2() {{ C::runner(); }}\nfn u3() {{ C::runner(); }}\n"
+        )
+    };
+    repo.write("a.rs", &source("", 1));
+    repo.commit();
+    // The impl header and runner's body both change: the report keeps the impl.
+    repo.write("a.rs", &source("<T>", 2));
+    let report = repo.extract(Mode::Worktree, false);
+    let after = file(&report.json, "a.rs").get("after");
+    let users: Vec<_> = after
+        .get("units")
+        .as_arr()
+        .iter()
+        .filter(|unit| unit.get("selected_by").as_str() == Some("reference"))
+        .map(|unit| {
+            (
+                unit.get("name").as_str().unwrap().to_owned(),
+                unit.get("referenced_name").as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    let expected: Vec<_> = ["u1", "u2", "u3"]
+        .iter()
+        .map(|name| ((*name).to_owned(), "runner".to_owned()))
+        .collect();
+    assert_eq!(users, expected, "{after}");
+}
+
+#[test]
+fn the_declaration_order_does_not_change_which_references_are_shown() {
+    let repo = Repo::new();
+    let outer = "fn outer() -> u8 {\n    bar();\n    fn inner() -> u8 { foo() }\n    0\n}\n";
+    let source = |first: &str, second: &str, value: u8| {
+        format!(
+            "pub fn {first}() -> u8 {{ {value} }}\npub fn {second}() -> u8 {{ {value} }}\n{outer}"
+        )
+    };
+    repo.write("a.rs", &source("foo", "bar", 1));
+    repo.write("b.rs", &source("bar", "foo", 1));
+    repo.commit();
+    repo.write("a.rs", &source("foo", "bar", 2));
+    repo.write("b.rs", &source("bar", "foo", 2));
+    let report = repo.extract(Mode::Worktree, false);
+    for path in ["a.rs", "b.rs"] {
+        let after = file(&report.json, path).get("after");
+        let shown: Vec<_> = after
+            .get("units")
+            .as_arr()
+            .iter()
+            .filter(|unit| unit.get("selected_by").as_str() == Some("reference"))
+            .map(|unit| unit.get("name").as_str().unwrap().to_owned())
+            .collect();
+        // The enclosing unit shows both uses; the nested one would leave out outer's use of bar.
+        assert_eq!(shown, ["outer"], "{path}");
+        for name in ["foo", "bar"] {
+            let changed = unit(after, name);
+            assert_eq!(
+                changed.get("omitted_reference_units").as_u64(),
+                Some(0),
+                "{path} {name}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_user_that_holds_the_changed_unit_is_counted_not_shown() {
+    let repo = Repo::new();
+    // `run!();` sits in mod m itself, so its unit is the mod, which holds the changed run.
+    let source =
+        |value: u8| format!("mod m {{\n    pub fn run() -> u8 {{ {value} }}\n    run!();\n}}\n");
+    repo.write("a.rs", &source(1));
+    repo.commit();
+    repo.write("a.rs", &source(2));
+    let report = repo.extract(Mode::Worktree, false);
+    let after = file(&report.json, "a.rs").get("after");
+    let units = after.get("units").as_arr();
+    assert_eq!(units.len(), 1, "{after}");
+    let run = unit(after, "run");
+    assert_eq!(
+        run.get("omitted_reference_units").as_u64(),
+        Some(1),
+        "{after}"
+    );
+}
+
+#[test]
 fn nested_omitted_units_are_counted_separately() {
     let repo = Repo::new();
     // Past foo's cap, `outer` and the `inner` nested in it both use foo. With bar changed too,
