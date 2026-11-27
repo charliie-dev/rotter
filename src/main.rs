@@ -3,7 +3,7 @@ use rotter::json::Json;
 use rotter::render::{self, Color, clean};
 use rotter::{
     Git, Mode, Options, Report, common_dir, extract_with, git_dir, hosts, install, integration,
-    mcp, toplevel,
+    mcp, registered_worktree, toplevel,
 };
 use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
@@ -312,39 +312,16 @@ fn check_repository(roots: &[PathBuf], git: &Git, top: &Path) -> Result<(), Stri
     if registered_worktree(&git_dir, &common, top) {
         return Ok(());
     }
-    for dir in [git_dir, common] {
+    for (what, dir) in [("git directory", git_dir), ("common git directory", common)] {
         if within(roots, &dir).is_err() {
             return Err(format!(
-                "the git directory {} of {} is outside the roots this server may read",
+                "the {what} {} of {} is outside the roots this server may read",
                 dir.display(),
                 top.display()
             ));
         }
     }
     Ok(())
-}
-
-/// Git keeps a linked worktree's entry in `<common git directory>/worktrees/` and writes the
-/// worktree's `.git` path into the entry's `gitdir` file. A `.git` file someone points at another
-/// repository has no entry pointing back, and an entry someone writes elsewhere, with a
-/// `commondir` of its choice, is not one a repository keeps. Git writes that `.git` as a regular
-/// file, so a symlink in its place is not what git registered.
-fn registered_worktree(git_dir: &Path, common: &Path, top: &Path) -> bool {
-    let kept = git_dir
-        .parent()
-        .map(canonical)
-        .is_some_and(|parent| parent.is_ok() && parent == canonical(&common.join("worktrees")));
-    let is_file =
-        kept && std::fs::symlink_metadata(top.join(".git")).is_ok_and(|meta| meta.is_file());
-    let Ok(back) = std::fs::read_to_string(git_dir.join("gitdir")) else {
-        return false;
-    };
-    // A relative entry (`git worktree add --relative-paths`) is relative to the entry's directory.
-    let back = git_dir.join(back.trim_end());
-    let worktree = back.parent().map(canonical);
-    is_file
-        && back.file_name() == Some(std::ffi::OsStr::new(".git"))
-        && worktree.is_some_and(|worktree| worktree.is_ok() && worktree == canonical(top))
 }
 
 fn within(roots: &[PathBuf], path: &Path) -> Result<(), String> {

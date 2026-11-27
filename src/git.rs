@@ -1741,6 +1741,39 @@ fn through_symlink(top: &Path, relative: &Path) -> bool {
         })
 }
 
+/// Git keeps a linked worktree's entry in `<common git directory>/worktrees/` and writes the
+/// worktree's `.git` path into the entry's `gitdir` file. A `.git` file someone points at another
+/// repository has no entry pointing back, and an entry someone writes elsewhere, with a
+/// `commondir` of its choice, is not one a repository keeps. Git writes that `.git` as a regular
+/// file, so a symlink in its place is not what git registered.
+pub fn registered_worktree(git_dir: &Path, common: &Path, top: &Path) -> bool {
+    let resolved = |path: &Path| path.canonicalize().ok();
+    let kept = git_dir
+        .parent()
+        .and_then(resolved)
+        .is_some_and(|parent| Some(parent) == resolved(&common.join("worktrees")));
+    let is_file = fs::symlink_metadata(top.join(".git")).is_ok_and(|meta| meta.is_file());
+    if !kept || !is_file {
+        return false;
+    }
+    // The entry can be anything a `.git` file names: no link is followed, a FIFO is not waited
+    // on, and only a path's worth is read.
+    let Ok(Some(file)) = open_regular(&git_dir.join("gitdir")) else {
+        return false;
+    };
+    let mut back = String::new();
+    if file.take(4096).read_to_string(&mut back).is_err() {
+        return false;
+    }
+    // A relative entry (`git worktree add --relative-paths`) is relative to the entry's directory.
+    let back = git_dir.join(back.trim_end());
+    back.file_name() == Some(OsStr::new(".git"))
+        && back
+            .parent()
+            .and_then(resolved)
+            .is_some_and(|worktree| Some(worktree) == resolved(top))
+}
+
 /// One `F` entry per tracked file still on disk, and per path that must not be looked up on disk,
 /// from `git ls-files -s -z` output.
 fn snapshot_entries(top: &Path, listed: &[u8]) -> Result<Vec<Entry>, String> {

@@ -10,7 +10,10 @@ pub mod mcp;
 pub mod render;
 
 pub use comments::{Change, error_lines, full_units, units};
-pub use git::{Git, Mode, Options, Report, common_dir, extract, extract_with, git_dir, toplevel};
+pub use git::{
+    Git, Mode, Options, Report, common_dir, extract, extract_with, git_dir, registered_worktree,
+    toplevel,
+};
 pub use grammar::{ExternalSource, Grammar, Languages};
 
 use std::collections::HashSet;

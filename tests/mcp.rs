@@ -439,3 +439,61 @@ fn mcp_cancellation_stops_a_running_extract() {
     );
     fs::remove_dir_all(&root).unwrap();
 }
+
+/// A worktree entry whose `gitdir` is a FIFO: the server must answer instead of waiting on it.
+#[test]
+fn mcp_does_not_wait_on_a_fifo_worktree_entry() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+    let root = common::temp("mcp-fifo");
+    let allowed = root.join("allowed");
+    let common_dir = allowed.join("fake.git");
+    fs::create_dir_all(&allowed).unwrap();
+    common::git(
+        &allowed,
+        &["init", "-q", "--bare", "-b", "main", "fake.git"],
+    );
+    let entry = common_dir.join("worktrees/e");
+    fs::create_dir_all(&entry).unwrap();
+    fs::write(entry.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+    fs::write(entry.join("commondir"), "../..\n").unwrap();
+    let status = Command::new("mkfifo")
+        .arg(entry.join("gitdir"))
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let worktree = allowed.join("wt");
+    fs::create_dir_all(&worktree).unwrap();
+    fs::write(
+        worktree.join(".git"),
+        format!("gitdir: {}\n", entry.display()),
+    )
+    .unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rotter"))
+        .args(["mcp", "--root", &allowed.display().to_string()])
+        .current_dir(&root)
+        .env("HOME", root.join("home"))
+        .env("XDG_CONFIG_HOME", root.join("xdg-config"))
+        .env("XDG_CACHE_HOME", root.join("xdg-cache"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    write!(stdin, "{}", call(1, &worktree)).unwrap();
+    drop(stdin);
+    let start = Instant::now();
+    while child.try_wait().unwrap().is_none() {
+        if start.elapsed() > Duration::from_secs(30) {
+            child.kill().unwrap();
+            panic!("the server waited on the FIFO");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let output = child.wait_with_output().unwrap();
+    let lines = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(lines.lines().count(), 1, "one response: {lines}");
+    fs::remove_dir_all(&root).unwrap();
+}
