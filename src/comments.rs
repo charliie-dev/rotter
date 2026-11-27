@@ -1,6 +1,7 @@
 use crate::json::Json;
 use crate::{Grammar, Language};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::Range;
 use tree_sitter::{Node, Point, Tree};
 
@@ -182,78 +183,117 @@ pub fn units(grammar: &Grammar, source: &str, tree: &Tree, changes: &[Change]) -
     }
 
     // Keep only outermost selections; nested ones are already inside their container's text.
+    // A nested one still names what changed, so its name looks for users too.
     let mut kept: Vec<Selected<'_>> = Vec::new();
+    let mut nested: Vec<(usize, Node<'_>)> = Vec::new();
     for (_, item) in selected {
-        match kept.iter_mut().find(|outer| {
-            file.start_byte(outer.node) <= file.start_byte(item.node)
-                && item.node.end_byte() <= outer.node.end_byte()
-        }) {
-            Some(outer) => {
+        match kept
+            .iter()
+            .position(|outer| file.contains(outer.node, item.node))
+        {
+            Some(index) => {
+                if file.code_changed(&item) {
+                    nested.push((index, item.node));
+                }
+                let outer = &mut kept[index];
                 outer.changed.extend(item.changed);
                 outer.gaps.extend(item.gaps);
             }
             None => kept.push(item),
         }
     }
-
-    // Units elsewhere in the file that use a changed name; their comments may describe it.
-    let overlaps = |a: Node<'_>, b: Node<'_>| {
-        file.start_byte(a) < b.end_byte() && file.start_byte(b) < a.end_byte()
-    };
-    // Only a selection that contains a unit shows its text; one nested inside it does not.
-    let contains = |outer: Node<'_>, inner: Node<'_>| {
-        file.start_byte(outer) <= file.start_byte(inner) && inner.end_byte() <= outer.end_byte()
-    };
-    let mut references: Vec<Selected<'_>> = Vec::new();
-    // Per changed unit, the units past its cap; settled once every changed unit has picked its
-    // references, since another changed unit may select one of them, or a unit containing it,
-    // after all.
-    let mut omitted_by: Vec<(usize, Vec<Node<'_>>)> = Vec::new();
-    for index in 0..kept.len() {
-        let item = &kept[index];
-        let Some(name) = file.name_text(item.node) else {
-            continue;
-        };
-        if name.chars().count() < 2 || !file.code_changed(item) {
-            continue;
-        }
-        let mut added = 0;
-        let mut omitted: Vec<Node<'_>> = Vec::new();
-        for identifier in &file.identifiers {
-            if file.source[identifier.byte_range()] != name || overlaps(item.node, *identifier) {
-                continue;
-            }
-            let unit = file.unit_for(*identifier);
-            let mut selected = kept.iter().chain(&references);
-            if selected.clone().any(|other| contains(other.node, unit)) {
-                continue;
-            }
-            // It holds a unit already selected (say, a method of this impl), so selecting it
-            // too would repeat that text; it stays out of the report, and is counted as such.
-            if added == MAX_REFERENCES || selected.any(|other| overlaps(other.node, unit)) {
-                // The same unit only once; a nested or enclosing one is a different unit, and the
-                // final count decides which of them the report shows.
-                if !omitted.contains(&unit) {
-                    omitted.push(unit);
-                }
-                continue;
-            }
-            added += 1;
-            references.push(Selected::new(unit, Some(name.clone())));
-        }
-        omitted_by.push((index, omitted));
-    }
-    for (index, omitted) in omitted_by {
-        kept[index].omitted_references = omitted
-            .iter()
-            .filter(|unit| !references.iter().any(|other| contains(other.node, **unit)))
-            .count();
-    }
+    let mut owners: Vec<(usize, Node<'_>)> = (0..kept.len())
+        .filter(|index| file.code_changed(&kept[*index]))
+        .map(|index| (index, kept[index].node))
+        .collect();
+    owners.extend(nested);
+    let references = file.references(&mut kept, &owners);
     kept.extend(references);
     Json::Arr(kept.iter().map(|item| file.unit_json(item)).collect())
 }
 
 impl<'t> File<'t> {
+    /// Only a selection that contains a unit shows its text; one nested inside it does not.
+    fn contains(&self, outer: Node<'_>, inner: Node<'_>) -> bool {
+        self.start_byte(outer) <= self.start_byte(inner) && inner.end_byte() <= outer.end_byte()
+    }
+
+    /// Units elsewhere in the file that use a changed name; their comments may describe it.
+    /// `owners` pairs each changed unit whose name is searched with the index of the kept unit
+    /// that shows it. Every name's users are collected first and taken in document order,
+    /// enclosing before nested, so the result does not depend on which name is declared first.
+    fn references(
+        &self,
+        kept: &mut [Selected<'t>],
+        owners: &[(usize, Node<'t>)],
+    ) -> Vec<Selected<'t>> {
+        let mut names = Vec::new();
+        let mut candidates: Vec<(usize, Node<'t>)> = Vec::new();
+        let mut seen = HashSet::new();
+        for &(index, node) in owners {
+            let Some(name) = self
+                .name_text(node)
+                .filter(|name| name.chars().count() >= 2)
+            else {
+                continue;
+            };
+            let owner = names.len();
+            for identifier in &self.identifiers {
+                if self.source[identifier.byte_range()] != name
+                    || self.contains(kept[index].node, *identifier)
+                {
+                    continue;
+                }
+                let unit = self.unit_for(*identifier);
+                if seen.insert((owner, unit.id())) {
+                    candidates.push((owner, unit));
+                }
+            }
+            names.push((index, name));
+        }
+        candidates
+            .sort_by_key(|&(owner, unit)| (self.start_byte(unit), Reverse(unit.end_byte()), owner));
+        let mut added = vec![0; names.len()];
+        // Per kept unit, the units past a cap; counted once every name has picked its users,
+        // since another name may select one of them, or a unit containing it, after all.
+        let mut omitted: Vec<Vec<Node<'t>>> = vec![Vec::new(); kept.len()];
+        let mut references: Vec<Selected<'t>> = Vec::new();
+        for (owner, unit) in candidates {
+            let mut selected = kept.iter().chain(&references);
+            if selected
+                .clone()
+                .any(|other| self.contains(other.node, unit))
+            {
+                continue;
+            }
+            // It holds a unit already selected (say, a method of this impl), so selecting it
+            // too would repeat that text; it stays out of the report, and is counted as such.
+            // Units nest or stay apart, so holding is the only way to overlap one.
+            if added[owner] == MAX_REFERENCES
+                || selected.any(|other| self.contains(unit, other.node))
+            {
+                let list = &mut omitted[names[owner].0];
+                if !list.contains(&unit) {
+                    list.push(unit);
+                }
+                continue;
+            }
+            added[owner] += 1;
+            references.push(Selected::new(unit, Some(names[owner].1.clone())));
+        }
+        for (item, omitted) in kept.iter_mut().zip(omitted) {
+            item.omitted_references = omitted
+                .iter()
+                .filter(|unit| {
+                    !references
+                        .iter()
+                        .any(|other| self.contains(other.node, **unit))
+                })
+                .count();
+        }
+        references
+    }
+
     fn new(grammar: &'t Grammar, source: &'t str, tree: &'t Tree) -> Self {
         let root = tree.root_node();
         let mut file = File {
