@@ -63,6 +63,15 @@ fn last_row_of(start: Point, end: Point) -> usize {
     }
 }
 
+/// The node of `nodes` that holds byte `at`. `nodes` is in document order, none inside another.
+fn holding<'t>(nodes: &[Node<'t>], at: usize) -> Option<Node<'t>> {
+    let index = nodes.partition_point(|node| node.start_byte() <= at);
+    nodes[..index]
+        .last()
+        .copied()
+        .filter(|node| at < node.end_byte())
+}
+
 /// At most this many units are added per changed name; the rest are counted.
 const MAX_REFERENCES: usize = 20;
 
@@ -278,21 +287,22 @@ impl<'t> File<'t> {
         preorder(root, |node| file.scan(node));
         // Only attributes on lines of their own sit between a leading comment and its unit; one
         // on a line of code (`#[inline] fn f() {}`) belongs to that line.
-        for attribute in std::mem::take(&mut file.attributes) {
+        for attribute in file.attributes.clone() {
             let rows = attribute.start_position().row..=last_row(attribute);
-            let alone = |row| file.covered(row, usize::MAX, &file.grammar.attribute_kinds);
+            let alone = |row| file.covered(row, usize::MAX, true);
             if alone(*rows.start()) && alone(*rows.end()) {
                 file.attribute_rows.extend(rows);
             }
         }
         for comment in file.comments.clone() {
+            let first = comment.start_position().row;
             if file.standalone(comment) {
-                file.by_start_row
-                    .entry(comment.start_position().row)
-                    .or_insert(comment);
+                file.by_start_row.entry(first).or_insert(comment);
                 file.by_last_row.insert(last_row(comment), comment);
-                file.comment_rows
-                    .extend(comment.start_position().row..=last_row(comment));
+                file.comment_rows.extend(first..=last_row(comment));
+            } else if file.opens_row(comment) {
+                // Code follows it on its last row (`/* a\n b */ fn f`): the rows above hold none.
+                file.comment_rows.extend(first..last_row(comment));
             }
         }
         file
@@ -314,53 +324,42 @@ impl<'t> File<'t> {
         {
             self.identifiers.push(node);
         }
-        if has(&self.grammar.attribute_kinds, node.kind()) {
+        // `attributes` holds no attribute inside another, so holding() can search it.
+        if has(&self.grammar.attribute_kinds, node.kind())
+            && self
+                .attributes
+                .last()
+                .is_none_or(|last| last.end_byte() <= node.start_byte())
+        {
             self.attributes.push(node);
         }
         true
     }
 
-    /// Whether the text of `row` before byte column `end` lies only in comments and nodes of
-    /// `kinds` (with their descendants), apart from whitespace.
-    fn covered(&self, row: usize, end: usize, kinds: &[String]) -> bool {
+    /// Whether the text of `row` before byte column `end` lies only in comments (and with
+    /// `attributes`, attributes), apart from whitespace.
+    fn covered(&self, row: usize, end: usize, attributes: bool) -> bool {
         let line = self.line(row);
+        let base = self.line_starts[row];
         let end = end.min(line.len());
         let mut column = 0;
         loop {
-            let rest = &line[column..end];
-            let Some(offset) = rest.find(|character: char| !character.is_whitespace()) else {
+            let Some(offset) = line[column..end].find(|character: char| !character.is_whitespace())
+            else {
                 return true;
             };
             column += offset;
-            let point = Point::new(row, column);
-            let Some(mut cover) = self.root.descendant_for_point_range(point, point) else {
+            let at = base + column;
+            let cover = holding(&self.comments, at)
+                .or_else(|| attributes.then(|| holding(&self.attributes, at)).flatten());
+            let Some(cover) = cover else {
                 return false;
             };
-            while !has(&self.grammar.comment_kinds, cover.kind()) && !has(kinds, cover.kind()) {
-                match cover.parent() {
-                    Some(parent) => cover = parent,
-                    None => return false,
-                }
-            }
-            if cover.end_position().row > row {
-                return true;
-            }
-            column = cover.end_position().column;
+            column = cover.end_byte() - base;
             if column >= end {
                 return true;
             }
         }
-    }
-
-    fn comment_of(&self, node: Node<'t>) -> Option<Node<'t>> {
-        let mut current = Some(node);
-        while let Some(candidate) = current {
-            if has(&self.grammar.comment_kinds, candidate.kind()) {
-                return Some(candidate);
-            }
-            current = candidate.parent();
-        }
-        None
     }
 
     fn line(&self, row: usize) -> &'t str {
@@ -373,12 +372,16 @@ impl<'t> File<'t> {
         self.source[start..end].trim_end_matches(['\n', '\r'])
     }
 
+    /// Nothing but whitespace before `node` on its first row.
+    fn opens_row(&self, node: Node<'_>) -> bool {
+        let start = node.start_position();
+        self.line(start.row)[..start.column].trim().is_empty()
+    }
+
     /// A comment alone on its lines: nothing but whitespace before it, and nothing but comments
     /// after it. One with code after it (`/* c */ fn f`) belongs to that code.
     fn standalone(&self, node: Node<'_>) -> bool {
-        let start = node.start_position();
-        self.line(start.row)[..start.column].trim().is_empty()
-            && self.covered(last_row(node), usize::MAX, &[])
+        self.opens_row(node) && self.covered(last_row(node), usize::MAX, false)
     }
 
     fn is_unit(&self, node: Node<'_>) -> bool {
@@ -405,30 +408,31 @@ impl<'t> File<'t> {
 
     fn node_at_row(&self, row: usize) -> Option<Node<'t>> {
         let line = self.line(row);
-        let column = line.len() - line.trim_start().len();
-        let point = Point::new(row, column);
-        let node = self.root.descendant_for_point_range(point, point)?;
+        let at = |column| {
+            let point = Point::new(row, column);
+            self.root.descendant_for_point_range(point, point)
+        };
+        let mut column = line.len() - line.trim_start().len();
+        let node = at(column)?;
         if node == self.root && line.trim().is_empty() {
             return None;
         }
-        // The row belongs to code that follows comments on it, not to those comments.
-        let mut at = node;
-        while let Some(comment) = self.comment_of(at)
-            && comment.end_position().row == row
-        {
-            let column = comment.end_position().column;
-            let rest = &line[column..];
+        // The row belongs to code that follows comments on it, not to those comments. A comment
+        // that goes on past the row, or with nothing after it, keeps the row.
+        let base = self.line_starts[row];
+        let first = column;
+        while let Some(comment) = holding(&self.comments, base + column) {
+            let after = comment.end_byte() - base;
+            let rest = line.get(after..).unwrap_or_default();
             let Some(offset) = rest.find(|character: char| !character.is_whitespace()) else {
                 return Some(node);
             };
-            let point = Point::new(row, column + offset);
-            at = self.root.descendant_for_point_range(point, point)?;
+            column = after + offset;
         }
-        Some(if self.comment_of(at).is_some() {
-            node
-        } else {
-            at
-        })
+        if column == first {
+            return Some(node);
+        }
+        at(column)
     }
 
     /// Enclosing units, innermost first; units inside a function body collapse into it.
@@ -469,10 +473,7 @@ impl<'t> File<'t> {
     /// The item that an attribute holding `node` decorates: its next sibling past further
     /// attributes and comments.
     fn decorated(&self, node: Node<'t>) -> Option<Node<'t>> {
-        let mut attribute = node;
-        while !has(&self.grammar.attribute_kinds, attribute.kind()) {
-            attribute = attribute.parent()?;
-        }
+        let attribute = holding(&self.attributes, node.start_byte())?;
         let mut next = attribute.next_named_sibling();
         while let Some(sibling) = next {
             let kind = sibling.kind();
@@ -504,6 +505,15 @@ impl<'t> File<'t> {
                     && let Some(unit) = self.follow(candidate)
                 {
                     return unit;
+                }
+                // One that opens its row with code after it on its last row (`/* a\n b */ fn f`)
+                // belongs to that code.
+                if self.opens_row(candidate)
+                    && !self.file_level(candidate)
+                    && let Some(code) = self.node_at_row(last_row(candidate))
+                    && holding(&self.comments, code.start_byte()).is_none()
+                {
+                    return self.unit_or_top_level(code);
                 }
                 return self.chain(candidate).first().copied().unwrap_or(candidate);
             }
@@ -569,23 +579,28 @@ impl<'t> File<'t> {
     fn leading(&self, node: Node<'t>) -> Vec<Node<'t>> {
         let mut found = Vec::new();
         let mut row = self.start_row(node);
-        // Comments before the unit on its first row (`/* c */ fn f`) lead it too.
+        // Comments before the unit on its first row (`/* c */ fn f`) lead it too; after an inner
+        // doc or a shebang there, only those after it do, and nothing above.
         let begin = self.start_byte(node);
         let line_start = self.line_starts[row];
-        if self.covered(row, begin - line_start, &[]) {
-            let before: Vec<Node<'t>> = self
+        if self.covered(row, begin - line_start, true) {
+            let from = self
                 .comments
-                .iter()
-                .copied()
-                .filter(|comment| line_start < comment.end_byte() && comment.end_byte() <= begin)
-                .collect();
-            if before.iter().any(|comment| self.file_level(*comment)) {
+                .partition_point(|comment| comment.end_byte() <= line_start);
+            let to = self
+                .comments
+                .partition_point(|comment| comment.end_byte() <= begin);
+            let before = &self.comments[from..to];
+            let file_level = before.iter().rposition(|comment| self.file_level(*comment));
+            let before = &before[file_level.map_or(0, |index| index + 1)..];
+            found.extend(before.iter().rev());
+            if file_level.is_some() {
+                found.reverse();
                 return found;
             }
             if let Some(first) = before.first() {
                 row = first.start_position().row;
             }
-            found.extend(before.into_iter().rev());
         }
         loop {
             while row > 0 && self.attribute_rows.contains(&(row - 1)) {
@@ -1007,11 +1022,18 @@ mod tests {
             picked(Language::Rust, source, 0..1),
             [unit("function_item", "f", (1, 1), &[])]
         );
-        // A comment block above still leads through the comment on the unit's own row.
-        let source = "// a\n/* c */ fn f() { 2; }\n";
+        // A comment block above still leads through the comment on the unit's own row. The row
+        // above is longer, so a column taken from the file's start instead of the row's is past
+        // the row's end.
+        let source = "// a comment longer than the row below\n/* c */ fn f() { 2; }\n";
         assert_eq!(
             picked(Language::Rust, source, 1..2),
-            [unit("function_item", "f", (2, 2), &["// a", "/* c */"])]
+            [unit(
+                "function_item",
+                "f",
+                (2, 2),
+                &["// a comment longer than the row below", "/* c */"]
+            )]
         );
         // An inner doc above ends that block; it ends at column 0 of the unit's row.
         let source = "//! m\n/* c */ fn f() { 2; }\n";
@@ -1027,6 +1049,59 @@ mod tests {
             reference,
             Some(&unit("function_item", "f", (2, 2), &[])),
             "{found:?}"
+        );
+    }
+
+    #[test]
+    fn a_changed_row_that_starts_with_a_line_comment_in_a_crlf_file() {
+        // A line comment holds the `\r` that line() trims off.
+        let source = "// lead\r\nfn f() { 2; }\r\n";
+        let found = picked(Language::Rust, source, 0..1);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].1.as_deref(), Some("f"));
+        let source = "fn f() {\r\n    // c\r\n    2;\r\n}\r\n";
+        let found = picked(Language::Rust, source, 1..2);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].1.as_deref(), Some("f"));
+        let source = "# lead\r\nf() {\r\n  echo b\r\n}\r\n";
+        let found = picked(Language::Bash, source, 0..1);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].1.as_deref(), Some("f"));
+    }
+
+    #[test]
+    fn a_block_comment_that_ends_on_a_code_row_belongs_to_that_code() {
+        let source = "/* a\n   b */ fn f() { 1; }\nfn g() {}\n";
+        assert_eq!(
+            picked(Language::Rust, source, 0..1),
+            [unit("function_item", "f", (2, 2), &["/* a\n   b */"])]
+        );
+        let tree = parse_partial(Language::Rust, source).unwrap();
+        let grammar = Grammar::builtin(Language::Rust);
+        let report = full_units(&grammar, source, &tree);
+        let found: Vec<_> = report.as_arr().iter().map(summary).collect();
+        assert_eq!(
+            found,
+            [unit("function_item", "f", (2, 2), &["/* a\n   b */"])]
+        );
+        // Only its first row changed: a comment row, so `foo` looks for no users.
+        let source = "/* a\n   b */ fn foo() { 1; }\nfn u() { foo(); }\n";
+        assert_eq!(picked(Language::Rust, source, 0..1).len(), 1);
+        assert_eq!(picked(Language::Rust, source, 1..2).len(), 2);
+    }
+
+    #[test]
+    fn comments_before_a_unit_on_its_row_lead_it_past_attributes_and_inner_docs() {
+        let source = "/* c */ #[inline] fn f() { 2; }\n";
+        assert_eq!(
+            picked(Language::Rust, source, 0..1),
+            [unit("function_item", "f", (1, 1), &["/* c */"])]
+        );
+        // After an inner doc on the row, only the comments after it lead, and none above.
+        let source = "// above\n/*! i */ /* c */ fn f() { 2; }\n";
+        assert_eq!(
+            picked(Language::Rust, source, 1..2),
+            [unit("function_item", "f", (2, 2), &["/* c */"])]
         );
     }
 

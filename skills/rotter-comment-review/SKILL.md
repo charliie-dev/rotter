@@ -74,7 +74,8 @@ note to the user; do not edit their config or environment yourself.
   In full mode `selected_by` is `"full"`, each comment appears once under the unit it belongs
   to, nothing is marked changed, and `text_truncated: true` means `text` stops after 80 lines
   while `range` covers the whole unit — read the rest from the file when needed.
-- `units[].comments[]`: related comments. `relation` is `leading` (directly above),
+- `units[].comments[]`: related comments. `relation` is `leading` (directly above, or before
+  the unit's code on its first line, as in `/* c */ fn f`),
   `inside`, `trailing` (same line after the unit), `enclosing_leading` (above an
   enclosing unit, such as a struct or table), or `nearby` (full mode: no closer relation). `changed: false` marks comments the diff did
   not touch; these are the main target. `changed` covers a whole group of adjacent comment
