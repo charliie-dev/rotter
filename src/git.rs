@@ -44,7 +44,7 @@ pub struct Options {
     pub parse_timeout: Duration,
     /// Soft run-wide deadline: files not started by then are skipped as `parse_timeout`.
     pub deadline: Option<Instant>,
-    /// Set from another thread to end the run as if its deadline had passed.
+    /// Set from another thread to skip the files not started yet, as a passed deadline does.
     pub cancel: Option<Arc<AtomicBool>>,
     /// The top level a caller already checked; finding another one is an error before anything
     /// in it is read.
@@ -76,7 +76,8 @@ impl Options {
 
 pub struct Report {
     pub json: Json,
-    /// False when any in-scope file could not be read or parsed.
+    /// False when any in-scope file was not fully analysed: not read, not parsed, parsed with
+    /// syntax errors, or an unmerged or unknown entry.
     pub complete: bool,
 }
 
@@ -1518,7 +1519,7 @@ pub fn extract_with(git: &Git, dir: &Path, options: &Options) -> Result<Report, 
         ));
     }
     // Before any object is read: the promisor gate for older git, then the filter and hook
-    // resets that every later call carries.
+    // resets that every later call in the repository carries.
     let (class, version) = git.class()?;
     if class == GitClass::Gated {
         promisor_gate(git, &top, version)?;

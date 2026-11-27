@@ -34,7 +34,8 @@ pub(crate) enum Install {
 /// Where messages that do not block go.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Notes {
-    /// A `systemMessage` in the JSON reply, shown once per session.
+    /// A `systemMessage` in the JSON reply, shown again only when it differs from the last one
+    /// shown in the session (every time without a state directory).
     SystemMessage,
     /// stderr; the host does not show it, so it is never marked as shown.
     Stderr,

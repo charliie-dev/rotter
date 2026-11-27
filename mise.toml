@@ -268,7 +268,7 @@ for profile in target/llvm-cov-target/*.profraw; do
     dropped=$((dropped + 1))
   }
 done
-# More than a stray truncated profile means the report would rest on missing data.
+# More than 1% of the profiles unreadable means the report would rest on missing data.
 if [ $((dropped * 100)) -gt "$total" ]; then
   echo "coverage: $dropped of $total profiles were unreadable; not reporting" >&2
   exit 1
