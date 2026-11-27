@@ -78,7 +78,10 @@ MergeJson（claude 的 `settings.json`）：一筆項目屬於 rotter，當且�
 
 OwnedJson（grok 的 `hooks/rotter.json`）：內容恰為
 `{"hooks":{"Stop":[{"hooks":[{"type":"command","command":C,"timeout":N}]}]}}`，C 為
-`'<絕對路徑>' hook grok-stop || true`、N 為正整數；其他內容都不是 rotter 的檔案。
+`'<絕對路徑>' hook grok-stop || true`、N 為正整數；其他內容都不是 rotter 的檔案。OwnedJson 與 shim
+（OwnedShim，見下）也記下驗證時讀到的位元組：install 在 rename 前重讀並逐位元組比對（原本不存在的
+檔案須仍不存在），uninstall 在 unlink 前重讀比對；檔案在驗證後出現或被改過就放棄寫入或移除、
+保留原檔。重讀與 rename／unlink 之間仍有很小的空窗。
 
 兩種方式在寫入前都拒絕位於 git work tree 內的宿主目錄（見下方「install 的 work tree 檢查」）。
 
