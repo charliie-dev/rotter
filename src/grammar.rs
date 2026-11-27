@@ -250,7 +250,6 @@ pub(crate) fn library_file(name: &str, key: &str) -> String {
     format!("{name}-{key}.{LIBRARY_EXTENSION}")
 }
 
-/// FNV-1a 64.
 fn fnv1a(parts: &[&[u8]]) -> u64 {
     parts
         .iter()
