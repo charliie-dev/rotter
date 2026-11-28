@@ -242,7 +242,8 @@ fn session(host: &Host, input: &Value) -> Option<String> {
         .session_keys
         .iter()
         .find_map(|key| input[key].as_str())?;
-    if raw.is_empty() || raw == "." || raw == ".." {
+    // Escaping only lengthens a name, so an id already over the limit is refused before it.
+    if raw.is_empty() || raw == "." || raw == ".." || raw.len() > 255 {
         return None;
     }
     let mut name = String::new();
