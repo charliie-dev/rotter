@@ -361,7 +361,8 @@ session 同時兩次只跑一次、兩個 session 同時停下各跑一次、只
 輸出垃圾、輸出超過 64 KiB（卡住或結束）、恰在 timeout 時回覆、宿主 API 丟出例外、非 completed／
 end_turn 的回合都靜默且不留下未處理的例外。除了卡住與恰在 timeout 時回覆（2 秒）之外，每個案例都以
 10 秒的 timeout 產生 shim，不必等 timeout 的回覆須在 9 秒內到達，所以負載很高的機器上 stub 的 Node
-啟動得慢也不會被誤判為等到了 timeout。
+啟動得慢也不會被誤判為等到了 timeout。harness 記錄 shim 呼叫 `process.kill` 的次數：正常結束、靜默的
+回覆與 settle 之後都是 0 次，卡住、輸出超過 64 KiB 與 stdout 比 rotter 的 `exit` 多開時各 1 次。
 
 ### pi（實驗性）
 

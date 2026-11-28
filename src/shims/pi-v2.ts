@@ -7,7 +7,7 @@ const EXE = __ROTTER_EXE__;
 const TIMEOUT = __ROTTER_TIMEOUT__;
 const HOST = "pi";
 const MAX_STDOUT = 65536;
-// How long stdout may stay open after rotter exits before the shim ends what holds it.
+// How long stdout may stay open after rotter exits before the shim stops waiting for it.
 const LINGER_MS = 500;
 
 // Never rejects; settles once, at the latest when the timeout fires.

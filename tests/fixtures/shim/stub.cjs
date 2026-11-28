@@ -32,7 +32,9 @@ switch (mode) {
     record(fs.readFileSync(0, "utf8"));
     // A grandchild that holds stdout open after rotter exits: in the same process group, or
     // ("escape") in a session of its own, out of the group's reach.
-    const child = spawn("/bin/sleep", ["300"], {
+    // The escaped one survives by design: 30 s outlives the harness, and a failed test leaves it
+    // only that long.
+    const child = spawn("/bin/sleep", [mode === "escape" ? "30" : "300"], {
       detached: mode === "escape",
       stdio: ["ignore", "inherit", "ignore"],
     });

@@ -1,14 +1,23 @@
 // Runs one rendered rotter shim against a stub host API: <engine> harness.mjs <host> <shim>
 // <scenario> <cwd>, with Node or Bun as the engine. The shim's exe is a stub rotter (stub.cjs)
 // that reads its behaviour from `mode` next to it. Prints one JSON line: the host engine, each
-// stop's answer and any uncaught exception or unhandled rejection, which must never fire; then
-// exits, so a process the shim left behind is not waited for.
+// stop's answer, how many signals the shim sent, and any uncaught exception or unhandled
+// rejection, which must never fire; then exits, so a process the shim left behind is not waited
+// for.
 import { pathToFileURL } from "node:url";
 
 const [host, shim, scenario, cwd] = process.argv.slice(2);
 const fired = [];
 process.on("uncaughtException", (error) => fired.push(`uncaughtException: ${error}`));
 process.on("unhandledRejection", (error) => fired.push(`unhandledRejection: ${error}`));
+
+// Every signal is counted: one sent to a group with no member left could reach a reused id.
+let kills = 0;
+const signal = process.kill.bind(process);
+process.kill = (pid, name) => {
+  kills += 1;
+  return signal(pid, name);
+};
 
 // None of these may reach rotter: the shim passes only PATH and LANG.
 process.env.LD_PRELOAD = "/nonexistent/preload.so";
@@ -246,6 +255,6 @@ switch (scenario) {
 // Keep the loop alive a while so late callbacks (kills, closes, timers) still run.
 setTimeout(() => {
   const engine = typeof Bun === "undefined" ? `node ${process.versions.node}` : `bun ${Bun.version}`;
-  const report = JSON.stringify({ engine, answers, idles, limits, fired });
+  const report = JSON.stringify({ engine, answers, idles, limits, kills, fired });
   process.stdout.write(`${report}\n`, () => process.exit(0));
 }, 1200);
