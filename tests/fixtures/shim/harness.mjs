@@ -208,25 +208,27 @@ async function stop(session, { outcome, throwing } = {}) {
   return mine.length > 0 ? mine[mine.length - 1].answer : null;
 }
 
-const timed = async (promise) => {
-  const start = Date.now();
-  const answer = await promise;
-  return { answer, ms: Date.now() - start };
+// Starts the clock before the stop: Pi's and Letta's handlers spawn rotter and set the shim's
+// timer synchronously, before an already-made promise could be timed.
+const timed = async (run) => {
+  const start = performance.now();
+  const answer = await run();
+  return { answer, ms: Math.round(performance.now() - start) };
 };
 
 const answers = [];
 switch (scenario) {
   case "loop": {
     // Four stops in one session; with the capped stub the third is rotter's silent one.
-    for (let turn = 0; turn < 4; turn += 1) answers.push(await timed(stop("s")));
+    for (let turn = 0; turn < 4; turn += 1) answers.push(await timed(() => stop("s")));
     // One run at a time: a second stop while the first runs asks nothing.
-    const [first, second] = await Promise.all([timed(stop("t")), timed(stop("t"))]);
+    const [first, second] = await Promise.all([timed(() => stop("t")), timed(() => stop("t"))]);
     answers.push(first, second);
     break;
   }
   case "twosessions": {
     // Stops of two sessions at once: each runs rotter.
-    answers.push(...(await Promise.all([timed(stop("a")), timed(stop("b"))])));
+    answers.push(...(await Promise.all([timed(() => stop("a")), timed(() => stop("b"))])));
     break;
   }
   case "chain": {
@@ -242,14 +244,14 @@ switch (scenario) {
   }
   case "skipped":
     answers.push(
-      await timed(stop("s", { outcome: { pi: "aborted", letta: "max_steps", opencode: "child" }[host] })),
+      await timed(() => stop("s", { outcome: { pi: "aborted", letta: "max_steps", opencode: "child" }[host] })),
     );
     break;
   case "throwing":
-    answers.push(await timed(stop("s", { throwing: true })));
+    answers.push(await timed(() => stop("s", { throwing: true })));
     break;
   default:
-    answers.push(await timed(stop("s")));
+    answers.push(await timed(() => stop("s")));
 }
 
 // Keep the loop alive a while so late callbacks (kills, closes, timers) still run.

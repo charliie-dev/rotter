@@ -493,9 +493,10 @@ fn shims_run_one_stop_at_a_time_per_session_only() {
 
 #[test]
 fn shims_answer_although_something_rotter_left_holds_stdout() {
-    // The stub answers and exits, but its grandchild keeps stdout open: without ending what holds
-    // it after rotter's exit, the answer would wait for the 10 s timeout and be lost. A grandchild
-    // in the process group is killed; one in a session of its own is out of reach and survives.
+    // The stub answers and exits, but its grandchild keeps stdout open: unless the shim stops
+    // waiting for it after rotter's exit, the answer would wait for the 10 s timeout and be lost. A
+    // grandchild in the process group is killed; one in a session of its own is out of reach and
+    // survives.
     for (stub_mode, killed) in [("linger", true), ("escape", false)] {
         for (host, file, engine) in cells() {
             let run = run(host, file, engine, stub_mode, "once");
@@ -629,9 +630,10 @@ fn shims_resolve_quietly_whatever_rotter_does() {
         ("missing", "once", 10, 0, 9000, 0, 0),
         ("big", "once", 10, 0, 9000, 1, 1),
         ("bigexit", "once", 10, 0, 9000, 0, 1),
-        ("hang", "once", 2, 1900, 4000, 1, 1),
-        ("reply", "skipped", 10, 0, 100, 0, 0),
-        ("reply", "throwing", 10, 0, 100, 0, 0),
+        // The clock starts before the shim's timer; Node may fire a timer up to a millisecond early.
+        ("hang", "once", 2, 1990, 9000, 1, 1),
+        ("reply", "skipped", 10, 0, 9000, 0, 0),
+        ("reply", "throwing", 10, 0, 9000, 0, 0),
     ];
     for (host, file, engine) in cells() {
         for (stub_mode, scenario, timeout, fastest, slowest, least, most) in cases {
