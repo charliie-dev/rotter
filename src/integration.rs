@@ -231,28 +231,31 @@ struct Outcome {
     record: Option<(PathBuf, String)>,
 }
 
-/// The session id from the host input, mapped to a file name (`[A-Za-z0-9._-]`, others `_`).
-/// A missing, empty, `.`, `..` or over-255-byte id is None: neither the loop cap nor dedupe
-/// can be kept, so the Stop is silent.
+/// The session id from the host input, as a file name: `[A-Za-z0-9._-]` stay, every other byte
+/// becomes `%XX`. `%` is not among the kept characters, so two ids never share a name (and a
+/// state file of an id in that alphabet keeps its name). A missing, empty, `.` or `..` id, or one
+/// whose name exceeds 255 bytes, is None: neither the loop cap nor dedupe can be kept, so the Stop
+/// is silent. On a case-insensitive file system, ids that differ only in ASCII case still share a
+/// state file.
 fn session(host: &Host, input: &Value) -> Option<String> {
     let raw = host
         .session_keys
         .iter()
         .find_map(|key| input[key].as_str())?;
+    // An id can be megabytes long. Escaping only lengthens a name, so one already over the limit
+    // is refused without escaping it.
     if raw.is_empty() || raw == "." || raw == ".." || raw.len() > 255 {
         return None;
     }
-    Some(
-        raw.chars()
-            .map(|character| {
-                if character.is_ascii_alphanumeric() || "._-".contains(character) {
-                    character
-                } else {
-                    '_'
-                }
-            })
-            .collect(),
-    )
+    let mut name = String::new();
+    for byte in raw.bytes() {
+        if byte.is_ascii_alphanumeric() || b"._-".contains(&byte) {
+            name.push(char::from(byte));
+        } else {
+            name.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    (name.len() <= 255).then_some(name)
 }
 
 fn cwd(host: &Host, input: &Value) -> Option<PathBuf> {
@@ -896,15 +899,15 @@ fn write_backup(path: &Path, text: &str) -> Result<(), String> {
 
 /// Replaces `path` with `text` through `<name>.rotter-tmp`, so a failure never leaves a
 /// truncated file (a stale regular temporary is removed first). The temporary is created 0600
-/// without following symlinks and gets `mode` through its descriptor before the rename. With
-/// `before` (the bytes read earlier, None for a missing file), `path` is re-read just before the
-/// rename and the write is abandoned when it changed meanwhile; a change after that re-read is
-/// still lost (a small window).
+/// without following symlinks and gets `mode` through its descriptor before the rename. `path` is
+/// re-read just before the rename and the write is abandoned when it no longer holds `before` (the
+/// bytes read earlier, None for a missing file); a change after that re-read is still lost (a small
+/// window).
 fn replace_file(
     path: &Path,
     text: &str,
     mode: Option<u32>,
-    before: Option<Option<&[u8]>>,
+    before: Option<&[u8]>,
 ) -> Result<(), String> {
     let temporary = temporary_path(path);
     let fail = |error: io::Error| format!("cannot write {}: {error}", temporary.display());
@@ -916,26 +919,40 @@ fn replace_file(
     }
     file.write_all(text.as_bytes()).map_err(fail)?;
     drop(file);
-    if let Some(before) = before {
-        let now = match open_regular(path) {
-            Ok(Some(mut file)) => {
-                let mut bytes = Vec::new();
-                file.read_to_end(&mut bytes).map(|_| Some(bytes))
-            }
-            Ok(None) => Ok(None),
-            Err(why) => Err(io::Error::other(why)),
-        };
-        if now.as_ref().ok().map(Option::as_deref) != Some(before) {
-            let _ = fs::remove_file(&temporary);
-            return Err(format!(
-                "{} changed while rotter was updating it; nothing was written, run the command \
-                 again",
-                path.display()
-            ));
-        }
+    if !unchanged(path, before) {
+        let _ = fs::remove_file(&temporary);
+        return Err(format!(
+            "{} changed while rotter was updating it; nothing was written, run the command again",
+            path.display()
+        ));
     }
     fs::rename(&temporary, path)
         .map_err(|error| format!("cannot replace {}: {error}", path.display()))
+}
+
+/// Whether `path` still holds `before` (None: still missing); a read error counts as a change.
+fn unchanged(path: &Path, before: Option<&[u8]>) -> bool {
+    let now = match open_regular(path) {
+        Ok(Some(mut file)) => {
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes).ok().map(|_| Some(bytes))
+        }
+        Ok(None) => Some(None),
+        Err(_) => None,
+    };
+    now.as_ref().map(Option::as_deref) == Some(before)
+}
+
+/// Removes `path` only while it still holds `before`, the bytes that showed it is rotter's; a
+/// change between that re-read and the unlink is still lost (a small window).
+fn remove_unchanged(path: &Path, before: &[u8]) -> Result<(), String> {
+    if !unchanged(path, Some(before)) {
+        return Err(format!(
+            "{} changed while rotter was removing it; nothing was removed, run the command again",
+            path.display()
+        ));
+    }
+    fs::remove_file(path).map_err(|error| format!("cannot remove {}: {error}", path.display()))
 }
 
 fn write_merged(path: &Path, value: &Value, original: Option<&str>) -> Result<(), String> {
@@ -944,7 +961,7 @@ fn write_merged(path: &Path, value: &Value, original: Option<&str>) -> Result<()
         .ok()
         .filter(fs::Metadata::is_file)
         .map(|meta| meta.permissions().mode() & 0o777);
-    replace_file(path, &text, mode, Some(original.map(str::as_bytes)))
+    replace_file(path, &text, mode, original.map(str::as_bytes))
 }
 
 fn event_groups_mut<'a>(host: &Host, settings: &'a mut Value) -> Option<&'a mut Vec<Value>> {
@@ -1221,10 +1238,11 @@ fn owned_handler<'a>(host: &Host, document: &'a Value) -> Option<&'a Value> {
         .then_some(handler)
 }
 
-/// The handler of an installed owned file; None when there is none. It must be a regular file
-/// (never followed, no FIFO block) owned by the user that group and others cannot write, holding
-/// a rotter-generated document; anything else is an error and the file is left alone.
-fn owned_installed(host: &Host, path: &Path) -> Result<Option<Value>, Refusal> {
+/// The handler of an installed owned file, with the bytes read (which a later write or removal
+/// checks are still there); None when there is none. It must be a regular file (never followed,
+/// no FIFO block) owned by the user that group and others cannot write, holding a
+/// rotter-generated document; anything else is an error and the file is left alone.
+fn owned_installed(host: &Host, path: &Path) -> Result<Option<(Value, Vec<u8>)>, Refusal> {
     let Some(mut file) = open_regular(path)? else {
         return Ok(None);
     };
@@ -1243,7 +1261,7 @@ fn owned_installed(host: &Host, path: &Path) -> Result<Option<Value>, Refusal> {
         .ok()
         .as_ref()
         .and_then(|document| owned_handler(host, document))
-        .map(|handler| Some(handler.clone()))
+        .map(|handler| Some((handler.clone(), text.into_bytes())))
         .ok_or_else(|| {
             Refusal::Foreign(format!(
                 "{} is not managed by rotter; left alone",
@@ -1327,11 +1345,12 @@ pub fn install(name: &str, parse_timeout_seconds: u64) -> Result<IntegrationResu
 }
 
 /// An installed shim rotter rendered: from which template version (0 is current), for which
-/// exe and timeout.
+/// exe and timeout, and the bytes read (which a later write or removal checks are still there).
 struct Shim {
     version: usize,
     exe: String,
     timeout: u64,
+    bytes: Vec<u8>,
 }
 
 /// The shim at `path`; None when there is none. It must be a regular file (never followed, no
@@ -1357,16 +1376,17 @@ fn shim_installed(host: &Host, path: &Path) -> Result<Option<Shim>, Refusal> {
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes).map_err(fail)?;
     // Not UTF-8 is not rotter's either: no render matches an empty text.
-    let text = String::from_utf8(bytes).unwrap_or_default();
+    let text = std::str::from_utf8(&bytes).unwrap_or_default();
     templates
         .iter()
         .enumerate()
         .find_map(|(version, template)| {
-            let (exe, timeout) = shim_values(template, &text)?;
+            let (exe, timeout) = shim_values(template, text)?;
             Some(Shim {
                 version,
                 exe,
                 timeout,
+                bytes: bytes.clone(),
             })
         })
         .map(Some)
@@ -1405,7 +1425,9 @@ fn install_shim(
             &path,
         ));
     }
-    replace_file(&path, &text, Some(0o600), None)?;
+    // Only over what was checked: a file that appeared or changed since is left alone.
+    let before = installed.as_ref().map(|shim| shim.bytes.as_slice());
+    replace_file(&path, &text, Some(0o600), before)?;
     let result = if installed.is_some() {
         "updated"
     } else {
@@ -1436,15 +1458,15 @@ fn uninstall_shim(host: &Host, sources: &Sources) -> Result<IntegrationResult, S
             &shown,
         ));
     };
-    if shim_installed(host, &path)?.is_none() {
+    let Some(shim) = shim_installed(host, &path)? else {
         return Ok(IntegrationResult::new(
             host,
             "uninstall",
             "not_installed",
             &path,
         ));
-    }
-    fs::remove_file(&path).map_err(|error| format!("cannot remove {}: {error}", path.display()))?;
+    };
+    remove_unchanged(&path, &shim.bytes)?;
     Ok(IntegrationResult::new(host, "uninstall", "removed", &path))
 }
 
@@ -1612,7 +1634,7 @@ fn install_owned(
     let path = owned_file(host, &home, true)?.ok_or("the hooks directory vanished")?;
     let installed = owned_installed(host, &path)?;
     let command = command(host, exe);
-    if let Some(handler) = &installed
+    if let Some((handler, _)) = &installed
         && handler[host.command_key] == command
         && handler[host.timeout_key] == timeout
     {
@@ -1625,8 +1647,10 @@ fn install_owned(
     }
     let document = owned_document(host, &command, timeout);
     let text = serde_json::to_string_pretty(&document).map_err(|error| error.to_string())? + "\n";
-    // Exactly 0600 whatever the umask; nothing is copied from the old file.
-    replace_file(&path, &text, Some(0o600), None)?;
+    // Exactly 0600 whatever the umask; nothing is copied from the old file. Only over what was
+    // checked: a file that appeared or changed since is left alone.
+    let before = installed.as_ref().map(|(_, bytes)| bytes.as_slice());
+    replace_file(&path, &text, Some(0o600), before)?;
     let result = if installed.is_some() {
         "updated"
     } else {
@@ -1698,15 +1722,15 @@ fn uninstall_owned(host: &Host, sources: &Sources) -> Result<IntegrationResult, 
             &hook_file(host, &configured),
         ));
     };
-    if owned_installed(host, &path)?.is_none() {
+    let Some((_, bytes)) = owned_installed(host, &path)? else {
         return Ok(IntegrationResult::new(
             host,
             "uninstall",
             "not_installed",
             &path,
         ));
-    }
-    fs::remove_file(&path).map_err(|error| format!("cannot remove {}: {error}", path.display()))?;
+    };
+    remove_unchanged(&path, &bytes)?;
     Ok(IntegrationResult::new(host, "uninstall", "removed", &path))
 }
 
@@ -1789,7 +1813,7 @@ fn owned_status(
     let handler = owned_installed(host, &path)?;
     let ours: Vec<(Ours, &Value)> = handler
         .iter()
-        .map(|handler| {
+        .map(|(handler, _)| {
             let how = if handler[host.command_key] == command(host, exe) {
                 Ours::Current
             } else {
@@ -2029,8 +2053,9 @@ mod tests {
     use super::{
         Ours, SHIM_EXE, SHIM_TIMEOUT, Verdict, allow_request, describe, entry_timeout, evaluate,
         faithful, hook_timeout, ours, owned_document, owned_handler, record, remove_ours,
-        render_template, replace_file, reset_requests, respond, rewritable, run_budget, session,
-        shim_timeout, shim_values, shortened, temporary_path, trusted_home, verdict,
+        remove_unchanged, render_template, replace_file, reset_requests, respond, rewritable,
+        run_budget, session, shim_timeout, shim_values, shortened, temporary_path, trusted_home,
+        verdict,
     };
     use super::{StrictVisitor, host_dir, private_file, shim_status};
     use crate::config::{Kind, Meta, Sources, lstat, user};
@@ -2233,14 +2258,29 @@ mod tests {
         let root = temp();
         let path = root.join("settings.json");
         fs::write(&path, "{\"b\": 1}\n").unwrap();
-        let error = replace_file(&path, "{}\n", None, Some(Some(b"{\"a\": 1}\n"))).unwrap_err();
+        let error = replace_file(&path, "{}\n", None, Some(b"{\"a\": 1}\n")).unwrap_err();
         assert!(error.contains("changed while rotter"), "{error}");
         assert_eq!(fs::read_to_string(&path).unwrap(), "{\"b\": 1}\n");
         assert!(!root.join("settings.json.rotter-tmp").exists());
         // Created meanwhile, though missing when read.
-        assert!(replace_file(&path, "{}\n", None, Some(None)).is_err());
-        replace_file(&path, "{}\n", None, Some(Some(b"{\"b\": 1}\n"))).unwrap();
+        assert!(replace_file(&path, "{}\n", None, None).is_err());
+        replace_file(&path, "{}\n", None, Some(b"{\"b\": 1}\n")).unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), "{}\n");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_file_changed_after_reading_is_not_removed() {
+        let root = temp();
+        let path = root.join("rotter.json");
+        fs::write(&path, "{\"b\": 1}\n").unwrap();
+        let error = remove_unchanged(&path, b"{\"a\": 1}\n").unwrap_err();
+        assert!(error.contains("changed while rotter"), "{error}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "{\"b\": 1}\n");
+        remove_unchanged(&path, b"{\"b\": 1}\n").unwrap();
+        assert!(!path.exists());
+        // Already gone: nothing to remove, and nothing is claimed removed.
+        assert!(remove_unchanged(&path, b"{\"b\": 1}\n").is_err());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -2401,13 +2441,21 @@ mod tests {
     #[test]
     fn session_ids_are_mapped_or_missing() {
         let id = |value: Value| session(&CLAUDE, &json!({ "session_id": value }));
-        assert_eq!(id(json!("s/1 x")), Some("s_1_x".to_owned()));
+        assert_eq!(id(json!("s/1 x")), Some("s%2F1%20x".to_owned()));
+        // Ids that differ only in an escaped byte stay distinct, and no escaped id equals a kept one.
+        assert_eq!(id(json!("a/b")), Some("a%2Fb".to_owned()));
+        assert_eq!(id(json!("a?b")), Some("a%3Fb".to_owned()));
+        assert_eq!(id(json!("a_b")), Some("a_b".to_owned()));
+        assert_eq!(id(json!("a%2Fb")), Some("a%252Fb".to_owned()));
+        assert_eq!(id(json!("é")), Some("%C3%A9".to_owned()));
         assert_eq!(id(json!("a".repeat(255))), Some("a".repeat(255)));
+        assert_eq!(id(json!("/".repeat(85))), Some("%2F".repeat(85)));
         for missing in [
             json!(""),
             json!("."),
             json!(".."),
             json!("a".repeat(256)),
+            json!("/".repeat(86)),
             json!(7),
         ] {
             assert_eq!(id(missing.clone()), None, "{missing}");

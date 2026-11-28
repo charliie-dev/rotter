@@ -403,7 +403,8 @@ Grok Build：Grok 的 home 為絕對路徑的 `$GROK_HOME`，否則為 `$HOME/.g
 create_new＋O_NOFOLLOW 建立權限恰為 0600 的 `rotter.json.rotter-tmp`（不以 `.json` 結尾，Grok 不會
 載入；殘留的一般檔案會先刪除），再 rename。既有的 `rotter.json` 若是 symlink 或非一般檔案、不屬於
 使用者、群組／他人可寫，或不是上述格式（多了 `env`、`matcher`、其他事件等），install 與 uninstall
-都以退出碼 2 結束並保留原檔。`uninstall` 只刪除通過上述檢查的檔案；不存在時顯示 `not installed`。
+都以退出碼 2 結束並保留原檔；寫入或刪除前重讀，內容與檢查時不同（或原本不存在的檔案出現了）也一樣，
+重讀之後仍有很小的空窗（見[宿主契約](docs/hosts.md)）。`uninstall` 只刪除通過上述檢查的檔案；不存在時顯示 `not installed`。
 
 Codex（實驗性）：`$CODEX_HOME/hooks.json`（預設 `~/.codex`），合併方式與 Claude 相同（備份為
 `hooks.json.rotter-bak`），但在原位置更新 rotter 的項目，不讓其他 hook 移位；Codex 只執行在 `/hooks`
@@ -424,7 +425,8 @@ rotter 寫入一個自己擁有的小程式（shim）：Pi 為 `$PI_CODING_AGENT
 0600。shim 由內嵌的範本產生，只有兩個變數：binary 路徑（以 JSON 字串字面值放在一處，不可含控制
 字元、U+2028、U+2029、`$`、`` ` ``）與 timeout（`max(60, parse_timeout_seconds + 30)`；Pi 與 Letta
 會等待 handler，上限 120 秒，OpenCode 不等待，不設上限）。只有與 rotter 出過的某個範本版本的產生結果逐位元組相同的檔案才算
-rotter 的；其他內容是「foreign code at rotter's path」，install／uninstall 都以退出碼 2 結束並保留原檔。
+rotter 的；其他內容是「foreign code at rotter's path」，install／uninstall 都以退出碼 2 結束並保留原檔；
+寫入或刪除前重讀，內容與檢查時不同（或原本不存在的檔案出現了）也一樣，重讀之後仍有很小的空窗。
 
 shim 在 Pi 的 `agent_before_settle`（只在執行 `completed` 時）、Letta 的 `turn_end`（只在
 `stopReason` 為 `end_turn` 時）或 OpenCode 的 `session.idle`（只處理沒有 `parentID` 的頂層

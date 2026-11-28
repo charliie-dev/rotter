@@ -78,7 +78,10 @@ MergeJson（claude 的 `settings.json`）：一筆項目屬於 rotter，當且�
 
 OwnedJson（grok 的 `hooks/rotter.json`）：內容恰為
 `{"hooks":{"Stop":[{"hooks":[{"type":"command","command":C,"timeout":N}]}]}}`，C 為
-`'<絕對路徑>' hook grok-stop || true`、N 為正整數；其他內容都不是 rotter 的檔案。
+`'<絕對路徑>' hook grok-stop || true`、N 為正整數；其他內容都不是 rotter 的檔案。OwnedJson 與 shim
+（OwnedShim，見下）也記下驗證時讀到的位元組：install 在 rename 前重讀並逐位元組比對（原本不存在的
+檔案須仍不存在），uninstall 在 unlink 前重讀比對；檔案在驗證後出現或被改過就放棄寫入或移除、
+保留原檔。重讀與 rename／unlink 之間仍有很小的空窗。
 
 兩種方式在寫入前都拒絕位於 git work tree 內的宿主目錄（見下方「install 的 work tree 檢查」）。
 
@@ -166,12 +169,14 @@ ownership、逾時（10 秒）或非 UTF-8 輸出都拒絕安裝。
 套檢查：經 `resolve_trusted` 的狀態目錄、使用者擁有且群組／他人不可寫的子目錄（新建時為 0700）、
 以 O_NOFOLLOW 與 O_NONBLOCK 開啟（FIFO 不會讓 hook 卡住）且須為使用者擁有、他人不可寫的一般檔案；
 不符時不讀也不寫。上限一律 fail closed：
-沒有可用的狀態目錄、計數讀不到或內容損壞、寫不進去，或 session id 缺少、為空、`.`、`..`、超過
-255 位元組時，都不要求審查。其中計數器根本開不了（例如狀態目錄可被群組寫入）時，hook 會在宿主顯示
+沒有可用的狀態目錄、計數讀不到或內容損壞、寫不進去，或 session id 缺少、為空、`.`、`..`，或做成檔名
+後超過 255 位元組時（`[A-Za-z0-9._-]` 以外的每個位元組寫成 `%XX`，所以 86 個 `/` 就超過），都不要求
+審查。其中計數器根本開不了（例如狀態目錄可被群組寫入）時，hook 會在宿主顯示
 訊息的管道提示「review request withheld」與原因，每次 Stop 都提示（記錄去重的地方正是壞掉的那個
 目錄），而不是靜默。沒有「新的使用者回合」訊號可用（rotter 注入的提示看起來也像使用者
 訊息）。Grok 的 Claude 相容性下，原生 grok 與相容的 claude handler 各有自己的計數器，而原生
-handler 會略過 `stopHookActive` 的 Stop，所以一串續跑最多約 3 次要求（接受）。
+handler 會略過 `stopHookActive` 的 Stop，所以一串續跑最多約 3 次要求（接受）。在不分大小寫的檔案
+系統（macOS 預設）上，只差 ASCII 大小寫的兩個 id 共用同一份計數與紀錄。
 
 ## env-injectable 宿主
 
