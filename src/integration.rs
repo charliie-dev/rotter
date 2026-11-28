@@ -236,7 +236,7 @@ struct Outcome {
 /// state file of an id in that alphabet keeps its name). A missing, empty, `.` or `..` id, or one
 /// whose name exceeds 255 bytes, is None: neither the loop cap nor dedupe can be kept, so the Stop
 /// is silent. On a case-insensitive file system, ids that differ only in ASCII case still share a
-/// name.
+/// state file.
 fn session(host: &Host, input: &Value) -> Option<String> {
     let raw = host
         .session_keys
@@ -897,15 +897,15 @@ fn write_backup(path: &Path, text: &str) -> Result<(), String> {
 
 /// Replaces `path` with `text` through `<name>.rotter-tmp`, so a failure never leaves a
 /// truncated file (a stale regular temporary is removed first). The temporary is created 0600
-/// without following symlinks and gets `mode` through its descriptor before the rename. With
-/// `before` (the bytes read earlier, None for a missing file), `path` is re-read just before the
-/// rename and the write is abandoned when it changed meanwhile; a change after that re-read is
-/// still lost (a small window).
+/// without following symlinks and gets `mode` through its descriptor before the rename. `path` is
+/// re-read just before the rename and the write is abandoned when it no longer holds `before` (the
+/// bytes read earlier, None for a missing file); a change after that re-read is still lost (a small
+/// window).
 fn replace_file(
     path: &Path,
     text: &str,
     mode: Option<u32>,
-    before: Option<Option<&[u8]>>,
+    before: Option<&[u8]>,
 ) -> Result<(), String> {
     let temporary = temporary_path(path);
     let fail = |error: io::Error| format!("cannot write {}: {error}", temporary.display());
@@ -917,9 +917,7 @@ fn replace_file(
     }
     file.write_all(text.as_bytes()).map_err(fail)?;
     drop(file);
-    if let Some(before) = before
-        && !unchanged(path, before)
-    {
+    if !unchanged(path, before) {
         let _ = fs::remove_file(&temporary);
         return Err(format!(
             "{} changed while rotter was updating it; nothing was written, run the command again",
@@ -961,7 +959,7 @@ fn write_merged(path: &Path, value: &Value, original: Option<&str>) -> Result<()
         .ok()
         .filter(fs::Metadata::is_file)
         .map(|meta| meta.permissions().mode() & 0o777);
-    replace_file(path, &text, mode, Some(original.map(str::as_bytes)))
+    replace_file(path, &text, mode, original.map(str::as_bytes))
 }
 
 fn event_groups_mut<'a>(host: &Host, settings: &'a mut Value) -> Option<&'a mut Vec<Value>> {
@@ -1427,7 +1425,7 @@ fn install_shim(
     }
     // Only over what was checked: a file that appeared or changed since is left alone.
     let before = installed.as_ref().map(|shim| shim.bytes.as_slice());
-    replace_file(&path, &text, Some(0o600), Some(before))?;
+    replace_file(&path, &text, Some(0o600), before)?;
     let result = if installed.is_some() {
         "updated"
     } else {
@@ -1650,7 +1648,7 @@ fn install_owned(
     // Exactly 0600 whatever the umask; nothing is copied from the old file. Only over what was
     // checked: a file that appeared or changed since is left alone.
     let before = installed.as_ref().map(|(_, bytes)| bytes.as_slice());
-    replace_file(&path, &text, Some(0o600), Some(before))?;
+    replace_file(&path, &text, Some(0o600), before)?;
     let result = if installed.is_some() {
         "updated"
     } else {
@@ -2258,13 +2256,13 @@ mod tests {
         let root = temp();
         let path = root.join("settings.json");
         fs::write(&path, "{\"b\": 1}\n").unwrap();
-        let error = replace_file(&path, "{}\n", None, Some(Some(b"{\"a\": 1}\n"))).unwrap_err();
+        let error = replace_file(&path, "{}\n", None, Some(b"{\"a\": 1}\n")).unwrap_err();
         assert!(error.contains("changed while rotter"), "{error}");
         assert_eq!(fs::read_to_string(&path).unwrap(), "{\"b\": 1}\n");
         assert!(!root.join("settings.json.rotter-tmp").exists());
         // Created meanwhile, though missing when read.
-        assert!(replace_file(&path, "{}\n", None, Some(None)).is_err());
-        replace_file(&path, "{}\n", None, Some(Some(b"{\"b\": 1}\n"))).unwrap();
+        assert!(replace_file(&path, "{}\n", None, None).is_err());
+        replace_file(&path, "{}\n", None, Some(b"{\"b\": 1}\n")).unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), "{}\n");
         fs::remove_dir_all(root).unwrap();
     }
