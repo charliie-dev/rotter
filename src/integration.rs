@@ -2688,6 +2688,47 @@ mod tests {
     }
 
     #[test]
+    fn shipped_shim_templates_still_render_their_goldens() {
+        // A file an older rotter wrote stays rotter's only while its template is unchanged.
+        let exe = "/opt/it's \"q\"\\ dir/\u{fc}n\u{ef}/rotter";
+        // Newest first, as `templates` lists them.
+        let goldens: [(&Host, &[&str]); 3] = [
+            (
+                &PI,
+                &[
+                    include_str!("../tests/fixtures/shim/pi-v2.golden.ts"),
+                    include_str!("../tests/fixtures/shim/pi-v1.golden.ts"),
+                ],
+            ),
+            (
+                &LETTA,
+                &[
+                    include_str!("../tests/fixtures/shim/letta-v2.golden.js"),
+                    include_str!("../tests/fixtures/shim/letta-v1.golden.js"),
+                ],
+            ),
+            (
+                &OPENCODE,
+                &[
+                    include_str!("../tests/fixtures/shim/opencode-v2.golden.js"),
+                    include_str!("../tests/fixtures/shim/opencode-v1.golden.js"),
+                ],
+            ),
+        ];
+        for (host, goldens) in goldens {
+            assert_eq!(templates(host).len(), goldens.len(), "{}", host.id);
+            for (template, golden) in templates(host).iter().zip(goldens) {
+                assert_eq!(
+                    render_template(template, exe, 90).unwrap(),
+                    *golden,
+                    "{}",
+                    host.id
+                );
+            }
+        }
+    }
+
+    #[test]
     fn shim_templates_use_only_the_allowed_process_apis() {
         for host in [&PI, &LETTA, &OPENCODE] {
             for template in templates(host) {

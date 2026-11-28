@@ -432,10 +432,12 @@ session，而且最後一則訊息是正常結束回合的 assistant 訊息：�
 結束迴圈的條件，見 [docs/hosts.md](docs/hosts.md)）以 `child_process.spawn` 直接執行 `rotter hook <host> --timeout <n>`
 （不經 shell、不用 `exec`／`spawnSync`），stdin 只有 `session_id` 與 `cwd`，環境只有 PATH 與
 LANG（不傳 `process.env`），stdout 超過 64 KiB、非 JSON、`continue` 不是字串、逾時（殺掉整個
-process group）或任何錯誤都靜默結束，同時只跑一次；每個 session 連續要求的上限由 rotter 本身負責。rotter 回
+process group）或任何錯誤都靜默結束，同一個 session 同時只跑一次；rotter 結束後 stdout 仍被留下來的子孫程序
+握著時，shim 殺掉 rotter 的 process group 並關閉 stdout，所以回覆不會等到逾時（自己開 session 而離開
+group 的子孫程序不會被殺）；每個 session 連續要求的上限由 rotter 本身負責。rotter 回
 `{"continue":"…"}`，shim 把它加成 Pi 的 `custom_message`（並要求一次續跑）、Letta 的續跑訊息，或
 以 OpenCode 的 `client.session.promptAsync` 送出一則**看得見的新使用者訊息**（內容只有固定文字、
-數量、cwd 與引用過的 binary 路徑，沒有報告內容或檔名；送出前已放開「同時只跑一次」旗標，所以
+數量、cwd 與引用過的 binary 路徑，沒有報告內容或檔名；送出前已放開該 session「同時只跑一次」的標記，所以
 注入的那一輪結束時照常交給 rotter 計數）。rotter 端這三個宿主的 HOME 取自密碼資料庫，XDG_*、ROTTER_*、TMPDIR 一律忽略（見
 [宿主契約](docs/hosts.md) 的 env-injectable 一節），`--timeout` 只會縮短執行時間。
 

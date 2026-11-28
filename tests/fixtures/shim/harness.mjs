@@ -1,14 +1,23 @@
 // Runs one rendered rotter shim against a stub host API: <engine> harness.mjs <host> <shim>
 // <scenario> <cwd>, with Node or Bun as the engine. The shim's exe is a stub rotter (stub.cjs)
 // that reads its behaviour from `mode` next to it. Prints one JSON line: the host engine, each
-// stop's answer and any uncaught exception or unhandled rejection, which must never fire; then
-// exits, so a process the shim left behind is not waited for.
+// stop's answer, how many signals the shim sent, and any uncaught exception or unhandled
+// rejection, which must never fire; then exits, so a process the shim left behind is not waited
+// for.
 import { pathToFileURL } from "node:url";
 
 const [host, shim, scenario, cwd] = process.argv.slice(2);
 const fired = [];
 process.on("uncaughtException", (error) => fired.push(`uncaughtException: ${error}`));
 process.on("unhandledRejection", (error) => fired.push(`unhandledRejection: ${error}`));
+
+// Every signal is counted: one sent to a group with no member left could reach a reused id.
+let kills = 0;
+const signal = process.kill.bind(process);
+process.kill = (pid, name) => {
+  kills += 1;
+  return signal(pid, name);
+};
 
 // None of these may reach rotter: the shim passes only PATH and LANG.
 process.env.LD_PRELOAD = "/nonexistent/preload.so";
@@ -21,10 +30,12 @@ process.env.GIT_DIR = "/nonexistent/git";
 const module = await import(pathToFileURL(shim).href);
 let handler = null;
 
-// OpenCode: what the stub client was asked to prompt, every session.idle, and every event
-// promise (OpenCode does not await them; the harness waits only to know when a chain ends).
+// OpenCode: what the stub client was asked to prompt, every session.idle, the `limit` of every
+// message listing, and every event promise (OpenCode does not await them; the harness waits only
+// to know when a chain ends).
 const prompts = [];
 let idles = 0;
+const limits = [];
 const events = [];
 const emit = (event) => {
   if (event.type === "session.idle") idles += 1;
@@ -62,9 +73,16 @@ if (host === "pi") {
         if (scenario === "throwing") throw new Error("host API failure");
         return { data: path.id === "child" ? { id: path.id, parentID: "parent" } : { id: path.id } };
       },
+      // Like OpenCode, a `limit` returns only the newest messages, oldest first.
+      async messages({ query } = {}) {
+        limits.push(query?.limit ?? null);
+        const listed = await this.history();
+        const limit = query?.limit;
+        return { data: limit ? listed.data.slice(-limit) : listed.data };
+      },
       // In "laterturn" and "laterthrowing", the user starts and cancels another turn while rotter
       // runs: the second listing (after rotter answered) ends with that cancelled turn, or fails.
-      async messages() {
+      async history() {
         listings += 1;
         if (scenario === "messagesthrowing") throw new Error("host API failure");
         const done = { created: 1, completed: 2 };
@@ -115,7 +133,15 @@ if (host === "pi") {
           orphantool: [tool(undefined, { status: "error", metadata: { interrupted: true } })],
         }[scenario] ?? [];
         const user = { info: { id: "u1", role: "user", time: { created: 0 }, ...first }, parts: [] };
-        return { data: scenario === "nomessages" ? [] : [user, { info: last, parts }] };
+        // A turn of 60 steps: its user message is older than the newest 50 messages.
+        const steps =
+          scenario === "long"
+            ? Array.from({ length: 59 }, (_, step) => ({
+                info: { ...ended, id: `s${step}`, finish: "tool-calls" },
+                parts: [],
+              }))
+            : [];
+        return { data: scenario === "nomessages" ? [] : [user, ...steps, { info: last, parts }] };
       },
       async promptAsync({ path, body }) {
         const [part, ...extra] = body.parts;
@@ -126,7 +152,7 @@ if (host === "pi") {
           body.model?.modelID === "m" &&
           variantKept;
         const plain = same && part.type === "text" && extra.length === 0;
-        prompts.push(plain ? part.text : { bad: body });
+        prompts.push({ session: path.id, answer: plain ? part.text : { bad: body } });
         if (scenario === "rejecting") throw new Error("prompt failed");
         if (scenario === "chain") {
           // The injected prompt is a new user message; its turn ends with the next idle, both
@@ -174,25 +200,35 @@ async function stop(session, { outcome, throwing } = {}) {
     return typeof result.continue === "string" ? result.continue : { bad: result };
   }
   const before = prompts.length;
-  const result = await emit(idle(outcome ?? session));
+  const id = outcome ?? session;
+  const result = await emit(idle(id));
   if (result !== undefined) return { bad: result };
-  return prompts.length > before ? prompts[prompts.length - 1] : null;
+  // Only a prompt to the session that went idle answers it.
+  const mine = prompts.slice(before).filter((prompt) => prompt.session === id);
+  return mine.length > 0 ? mine[mine.length - 1].answer : null;
 }
 
-const timed = async (promise) => {
-  const start = Date.now();
-  const answer = await promise;
-  return { answer, ms: Date.now() - start };
+// Starts the clock before the stop: Pi's and Letta's handlers spawn rotter and set the shim's
+// timer synchronously, before an already-made promise could be timed.
+const timed = async (run) => {
+  const start = performance.now();
+  const answer = await run();
+  return { answer, ms: Math.round(performance.now() - start) };
 };
 
 const answers = [];
 switch (scenario) {
   case "loop": {
     // Four stops in one session; with the capped stub the third is rotter's silent one.
-    for (let turn = 0; turn < 4; turn += 1) answers.push(await timed(stop("s")));
+    for (let turn = 0; turn < 4; turn += 1) answers.push(await timed(() => stop("s")));
     // One run at a time: a second stop while the first runs asks nothing.
-    const [first, second] = await Promise.all([timed(stop("t")), timed(stop("t"))]);
+    const [first, second] = await Promise.all([timed(() => stop("t")), timed(() => stop("t"))]);
     answers.push(first, second);
+    break;
+  }
+  case "twosessions": {
+    // Stops of two sessions at once: each runs rotter.
+    answers.push(...(await Promise.all([timed(() => stop("a")), timed(() => stop("b"))])));
     break;
   }
   case "chain": {
@@ -203,24 +239,24 @@ switch (scenario) {
       seen = events.length;
       await Promise.allSettled(events);
     }
-    for (const answer of prompts) answers.push({ answer, ms: Date.now() - start });
+    for (const { answer } of prompts) answers.push({ answer, ms: Date.now() - start });
     break;
   }
   case "skipped":
     answers.push(
-      await timed(stop("s", { outcome: { pi: "aborted", letta: "max_steps", opencode: "child" }[host] })),
+      await timed(() => stop("s", { outcome: { pi: "aborted", letta: "max_steps", opencode: "child" }[host] })),
     );
     break;
   case "throwing":
-    answers.push(await timed(stop("s", { throwing: true })));
+    answers.push(await timed(() => stop("s", { throwing: true })));
     break;
   default:
-    answers.push(await timed(stop("s")));
+    answers.push(await timed(() => stop("s")));
 }
 
 // Keep the loop alive a while so late callbacks (kills, closes, timers) still run.
 setTimeout(() => {
   const engine = typeof Bun === "undefined" ? `node ${process.versions.node}` : `bun ${Bun.version}`;
-  const report = JSON.stringify({ engine, answers, idles, fired });
+  const report = JSON.stringify({ engine, answers, idles, limits, kills, fired });
   process.stdout.write(`${report}\n`, () => process.exit(0));
 }, 1200);

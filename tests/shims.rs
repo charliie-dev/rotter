@@ -248,7 +248,7 @@ fn golden_renders_are_stable() {
         let golden = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/shim")
             .join(format!(
-                "{host}-v1.golden{}",
+                "{host}-v2.golden{}",
                 &file[file.rfind('.').unwrap()..]
             ));
         assert_eq!(
@@ -292,12 +292,29 @@ fn runtime(tool: &str) -> (PathBuf, String) {
 struct Run {
     engine: String,
     idles: u64,
+    /// OpenCode: the `limit` of each message listing, or null.
+    limits: Vec<Value>,
     answers: Vec<(Value, u64)>,
+    /// How many signals the shim sent.
+    kills: u64,
     calls: Vec<Value>,
     stub: PathBuf,
 }
 
+/// Under a 10 s shim timeout, so a stub that a loaded machine starts slowly still answers.
 fn run(host: &str, file: &str, engine: &str, stub_mode: &str, scenario: &str) -> Run {
+    run_with(host, file, engine, stub_mode, scenario, 10)
+}
+
+/// `timeout` is the shim's, in seconds.
+fn run_with(
+    host: &str,
+    file: &str,
+    engine: &str,
+    stub_mode: &str,
+    scenario: &str,
+    timeout: u64,
+) -> Run {
     let (node, _) = runtime("node");
     let (binary, version) = runtime(engine);
     let root = temp("shim-run");
@@ -315,7 +332,11 @@ fn run(host: &str, file: &str, engine: &str, stub_mode: &str, scenario: &str) ->
         stub.clone()
     };
     let shim = root.join(file);
-    fs::write(&shim, render_shim(host, exe.to_str().unwrap(), 2).unwrap()).unwrap();
+    fs::write(
+        &shim,
+        render_shim(host, exe.to_str().unwrap(), timeout).unwrap(),
+    )
+    .unwrap();
     let cwd = root.join("work");
     fs::create_dir(&cwd).unwrap();
     let output = Command::new(&binary)
@@ -357,7 +378,9 @@ fn run(host: &str, file: &str, engine: &str, stub_mode: &str, scenario: &str) ->
     Run {
         engine: report["engine"].as_str().unwrap().to_owned(),
         idles: report["idles"].as_u64().unwrap(),
+        limits: report["limits"].as_array().unwrap().clone(),
         answers,
+        kills: report["kills"].as_u64().unwrap(),
         calls,
         stub: stub_dir,
     }
@@ -392,13 +415,15 @@ fn shims_run_rotter_without_a_shell_with_only_path_and_lang() {
         eprintln!("{host}: shim harness under {}", run.engine);
         assert_eq!(run.answers.len(), 1);
         assert_eq!(run.answers[0].0, REQUEST, "{host} {engine}");
+        // rotter exited and closed stdout: nothing to signal.
+        assert_eq!(run.kills, 0, "{host} {engine}");
         let [call] = run.calls.as_slice() else {
             panic!("{host} {engine}: {:?}", run.calls);
         };
         // Spawned directly: the exe path with a space and a quote arrived as one argv[0].
         assert_eq!(
             call["argv"],
-            serde_json::json!(["hook", host, "--timeout", "2"])
+            serde_json::json!(["hook", host, "--timeout", "10"])
         );
         // macOS CoreFoundation adds its text encoding to the stub's own environment at start.
         let mut env = call["env"].clone();
@@ -440,14 +465,88 @@ fn shims_leave_the_cap_to_rotter_and_run_one_at_a_time() {
         // Every stop reached rotter, so its cap alone decided the silent one (the shim keeps no
         // second count that would silence one more); only the concurrent stop did not.
         assert_eq!(run.calls.len(), 5, "{host} {engine}");
+        assert_eq!(run.kills, 0, "{host} {engine}");
         let _ = fs::remove_dir_all(run.stub.parent().unwrap());
     }
 }
 
+#[test]
+fn shims_run_one_stop_at_a_time_per_session_only() {
+    for (host, file, engine) in cells() {
+        let run = run(host, file, engine, "reply", "twosessions");
+        let answers: Vec<&Value> = run.answers.iter().map(|(answer, _)| answer).collect();
+        assert_eq!(answers, [REQUEST, REQUEST], "{host} {engine}");
+        let mut sessions: Vec<String> = run
+            .calls
+            .iter()
+            .map(|call| {
+                let stdin: Value = serde_json::from_str(call["stdin"].as_str().unwrap()).unwrap();
+                stdin["session_id"].as_str().unwrap().to_owned()
+            })
+            .collect();
+        sessions.sort();
+        assert_eq!(sessions, ["a", "b"], "{host} {engine}");
+        assert_eq!(run.kills, 0, "{host} {engine}");
+        let _ = fs::remove_dir_all(run.stub.parent().unwrap());
+    }
+}
+
+#[test]
+fn shims_answer_although_something_rotter_left_holds_stdout() {
+    // The stub answers and exits, but its grandchild keeps stdout open: unless the shim stops
+    // waiting for it after rotter's exit, the answer would wait for the 10 s timeout and be lost. A
+    // grandchild in the process group is killed; one in a session of its own is out of reach and
+    // survives.
+    for (stub_mode, killed) in [("linger", true), ("escape", false)] {
+        for (host, file, engine) in cells() {
+            let run = run(host, file, engine, stub_mode, "once");
+            let pid = fs::read_to_string(run.stub.join("grandchild")).unwrap();
+            let survived = alive(pid.trim());
+            if survived {
+                let _ = Command::new("/bin/kill").args(["-9", pid.trim()]).status();
+            }
+            let [(answer, ms)] = run.answers.as_slice() else {
+                panic!("{host} {engine} {stub_mode}: {:?}", run.answers);
+            };
+            assert_eq!(answer, REQUEST, "{host} {engine} {stub_mode}");
+            assert!(*ms < 9000, "{host} {engine} {stub_mode}: {ms} ms");
+            assert_eq!(
+                !survived, killed,
+                "{host} {engine} {stub_mode}: grandchild {pid}"
+            );
+            // One signal, sent only once stdout outlived rotter's exit.
+            assert_eq!(run.kills, 1, "{host} {engine} {stub_mode}");
+            let _ = fs::remove_dir_all(run.stub.parent().unwrap());
+        }
+    }
+}
+
+#[test]
+fn opencode_reads_only_the_newest_messages() {
+    for engine in engines("opencode") {
+        // (scenario, limits): the newest 50 hold the turn, then one to check the last message.
+        // A 60-step turn's user message is older than the newest 50, so the whole history is read.
+        for (scenario, limits) in [
+            ("once", serde_json::json!([50, 1])),
+            ("long", serde_json::json!([50, null, 1])),
+        ] {
+            let run = run("opencode", "rotter-review.js", engine, "reply", scenario);
+            assert_eq!(run.answers.len(), 1, "{engine} {scenario}");
+            assert_eq!(run.answers[0].0, REQUEST, "{engine} {scenario}");
+            assert_eq!(
+                Value::from(run.limits.clone()),
+                limits,
+                "{engine} {scenario}"
+            );
+            let _ = fs::remove_dir_all(run.stub.parent().unwrap());
+        }
+    }
+}
+
 /// OpenCode's re-prompt starts a turn whose idle comes back to the plugin: the stub
-/// `promptAsync` emits the new user message and that idle before it returns. The in-flight flag
-/// is not held for the injected turn (the second idle asks again), every idle reaches rotter, and
-/// rotter's cap (emulated by the stub) ends the chain at the third one.
+/// `promptAsync` emits the new user message and that idle before it returns. The session's
+/// in-flight mark is not held for the injected turn (the second idle asks again), every idle
+/// reaches rotter, and rotter's cap (emulated by the stub) ends the chain at the third one.
 #[test]
 fn opencode_re_prompts_are_capped_across_the_turns_they_start() {
     for engine in engines("opencode") {
@@ -518,23 +617,31 @@ fn opencode_asks_only_after_a_turn_that_completed() {
 
 #[test]
 fn shims_resolve_quietly_whatever_rotter_does() {
-    // Under the 2 s timeout, an answer before 1800 ms came without waiting for it; the margin is
-    // for the stub's Node start on a loaded machine (CI, coverage, mutants).
+    // (stub mode, scenario, shim timeout in seconds, fastest and slowest answer in ms, signals
+    // sent: at least, at most). Under a 10 s timeout, an answer before 9000 ms came without
+    // waiting for it, however slowly a loaded machine (CI, coverage, mutants) starts the stub's
+    // Node. One signal ends a stub that hangs or overflows (bigexit may exit first). An overflow
+    // after rotter's exit (lateoverflow) settles at once, and the one signal comes when stdout is
+    // still open 500 ms after the exit. No signal follows a settled answer whose close came.
     let cases = [
-        ("quiet", "once", 0, 1800),
-        ("nonstring", "once", 0, 1800),
-        ("garbage", "once", 0, 1800),
-        ("epipe", "once", 0, 1800),
-        ("missing", "once", 0, 1800),
-        ("big", "once", 0, 1800),
-        ("bigexit", "once", 0, 1800),
-        ("hang", "once", 1900, 4000),
-        ("reply", "skipped", 0, 100),
-        ("reply", "throwing", 0, 100),
+        ("quiet", "once", 10, 0, 9000, 0, 0),
+        ("nonstring", "once", 10, 0, 9000, 0, 0),
+        ("garbage", "once", 10, 0, 9000, 0, 0),
+        ("epipe", "once", 10, 0, 9000, 0, 0),
+        ("missing", "once", 10, 0, 9000, 0, 0),
+        ("big", "once", 10, 0, 9000, 1, 1),
+        ("bigexit", "once", 10, 0, 9000, 0, 1),
+        ("lateoverflow", "once", 10, 0, 9000, 1, 1),
+        // 5 s gives a slowly started stub time to spawn its grandchild before the timeout. The
+        // clock starts before the shim's timer, and Node may fire a timer up to a millisecond early;
+        // under 9000 ms, the shim waited for its own timer and nothing more.
+        ("hang", "once", 5, 4990, 9000, 1, 1),
+        ("reply", "skipped", 10, 0, 9000, 0, 0),
+        ("reply", "throwing", 10, 0, 9000, 0, 0),
     ];
     for (host, file, engine) in cells() {
-        for (stub_mode, scenario, fastest, slowest) in cases {
-            let run = run(host, file, engine, stub_mode, scenario);
+        for (stub_mode, scenario, timeout, fastest, slowest, least, most) in cases {
+            let run = run_with(host, file, engine, stub_mode, scenario, timeout);
             let [(answer, ms)] = run.answers.as_slice() else {
                 panic!("{host} {engine} {stub_mode}: {:?}", run.answers);
             };
@@ -547,15 +654,20 @@ fn shims_resolve_quietly_whatever_rotter_does() {
                 (fastest..=slowest).contains(ms),
                 "{host} {engine} {stub_mode} {scenario}: {ms} ms"
             );
+            assert!(
+                (least..=most).contains(&run.kills),
+                "{host} {engine} {stub_mode} {scenario}: {} signals",
+                run.kills
+            );
             if scenario != "once" || stub_mode == "missing" {
                 assert!(
                     run.calls.is_empty(),
                     "{host} {engine} {stub_mode} {scenario}"
                 );
             }
-            if stub_mode == "hang" {
-                // The timeout killed rotter's whole process group: the grandchild would sleep
-                // well past the harness, which exits without waiting for it.
+            if matches!(stub_mode, "hang" | "lateoverflow") {
+                // The shim killed rotter's whole process group: the grandchild would sleep well
+                // past the harness, which exits without waiting for it.
                 let pid = fs::read_to_string(run.stub.join("grandchild")).unwrap();
                 let survived = alive(pid.trim());
                 if survived {
@@ -566,8 +678,9 @@ fn shims_resolve_quietly_whatever_rotter_does() {
             let _ = fs::remove_dir_all(run.stub.parent().unwrap());
         }
         // Answering exactly as the timeout fires settles once, either way.
-        let run = run(host, file, engine, "attimeout", "once");
+        let run = run_with(host, file, engine, "attimeout", "once", 2);
         assert_eq!(run.answers.len(), 1, "{host} {engine}");
+        assert!(run.kills <= 1, "{host} {engine}: {} signals", run.kills);
         let _ = fs::remove_dir_all(run.stub.parent().unwrap());
     }
 }

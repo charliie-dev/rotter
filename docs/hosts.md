@@ -307,8 +307,8 @@ hooks，之後的外部修改只會警告，須在 `/hooks` 檢視。擁有權�
 ## S3 宿主契約補遺（shim 宿主）
 
 pi、letta 與 opencode 沒有指令型 hook，只在自己的程序內載入程式碼，所以 rotter 安裝的是 shim
-（OwnedShim）：由內嵌範本（`src/shims/pi-v1.ts`、`src/shims/letta-v1.js`、`src/shims/opencode-v1.js`）
-產生、完全屬於 rotter 的檔案。三者的共同規則：
+（OwnedShim）：由內嵌範本（目前的版本是 `src/shims/pi-v2.ts`、`src/shims/letta-v2.js`、
+`src/shims/opencode-v2.js`）產生、完全屬於 rotter 的檔案。三者的共同規則：
 
 - 範本只有兩個變數，各出現一次：`const EXE = <JSON 字串字面值>;` 與 `const TIMEOUT = <正整數>;`。
   binary 路徑須為絕對路徑的 UTF-8，不可含控制字元、U+2028、U+2029、`$`、`` ` ``（另有 install 的
@@ -316,18 +316,24 @@ pi、letta 與 opencode 沒有指令型 hook，只在自己的程序內載入程
   `max(60, parse_timeout_seconds + 30)`；pi 與 letta 會等待 handler，上限 120 秒，opencode 不等待
   （見下），不設上限。
 - 擁有權：從檔案解出兩個字面值，重新驗證並重新產生，必須與 rotter 出過的某個範本版本（全部內嵌，
-  目前只有 v1）逐位元組相同；golden 測試（`tests/fixtures/shim/*-v1.golden.*`）防止已出貨的範本
-  被原地修改。其他內容一律是外來程式碼：install／uninstall 退出碼 2 並保留原檔，`status` 顯示
+  目前有 v2 與 v1）逐位元組相同，install 寫入的是 v2；golden 測試
+  （`tests/fixtures/shim/*-v1.golden.*`、`*-v2.golden.*`）防止已出貨的範本被原地修改。其他內容一律是外來程式碼：install／uninstall 退出碼 2 並保留原檔，`status` 顯示
   `foreign code at rotter's path, auto-loaded by <宿主>`。檔案須是一般檔案、屬於使用者、群組／他人
   不可寫；寫入經 `<file>.rotter-tmp`（0600、O_NOFOLLOW），再 rename 成 0600 的 shim。
 - 執行：`child_process.spawn(EXE, ["hook", HOST, "--timeout", String(TIMEOUT)], {shell:false,
   detached:true, env:{PATH, LANG}, stdio:["pipe","pipe","ignore"]})`；子程序與 stdin／stdout 都有
   `error` listener，每個 callback 與 kill 各自包在 try/catch，結果只 settle 一次；timeout 到時（或
-  stdout 超過 64 KiB）以 SIGKILL 殺掉整個 process group（只在尚未看到 `exit` 時），timer 在 settle 時
-  清除並 `unref`。只有 stdout 能解析成 JSON 且 `continue` 為字串時才採用。不使用 `exec`、`execSync`、
+  stdout 超過 64 KiB）以 SIGKILL 殺掉整個 process group（只在尚未看到 `exit` 時，之後 id 可能被
+  重用），timer 在 settle 時清除並 `unref`。v2 在看到 `exit` 後若 500 ms 內 stdout 仍未關閉，代表
+  rotter 留下的子孫程序握著它，否則 `close` 會等到 timeout、回覆因此遺失：此時對 process group 送
+  SIGKILL 並關閉 shim 這端的 stdout。這個 500 ms 計時器只由 `close` 取消，所以在 `exit` 之後才因
+  timeout 或輸出超過 64 KiB 而 settle 時，它照樣會結束握著 stdout 的程序。握著 stdout 的子孫程序若在 group 內，group 的 id 就不會被重用；
+  已離開 group（自己開 session）的子孫程序不會被殺，只是不再拖住回覆。若它離開 group 時 group 已沒有
+  其他成員，這次 kill 打到的 id 在理論上可能已被重用；rotter 不會啟動這種程序。只有 stdout 能解析成 JSON 且 `continue` 為字串時才採用。不使用 `exec`、`execSync`、
   `spawnSync`、`Bun.$`，也不把 `process.env` 傳給 rotter。
 - stdin 只有 `{"session_id":…,"cwd":…}`；rotter 的回覆為 `{"continue":<reason>}`，提示寫到 stderr
-  （shim 忽略）。shim 只有「同時只跑一次」旗標，每次停下都交給 rotter；連續要求的上限只在 rotter 端
+  （shim 忽略）。shim 只讓同一個 session 同時跑一次（v1 是整個 shim 同時只跑一次，另一個 session
+  在這段時間停下就不會詢問 rotter），每次停下都交給 rotter；連續要求的上限只在 rotter 端
   （計數存在磁碟上、fail closed），shim 不另外計數，否則會比 rotter 多靜默一次。rotter 端的計數、去重與
   fail closed 規則與其他宿主相同。
 - `--timeout <n>`（正整數，其他值忽略）只會縮短 rotter 的軟性期限：`min(依設定計算, n) − 15 秒`，
@@ -345,13 +351,20 @@ Bun 1.4.4 下各跑一次，letta 用 Node 26.13.1，opencode 用 Bun 1.4.4（�
 （`tests/fixtures/shim/harness.mjs`，含 `uncaughtException`／`unhandledRejection` 偵測，handler 結束
 後再等約 1 秒，然後直接結束、不等 shim 留下的程序）與 stub rotter（`stub.cjs`，以 Node 執行，放在
 含空白、引號與非 ASCII 的目錄）。驗證：直接執行（argv 恰為
-`hook <host> --timeout 2`）、環境只有 PATH 與 LANG（harness 設了 `LD_PRELOAD`、
+`hook <host> --timeout 10`）、環境只有 PATH 與 LANG（harness 設了 `LD_PRELOAD`、
 `DYLD_INSERT_LIBRARIES`、`DEVELOPER_DIR`、HOME、`GIT_DIR`、`ROTTER_STATE_DIR`）、stdin 內容、三次
-每次停下都交給 rotter（stub 模擬 rotter 的上限時，第三次由 rotter 靜默、第四次照常要求）、同時兩次只跑一次、只有字串的 `continue` 被採用，以及 exe 不存在
-（ENOENT）、不讀 stdin 就結束（EPIPE）、卡住（2 秒後殺掉整個 process group：孫程序原本會睡 300 秒，比 harness 活得久，
+每次停下都交給 rotter（stub 模擬 rotter 的上限時，第三次由 rotter 靜默、第四次照常要求）、同一個
+session 同時兩次只跑一次、兩個 session 同時停下各跑一次、只有字串的 `continue` 被採用、rotter 回覆後
+結束但孫程序仍握著 stdout 時照常採用回覆（孫程序在 process group 內時被殺掉，自己開 session 的
+孫程序則留著），以及 exe 不存在
+（ENOENT）、不讀 stdin 就結束（EPIPE）、卡住（5 秒後殺掉整個 process group：孫程序原本會睡 300 秒，比 harness 活得久，
 測試結束時必須已不在；拿掉 timer 裡的 `kill()` 時此案例失敗）、
 輸出垃圾、輸出超過 64 KiB（卡住或結束）、恰在 timeout 時回覆、宿主 API 丟出例外、非 completed／
-end_turn 的回合都靜默且不留下未處理的例外。
+end_turn 的回合都靜默且不留下未處理的例外。除了卡住（5 秒）與恰在 timeout 時回覆（2 秒）之外，每個案例都以
+10 秒的 timeout 產生 shim，不必等 timeout 的回覆須在 9 秒內到達，所以負載很高的機器上 stub 的 Node
+啟動得慢也不會被誤判為等到了 timeout。harness 記錄 shim 呼叫 `process.kill` 的次數：正常結束與靜默的
+回覆都是 0 次；卡住、輸出超過 64 KiB 與 stdout 比 rotter 的 `exit` 多開 500 ms 時各 1 次，包括
+`exit` 之後孫程序才讓輸出超過 64 KiB 的情況（lateoverflow：孫程序也必須已不在）。
 
 ### pi（實驗性）
 
@@ -420,8 +433,8 @@ commit `fd889a2741891ee45116cb6131052d7fad220886`
 | 事件 | `session.idle`，`properties` 為 `{sessionID}`，由 `SessionStatus.set` 在狀態變成 idle 時發出；plugin 的 `event` hook 收到 `{event: {id, type, properties}}`，以 `void hook["event"]?.(...)` 呼叫，**不被等待**（因此 handler 絕不 reject，否則成為 OpenCode 的 unhandled rejection） |
 | session／cwd | `event.properties.sessionID`；cwd 為 plugin 輸入的 `directory`（該 instance 的目錄；事件只送給 `location.directory` 相同的 instance） |
 | 子 session | 以 `client.session.get({path:{id}})` 取得 session，`parentID` 存在（subagent）或取不到時不做事 |
-| 續跑判斷 | 沒有續跑旗標：只靠 rotter 的上限；注入的提示是新的使用者訊息，shim 不把任何使用者訊息當成歸零的訊號。取消與失敗的回合同樣以 `session.idle` 結束：一般步驟中斷時 `SessionProcessor` 把 assistant 訊息的 `error` 設為 `MessageAbortedError`，但 subtask 中斷（`handleSubtask`）與兩步之間的取消只留下 `finish: "tool-calls"`、沒有 `error`。所以 shim 以 `client.session.messages({path:{id}})` 讀最後一則訊息，只有它是 assistant、沒有 `error`、有 `time.completed`，並且符合 OpenCode 結束迴圈的三個條件時才詢問 rotter：`finish` 存在且不是 `tool-calls`／`unknown`；沒有非 provider 執行的 tool part（重試後由 `cleanup` 標為 `status: "error"`、`metadata.interrupted: true` 的殘留 tool part 不算）；`parentID` 是最後一則使用者訊息的 id。讀取失敗或其他情況都不做事 |
-| 要求續跑 | `client.session.promptAsync({path:{id}, body:{agent, model, variant, parts:[{type:"text", text}]}})`（`POST /session/{id}/prompt_async`，立即返回），在「同時只跑一次」旗標放開之後才呼叫，所以注入的那一輪結束時的 `session.idle` 照常交給 rotter 計數；失敗被吞掉。`agent` 與 `model`（`providerID`、`modelID`）取自被審查那一輪的使用者訊息：沒有 `agent` 的提示會以 OpenCode 的預設 agent 執行（`createUserMessage` 的 `agents.defaultInfo()`），工具權限可能比原本那一輪（例如 plan 或自訂 agent）更多；使用者訊息缺少這兩項時不詢問 rotter。推理 `variant` 取自同一則訊息的 `model.variant`，以頂層 `variant` 送出；沒有時不送，不是字串時不詢問 rotter。呼叫前再讀一次 `session.messages`，最後一則仍是詢問 rotter 時的那則 assistant 訊息（同一個 `id`）才呼叫，否則（rotter 執行期間使用者又開始、或開始後取消了另一輪，或讀取失敗）不做事，以免把使用者已停止的 session 重新叫起。這是使用者看得到的新訊息，內容是 rotter 的 `continue`：固定文字、數量、cwd（絕對路徑、無控制字元）與 shell 引用過的 binary 路徑，沒有報告內容或檔名 |
+| 續跑判斷 | 沒有續跑旗標：只靠 rotter 的上限；注入的提示是新的使用者訊息，shim 不把任何使用者訊息當成歸零的訊號。取消與失敗的回合同樣以 `session.idle` 結束：一般步驟中斷時 `SessionProcessor` 把 assistant 訊息的 `error` 設為 `MessageAbortedError`，但 subtask 中斷（`handleSubtask`）與兩步之間的取消只留下 `finish: "tool-calls"`、沒有 `error`。所以 shim 以 `client.session.messages({path:{id}, query:{limit:50}})` 讀最新的 50 則訊息（OpenCode 的 `MessageV2.page` 依時間由新到舊取 `limit` 則，再反轉成由舊到新回傳；其中沒有使用者訊息、又剛好 50 則時，這一輪比較長，改讀全部訊息），看最後一則，只有它是 assistant、沒有 `error`、有 `time.completed`，並且符合 OpenCode 結束迴圈的三個條件時才詢問 rotter：`finish` 存在且不是 `tool-calls`／`unknown`；沒有非 provider 執行的 tool part（重試後由 `cleanup` 標為 `status: "error"`、`metadata.interrupted: true` 的殘留 tool part 不算）；`parentID` 是最後一則使用者訊息的 id。讀取失敗或其他情況都不做事 |
+| 要求續跑 | `client.session.promptAsync({path:{id}, body:{agent, model, variant, parts:[{type:"text", text}]}})`（`POST /session/{id}/prompt_async`，立即返回），在該 session「同時只跑一次」的標記放開之後才呼叫，所以注入的那一輪結束時的 `session.idle` 照常交給 rotter 計數；失敗被吞掉。`agent` 與 `model`（`providerID`、`modelID`）取自被審查那一輪的使用者訊息：沒有 `agent` 的提示會以 OpenCode 的預設 agent 執行（`createUserMessage` 的 `agents.defaultInfo()`），工具權限可能比原本那一輪（例如 plan 或自訂 agent）更多；使用者訊息缺少這兩項時不詢問 rotter。推理 `variant` 取自同一則訊息的 `model.variant`，以頂層 `variant` 送出；沒有時不送，不是字串時不詢問 rotter。呼叫前再以 `limit:1` 讀一次 `session.messages`，最後一則仍是詢問 rotter 時的那則 assistant 訊息（同一個 `id`）才呼叫，否則（rotter 執行期間使用者又開始、或開始後取消了另一輪，或讀取失敗）不做事，以免把使用者已停止的 session 重新叫起。這是使用者看得到的新訊息，內容是 rotter 的 `continue`：固定文字、數量、cwd（絕對路徑、無控制字元）與 shell 引用過的 binary 路徑，沒有報告內容或檔名 |
 | 提示管道 | 預設 stderr（shim 忽略；沒有使用 `client.app.log`） |
 | timeout | shim 內的 timeout；OpenCode 不等待 handler，不設 120 秒上限 |
 | 引擎 | release binary 以 `Bun.build({compile})` 建置，macOS／Linux 用 Bun 1.4.4（根目錄 `package.json` 的 `packageManager: bun@1.4.4`，依 anomalyco/opencode commit `b47eb4ed2da71e940248c362d3f9ea175597f9b1`，2026-11-24 查核）；測試以 Bun 1.4.4 執行 |
@@ -435,8 +448,10 @@ commit `fd889a2741891ee45116cb6131052d7fad220886`
 rotter（tool part 只有 provider 執行的或重試後標為 interrupted 的殘留時照常詢問）；rotter 執行期間
 使用者又開始並取消另一輪，或 rotter 回覆後的第二次讀取失敗時，rotter 有被詢問，但不呼叫 `promptAsync`；只有 rotter 要求審查時才呼叫 `promptAsync`，並帶上被審查那一輪使用者訊息的 `agent`、`model` 與 `variant`（沒有 variant 時不送；錯誤路徑全部靜默）；
 `promptAsync` reject 時被吞掉；stub `promptAsync` 在返回之前就先發出新的使用者訊息事件與下一個
-`session.idle` 時，第二個 idle 仍會詢問 rotter（旗標沒有被注入的那一輪佔住，改成佔住時此案例
+`session.idle` 時，第二個 idle 仍會詢問 rotter（標記沒有被注入的那一輪佔住，改成佔住時此案例
 失敗），stub 模擬 rotter 的上限時，第三個 idle 由 rotter 靜默而結束這串（共 3 個 idle、3 次 rotter、2 次 `promptAsync`）。
+stub 的 `session.messages` 像 OpenCode 一樣以 `limit` 只回傳最新的訊息：一般的一輪讀兩次（`limit`
+50 與 1）；60 步的一輪，使用者訊息不在最新的 50 則裡，於是改讀全部訊息後照常詢問 rotter（50、全部、1）。
 
 來源：<https://github.com/sst/opencode> commit `8d05153965bee0a1e46eccffe944dc84d0b0c6f1`
 （2026-09-28，2026-09-29 重新查閱）：`packages/opencode/src/config/plugin.ts`（`load` 的 glob）、
@@ -445,6 +460,9 @@ rotter（tool part 只有 provider 執行的或重試後標為 interrupted 的�
 （`PluginInput`、`getLegacyPlugins`、`void hook["event"]`）、`src/plugin/shared.ts`（`readV1Plugin`）、
 `src/session/status.ts`（`Event.Idle`）、`packages/plugin/src/index.ts`（`Hooks.event`）、
 `packages/sdk/js/src/gen/sdk.gen.ts`（`Session.get`、`promptAsync`、`messages`）、
+`src/server/routes/instance/httpapi/handlers/session.ts`（`messages`：有 `limit` 時走 `MessageV2.page`）、
+`src/session/message-v2.ts`（`page`：依 `time_created` 由新到舊取 `limit` 則後反轉；2026-11-27 查閱）、
+`SessionMessagesData.query.limit`（v1 SDK，plugin 的 `client` 由它建立）、
 `packages/sdk/js/src/gen/types.gen.ts`（`Session.parentID`、`EventSessionIdle`、
 `SessionPromptAsyncData`、`SessionMessagesResponses`、`AssistantMessage`、`UserMessage`）、
 `packages/opencode/script/build.ts`（`autoloadDotenv`）、根目錄

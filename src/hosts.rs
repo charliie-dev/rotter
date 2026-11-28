@@ -235,7 +235,10 @@ pub(crate) const PI: Host = Host {
     install: Install::OwnedShim {
         dir: "extensions",
         file: "rotter-review.ts",
-        templates: &[include_str!("shims/pi-v1.ts")],
+        templates: &[
+            include_str!("shims/pi-v2.ts"),
+            include_str!("shims/pi-v1.ts"),
+        ],
         max_timeout: Some(120),
     },
     event: "agent_before_settle",
@@ -266,7 +269,10 @@ pub(crate) const LETTA: Host = Host {
     install: Install::OwnedShim {
         dir: "mods",
         file: "rotter-review.js",
-        templates: &[include_str!("shims/letta-v1.js")],
+        templates: &[
+            include_str!("shims/letta-v2.js"),
+            include_str!("shims/letta-v1.js"),
+        ],
         max_timeout: Some(120),
     },
     event: "turn_end",
@@ -295,7 +301,10 @@ pub(crate) const OPENCODE: Host = Host {
     install: Install::OwnedShim {
         dir: "plugins",
         file: "rotter-review.js",
-        templates: &[include_str!("shims/opencode-v1.js")],
+        templates: &[
+            include_str!("shims/opencode-v2.js"),
+            include_str!("shims/opencode-v1.js"),
+        ],
         max_timeout: None,
     },
     event: "session.idle",
