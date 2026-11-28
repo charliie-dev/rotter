@@ -235,7 +235,8 @@ struct Outcome {
 /// becomes `%XX`. `%` is not among the kept characters, so two ids never share a name (and a
 /// state file of an id in that alphabet keeps its name). A missing, empty, `.` or `..` id, or one
 /// whose name exceeds 255 bytes, is None: neither the loop cap nor dedupe can be kept, so the Stop
-/// is silent.
+/// is silent. On a case-insensitive file system, ids that differ only in ASCII case still share a
+/// name.
 fn session(host: &Host, input: &Value) -> Option<String> {
     let raw = host
         .session_keys
@@ -2441,7 +2442,7 @@ mod tests {
     fn session_ids_are_mapped_or_missing() {
         let id = |value: Value| session(&CLAUDE, &json!({ "session_id": value }));
         assert_eq!(id(json!("s/1 x")), Some("s%2F1%20x".to_owned()));
-        // Ids that used to share `a_b` now differ, and no escaped id equals a kept one.
+        // Ids that differ only in an escaped byte stay distinct, and no escaped id equals a kept one.
         assert_eq!(id(json!("a/b")), Some("a%2Fb".to_owned()));
         assert_eq!(id(json!("a?b")), Some("a%3Fb".to_owned()));
         assert_eq!(id(json!("a_b")), Some("a_b".to_owned()));
