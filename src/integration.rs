@@ -242,7 +242,8 @@ fn session(host: &Host, input: &Value) -> Option<String> {
         .session_keys
         .iter()
         .find_map(|key| input[key].as_str())?;
-    // Escaping only lengthens a name, so an id already over the limit is refused before it.
+    // An id can be megabytes long. Escaping only lengthens a name, so one already over the limit
+    // is refused without escaping it.
     if raw.is_empty() || raw == "." || raw == ".." || raw.len() > 255 {
         return None;
     }
@@ -1260,7 +1261,7 @@ fn owned_installed(host: &Host, path: &Path) -> Result<Option<(Value, Vec<u8>)>,
         .ok()
         .as_ref()
         .and_then(|document| owned_handler(host, document))
-        .map(|handler| Some((handler.clone(), text.clone().into_bytes())))
+        .map(|handler| Some((handler.clone(), text.into_bytes())))
         .ok_or_else(|| {
             Refusal::Foreign(format!(
                 "{} is not managed by rotter; left alone",
