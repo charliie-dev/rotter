@@ -356,10 +356,10 @@ Bun 1.4.4 下各跑一次，letta 用 Node 26.13.1，opencode 用 Bun 1.4.4（�
 session 同時兩次只跑一次、兩個 session 同時停下各跑一次、只有字串的 `continue` 被採用、rotter 回覆後
 結束但孫程序仍握著 stdout 時照常採用回覆（孫程序在 process group 內時被殺掉，自己開 session 的
 孫程序則留著），以及 exe 不存在
-（ENOENT）、不讀 stdin 就結束（EPIPE）、卡住（2 秒後殺掉整個 process group：孫程序原本會睡 300 秒，比 harness 活得久，
+（ENOENT）、不讀 stdin 就結束（EPIPE）、卡住（5 秒後殺掉整個 process group：孫程序原本會睡 300 秒，比 harness 活得久，
 測試結束時必須已不在；拿掉 timer 裡的 `kill()` 時此案例失敗）、
 輸出垃圾、輸出超過 64 KiB（卡住或結束）、恰在 timeout 時回覆、宿主 API 丟出例外、非 completed／
-end_turn 的回合都靜默且不留下未處理的例外。除了卡住與恰在 timeout 時回覆（2 秒）之外，每個案例都以
+end_turn 的回合都靜默且不留下未處理的例外。除了卡住（5 秒）與恰在 timeout 時回覆（2 秒）之外，每個案例都以
 10 秒的 timeout 產生 shim，不必等 timeout 的回覆須在 9 秒內到達，所以負載很高的機器上 stub 的 Node
 啟動得慢也不會被誤判為等到了 timeout。harness 記錄 shim 呼叫 `process.kill` 的次數：正常結束、靜默的
 回覆與 settle 之後都是 0 次，卡住、輸出超過 64 KiB 與 stdout 比 rotter 的 `exit` 多開時各 1 次。

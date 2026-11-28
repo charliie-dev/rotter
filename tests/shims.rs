@@ -544,9 +544,9 @@ fn opencode_reads_only_the_newest_messages() {
 }
 
 /// OpenCode's re-prompt starts a turn whose idle comes back to the plugin: the stub
-/// `promptAsync` emits the new user message and that idle before it returns. The in-flight flag
-/// is not held for the injected turn (the second idle asks again), every idle reaches rotter, and
-/// rotter's cap (emulated by the stub) ends the chain at the third one.
+/// `promptAsync` emits the new user message and that idle before it returns. The session's
+/// in-flight mark is not held for the injected turn (the second idle asks again), every idle
+/// reaches rotter, and rotter's cap (emulated by the stub) ends the chain at the third one.
 #[test]
 fn opencode_re_prompts_are_capped_across_the_turns_they_start() {
     for engine in engines("opencode") {
@@ -630,8 +630,10 @@ fn shims_resolve_quietly_whatever_rotter_does() {
         ("missing", "once", 10, 0, 9000, 0, 0),
         ("big", "once", 10, 0, 9000, 1, 1),
         ("bigexit", "once", 10, 0, 9000, 0, 1),
-        // The clock starts before the shim's timer; Node may fire a timer up to a millisecond early.
-        ("hang", "once", 2, 1990, 9000, 1, 1),
+        // 5 s gives a slowly started stub time to spawn its grandchild before the timeout. The
+        // clock starts before the shim's timer, and Node may fire a timer up to a millisecond early;
+        // under 9000 ms, the shim waited for its own timer and nothing more.
+        ("hang", "once", 5, 4990, 9000, 1, 1),
         ("reply", "skipped", 10, 0, 9000, 0, 0),
         ("reply", "throwing", 10, 0, 9000, 0, 0),
     ];
