@@ -66,11 +66,14 @@ fn last_row_of(start: Point, end: Point) -> usize {
 
 /// The node of `nodes` that holds byte `at`. `nodes` is in document order, none inside another.
 fn holding<'t>(nodes: &[Node<'t>], at: usize) -> Option<Node<'t>> {
-    let index = nodes.partition_point(|node| node.start_byte() <= at);
-    nodes[..index]
-        .last()
-        .copied()
-        .filter(|node| at < node.end_byte())
+    holding_index(nodes, at).map(|index| nodes[index])
+}
+
+fn holding_index(nodes: &[Node<'_>], at: usize) -> Option<usize> {
+    let index = nodes
+        .partition_point(|node| node.start_byte() <= at)
+        .checked_sub(1)?;
+    (at < nodes[index].end_byte()).then_some(index)
 }
 
 /// At most this many units are added per changed name; the rest are counted.
@@ -110,6 +113,11 @@ struct File<'t> {
     by_start_row: HashMap<usize, Node<'t>>,
     by_last_row: HashMap<usize, Node<'t>>,
     attributes: Vec<Node<'t>>,
+    /// Per attribute, the byte where the code it decorates starts: past whitespace, comments
+    /// and the attributes after it (the source's length when none follows).
+    decorates: Vec<usize>,
+    /// start_row() by node id.
+    start_rows: RefCell<HashMap<usize, usize>>,
     attribute_rows: BTreeSet<usize>,
     comment_rows: BTreeSet<usize>,
     changed_rows: BTreeSet<usize>,
@@ -285,6 +293,8 @@ impl<'t> File<'t> {
             by_start_row: HashMap::new(),
             by_last_row: HashMap::new(),
             attributes: Vec::new(),
+            decorates: Vec::new(),
+            start_rows: RefCell::new(HashMap::new()),
             attribute_rows: BTreeSet::new(),
             comment_rows: BTreeSet::new(),
             changed_rows: BTreeSet::new(),
@@ -296,6 +306,15 @@ impl<'t> File<'t> {
         preorder(root, |node| file.scan(node));
         // Only attributes on lines of their own sit between a leading comment and its unit; one
         // on a line of code (`#[inline] fn f() {}`) belongs to that line.
+        // From the last attribute back, so a run of attributes shares the code after it.
+        file.decorates = vec![0; file.attributes.len()];
+        for index in (0..file.attributes.len()).rev() {
+            let next = file.after_comments(file.attributes[index].end_byte());
+            file.decorates[index] = match file.attributes.get(index + 1) {
+                Some(following) if following.start_byte() == next => file.decorates[index + 1],
+                _ => next,
+            };
+        }
         for attribute in file.attributes.clone() {
             let rows = attribute.start_position().row..=last_row(attribute);
             let alone = |row| file.covered(row, usize::MAX, true);
@@ -407,20 +426,48 @@ impl<'t> File<'t> {
         has(&self.grammar.unit_kinds, node.kind())
     }
 
-    /// Row where a unit begins: the topmost of the attribute lines directly above it, with any
-    /// comment lines between them and the unit.
+    /// Row where a unit begins: that of the topmost attribute that decorates it, when only
+    /// whitespace, comments and further attributes come between, and the attribute stands on
+    /// lines of its own.
     fn start_row(&self, node: Node<'_>) -> usize {
-        let mut row = node.start_position().row;
-        let mut top = row;
-        while row > 0
-            && (self.attribute_rows.contains(&(row - 1)) || self.comment_rows.contains(&(row - 1)))
-        {
-            row -= 1;
-            if self.attribute_rows.contains(&row) {
-                top = row;
+        if let Some(row) = self.start_rows.borrow().get(&node.id()) {
+            return *row;
+        }
+        let mut top = node.start_position().row;
+        let mut at = node.start_byte();
+        let mut index = self
+            .attributes
+            .partition_point(|attribute| attribute.end_byte() <= at);
+        while let Some(previous) = index.checked_sub(1) {
+            let attribute = self.attributes[previous];
+            let row = attribute.start_position().row;
+            if self.after_comments(attribute.end_byte()) != at
+                || !self.attribute_rows.contains(&row)
+            {
+                break;
+            }
+            top = row;
+            at = attribute.start_byte();
+            index = previous;
+        }
+        self.start_rows.borrow_mut().insert(node.id(), top);
+        top
+    }
+
+    /// The first byte at or after `from` that is neither whitespace nor in a comment.
+    fn after_comments(&self, from: usize) -> usize {
+        let mut at = from;
+        loop {
+            let Some(offset) = self.source[at..].find(|character: char| !character.is_whitespace())
+            else {
+                return self.source.len();
+            };
+            at += offset;
+            match holding(&self.comments, at) {
+                Some(comment) => at = comment.end_byte(),
+                None => return at,
             }
         }
-        top
     }
 
     /// Comments that end on a byte in `(from, to]`.
@@ -507,20 +554,12 @@ impl<'t> File<'t> {
         node
     }
 
-    /// The item that an attribute holding `node` decorates: its next sibling past further
-    /// attributes and comments.
+    /// The start of the code that an attribute holding `node` decorates.
     fn decorated(&self, node: Node<'t>) -> Option<Node<'t>> {
-        let attribute = holding(&self.attributes, node.start_byte())?;
-        let mut next = attribute.next_named_sibling();
-        while let Some(sibling) = next {
-            let kind = sibling.kind();
-            if !has(&self.grammar.attribute_kinds, kind) && !has(&self.grammar.comment_kinds, kind)
-            {
-                return Some(sibling);
-            }
-            next = sibling.next_named_sibling();
-        }
-        None
+        let at = self.decorates[holding_index(&self.attributes, node.start_byte())?];
+        (at < self.source.len())
+            .then(|| self.root.descendant_for_byte_range(at, at))
+            .flatten()
     }
 
     fn unit_or_top_level(&self, node: Node<'t>) -> Node<'t> {
@@ -1180,6 +1219,22 @@ mod tests {
             picked(Language::Rust, source, 0..1),
             [unit("function_item", "f", (1, 3), &["/// Only with b.\n"])]
         );
+        // And past a blank line, as the attribute still decorates the item.
+        let source = "#[cfg(feature = \"x\")] // only with x\n\nfn f() { 1; }\n";
+        assert_eq!(
+            picked(Language::Rust, source, 0..1),
+            [unit("function_item", "f", (1, 3), &["// only with x"])]
+        );
+        // Not to a field: the struct's attribute and doc are not the field's.
+        let source =
+            "pub struct Tee;\n\n#[derive(Debug)]\n/// A wrapper.\npub struct S { pub a: Tee }\n";
+        let found = picked(Language::Rust, source, 0..1);
+        let field = found.iter().find(|unit| unit.0 == "field_declaration");
+        assert_eq!(
+            field.map(|unit| (unit.2, unit.3)),
+            Some((5, 5)),
+            "{found:?}"
+        );
     }
 
     #[test]
@@ -1224,11 +1279,17 @@ mod tests {
                 &["// lead", "/* a\n   b */"]
             )]
         );
-        // Not past an inner doc on the code row, where leading() stops too.
-        let source = "// x\n/*! i */ fn f() { 1; }\n";
-        let found = picked(Language::Rust, source, 0..1);
-        assert_eq!(found.len(), 1, "{found:?}");
-        assert_eq!(found[0].4, ["// x"], "{found:?}");
+        // Not past an inner doc on the code row, where leading() stops too, also when the inner
+        // doc starts on a row above it.
+        for source in [
+            "// x\n/*! i */ fn f() { 1; }\n",
+            "// x\n/*! i\n i */ fn f() { 1; }\n",
+        ] {
+            let found = picked(Language::Rust, source, 0..1);
+            assert_eq!(found.len(), 1, "{found:?}");
+            assert_eq!(found[0].0, "line_comment", "{found:?}");
+            assert_eq!(found[0].4, ["// x"], "{found:?}");
+        }
     }
 
     #[test]
@@ -1269,6 +1330,11 @@ mod tests {
         let found = picked(Language::Rust, source, 0..1);
         assert_eq!(found.len(), 2, "{found:?}");
         assert_eq!(found[1].1.as_deref(), Some("g"));
+        // An attribute that ends the file decorates nothing: it is its own unit, as before.
+        let source = "pub fn foo() -> u8 { 2 }\n#[foo]\n// c\n";
+        let found = picked(Language::Rust, source, 0..1);
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert_eq!(found[1].0, "attribute_item", "{found:?}");
     }
 
     #[test]
