@@ -51,6 +51,17 @@ switch (mode) {
     record(fs.readFileSync(0, "utf8"));
     process.stdout.write(`{"continue":"${big}"}`, () => process.exit(0));
     break;
+  case "lateoverflow": {
+    record(fs.readFileSync(0, "utf8"));
+    // Exits at once, but a grandchild in the same process group holds stdout and overflows it
+    // 100 ms later: the overflow settles the answer after rotter's exit and before `close`.
+    const child = spawn("/bin/sh", ["-c", "sleep 0.1; head -c 70000 /dev/zero; exec sleep 300"], {
+      stdio: ["ignore", "inherit", "ignore"],
+    });
+    fs.writeFileSync(path.join(dir, "grandchild"), String(child.pid));
+    process.exit(0);
+    break;
+  }
   case "attimeout":
     // Answers just as a 2 s shim timeout fires.
     record(fs.readFileSync(0, "utf8"));

@@ -26,7 +26,6 @@ function ask(input) {
         if (settled) return;
         settled = true;
         if (timer !== null) clearTimeout(timer);
-        if (linger !== null) clearTimeout(linger);
         resolve(value);
       } catch {}
     };
@@ -76,7 +75,8 @@ function ask(input) {
           if (settled) return;
           // Stdout still open: something rotter started holds it, and `close` would wait for it
           // until the timeout. A group member that holds it keeps the group's id from reuse; one
-          // that left the group survives, but the pipe is closed on this side.
+          // that left the group survives, but the pipe is closed on this side. Only `close` cancels
+          // this, so a timeout or an overflow that settles after the exit still ends what holds it.
           linger = setTimeout(() => {
             try {
               group();
@@ -88,6 +88,7 @@ function ask(input) {
       });
       child.on("close", () => {
         try {
+          if (linger !== null) clearTimeout(linger);
           if (overflow) return finish(null);
           const reply = JSON.parse(Buffer.concat(chunks).toString("utf8"));
           finish(

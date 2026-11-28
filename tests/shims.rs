@@ -620,8 +620,9 @@ fn shims_resolve_quietly_whatever_rotter_does() {
     // (stub mode, scenario, shim timeout in seconds, fastest and slowest answer in ms, signals
     // sent: at least, at most). Under a 10 s timeout, an answer before 9000 ms came without
     // waiting for it, however slowly a loaded machine (CI, coverage, mutants) starts the stub's
-    // Node. One signal ends a stub that hangs or overflows (bigexit may exit first); none follows
-    // a settled answer.
+    // Node. One signal ends a stub that hangs or overflows (bigexit may exit first). An overflow
+    // after rotter's exit (lateoverflow) settles at once, and the one signal comes when stdout is
+    // still open 500 ms after the exit. No signal follows a settled answer whose close came.
     let cases = [
         ("quiet", "once", 10, 0, 9000, 0, 0),
         ("nonstring", "once", 10, 0, 9000, 0, 0),
@@ -630,6 +631,7 @@ fn shims_resolve_quietly_whatever_rotter_does() {
         ("missing", "once", 10, 0, 9000, 0, 0),
         ("big", "once", 10, 0, 9000, 1, 1),
         ("bigexit", "once", 10, 0, 9000, 0, 1),
+        ("lateoverflow", "once", 10, 0, 9000, 1, 1),
         // 5 s gives a slowly started stub time to spawn its grandchild before the timeout. The
         // clock starts before the shim's timer, and Node may fire a timer up to a millisecond early;
         // under 9000 ms, the shim waited for its own timer and nothing more.
@@ -663,9 +665,9 @@ fn shims_resolve_quietly_whatever_rotter_does() {
                     "{host} {engine} {stub_mode} {scenario}"
                 );
             }
-            if stub_mode == "hang" {
-                // The timeout killed rotter's whole process group: the grandchild would sleep
-                // well past the harness, which exits without waiting for it.
+            if matches!(stub_mode, "hang" | "lateoverflow") {
+                // The shim killed rotter's whole process group: the grandchild would sleep well
+                // past the harness, which exits without waiting for it.
                 let pid = fs::read_to_string(run.stub.join("grandchild")).unwrap();
                 let survived = alive(pid.trim());
                 if survived {
