@@ -66,7 +66,8 @@ JSON schema 標為 `rotter.extract.poc/0`，仍可能變動。
 
 - `units`：變更所在的宣告、函式、binding 或設定鍵，含原文與範圍；
   另列出同檔案中使用變更名稱的單元（`selected_by: "reference"`，每個名稱最多 20 個）。
-- `comments`：`leading`（緊接上方，Rust attribute 行可夾在中間）、`inside`、`trailing`
+- `comments`：`leading`（緊接上方，Rust attribute 行可夾在中間；或在單元第一行、程式碼之前，
+  如 `/* c */ fn f`）、`inside`、`trailing`
   （同一行尾）、`enclosing_leading`（外層單元上方）。相鄰的同類行註解合併成一個區塊；
   Go 指示、Lua 型別標註、ShellCheck 指示、shebang 等另標 `directive`，不與一般註解合併。
 - `range.bytes` 是 UTF-8 byte offset（結尾不含），`range.lines` 是 1 起算的閉區間；
@@ -200,7 +201,7 @@ functions = ["function_declaration"]
 function_values = ["function_definition"]
 attributes = []
 comments = ["comment"]            # 預設 ["comment"]
-directives = { "---@" = "lua_annotation" }   # 註解前綴 → directive 標籤
+directives = { "---@" = "lua_annotation" }   # 註解前綴 → directive 標籤；標籤 "shebang" 只在第 1 行成立，且與內建 shebang 一樣屬於整個檔案、不歸給下一個單元
 references = true                 # 是否加入同檔案引用，預設 true
 
 [overrides]
