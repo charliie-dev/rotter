@@ -324,9 +324,11 @@ pi、letta 與 opencode 沒有指令型 hook，只在自己的程序內載入程
   detached:true, env:{PATH, LANG}, stdio:["pipe","pipe","ignore"]})`；子程序與 stdin／stdout 都有
   `error` listener，每個 callback 與 kill 各自包在 try/catch，結果只 settle 一次；timeout 到時（或
   stdout 超過 64 KiB）以 SIGKILL 殺掉整個 process group（只在尚未看到 `exit` 時，之後 id 可能被
-  重用），timer 在 settle 時清除並 `unref`。v2 在看到 `exit` 的當下也對 process group 送一次 SIGKILL：
-  rotter 留下、仍握著 stdout 的子孫程序否則會讓 `close` 等到 timeout，回覆因此遺失；group 只要還有
-  成員，它的 id 就不會被重用，沒有成員時這次 kill 得到 ESRCH 而被忽略。只有 stdout 能解析成 JSON 且 `continue` 為字串時才採用。不使用 `exec`、`execSync`、
+  重用），timer 在 settle 時清除並 `unref`。v2 在看到 `exit` 後若 500 ms 內 stdout 仍未關閉，代表
+  rotter 留下的子孫程序握著它，否則 `close` 會等到 timeout、回覆因此遺失：此時對 process group 送
+  SIGKILL 並關閉 shim 這端的 stdout。握著 stdout 的子孫程序若在 group 內，group 的 id 就不會被重用；
+  已離開 group（自己開 session）的子孫程序不會被殺，只是不再拖住回覆。若它離開 group 時 group 已沒有
+  其他成員，這次 kill 打到的 id 在理論上可能已被重用；rotter 不會啟動這種程序。只有 stdout 能解析成 JSON 且 `continue` 為字串時才採用。不使用 `exec`、`execSync`、
   `spawnSync`、`Bun.$`，也不把 `process.env` 傳給 rotter。
 - stdin 只有 `{"session_id":…,"cwd":…}`；rotter 的回覆為 `{"continue":<reason>}`，提示寫到 stderr
   （shim 忽略）。shim 只讓同一個 session 同時跑一次（v1 是整個 shim 同時只跑一次，另一個 session
@@ -348,16 +350,18 @@ Bun 1.4.4 下各跑一次，letta 用 Node 26.13.1，opencode 用 Bun 1.4.4（�
 （`tests/fixtures/shim/harness.mjs`，含 `uncaughtException`／`unhandledRejection` 偵測，handler 結束
 後再等約 1 秒，然後直接結束、不等 shim 留下的程序）與 stub rotter（`stub.cjs`，以 Node 執行，放在
 含空白、引號與非 ASCII 的目錄）。驗證：直接執行（argv 恰為
-`hook <host> --timeout 2`）、環境只有 PATH 與 LANG（harness 設了 `LD_PRELOAD`、
+`hook <host> --timeout 10`）、環境只有 PATH 與 LANG（harness 設了 `LD_PRELOAD`、
 `DYLD_INSERT_LIBRARIES`、`DEVELOPER_DIR`、HOME、`GIT_DIR`、`ROTTER_STATE_DIR`）、stdin 內容、三次
 每次停下都交給 rotter（stub 模擬 rotter 的上限時，第三次由 rotter 靜默、第四次照常要求）、同一個
 session 同時兩次只跑一次、兩個 session 同時停下各跑一次、只有字串的 `continue` 被採用、rotter 回覆後
-結束但孫程序仍握著 stdout 時照常採用回覆且孫程序被殺掉，以及 exe 不存在
+結束但孫程序仍握著 stdout 時照常採用回覆（孫程序在 process group 內時被殺掉，自己開 session 的
+孫程序則留著），以及 exe 不存在
 （ENOENT）、不讀 stdin 就結束（EPIPE）、卡住（2 秒後殺掉整個 process group：孫程序原本會睡 300 秒，比 harness 活得久，
 測試結束時必須已不在；拿掉 timer 裡的 `kill()` 時此案例失敗）、
 輸出垃圾、輸出超過 64 KiB（卡住或結束）、恰在 timeout 時回覆、宿主 API 丟出例外、非 completed／
-end_turn 的回合都靜默且不留下未處理的例外。不需等到 timeout 的案例以 10 秒的 timeout 產生 shim，
-回覆須在 9 秒內到達，所以負載很高的機器上 stub 的 Node 啟動得慢也不會被誤判為等到了 timeout。
+end_turn 的回合都靜默且不留下未處理的例外。除了卡住與恰在 timeout 時回覆（2 秒）之外，每個案例都以
+10 秒的 timeout 產生 shim，不必等 timeout 的回覆須在 9 秒內到達，所以負載很高的機器上 stub 的 Node
+啟動得慢也不會被誤判為等到了 timeout。
 
 ### pi（實驗性）
 

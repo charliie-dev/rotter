@@ -143,7 +143,7 @@ if (host === "pi") {
           body.model?.modelID === "m" &&
           variantKept;
         const plain = same && part.type === "text" && extra.length === 0;
-        prompts.push(plain ? part.text : { bad: body });
+        prompts.push({ session: path.id, answer: plain ? part.text : { bad: body } });
         if (scenario === "rejecting") throw new Error("prompt failed");
         if (scenario === "chain") {
           // The injected prompt is a new user message; its turn ends with the next idle, both
@@ -191,9 +191,12 @@ async function stop(session, { outcome, throwing } = {}) {
     return typeof result.continue === "string" ? result.continue : { bad: result };
   }
   const before = prompts.length;
-  const result = await emit(idle(outcome ?? session));
+  const id = outcome ?? session;
+  const result = await emit(idle(id));
   if (result !== undefined) return { bad: result };
-  return prompts.length > before ? prompts[prompts.length - 1] : null;
+  // Only a prompt to the session that went idle answers it.
+  const mine = prompts.slice(before).filter((prompt) => prompt.session === id);
+  return mine.length > 0 ? mine[mine.length - 1].answer : null;
 }
 
 const timed = async (promise) => {
@@ -225,7 +228,7 @@ switch (scenario) {
       seen = events.length;
       await Promise.allSettled(events);
     }
-    for (const answer of prompts) answers.push({ answer, ms: Date.now() - start });
+    for (const { answer } of prompts) answers.push({ answer, ms: Date.now() - start });
     break;
   }
   case "skipped":

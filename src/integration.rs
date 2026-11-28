@@ -2691,20 +2691,40 @@ mod tests {
     fn shipped_shim_templates_still_render_their_goldens() {
         // A file an older rotter wrote stays rotter's only while its template is unchanged.
         let exe = "/opt/it's \"q\"\\ dir/\u{fc}n\u{ef}/rotter";
-        let goldens = [
-            (&PI, include_str!("../tests/fixtures/shim/pi-v1.golden.ts")),
+        // Newest first, as `templates` lists them.
+        let goldens: [(&Host, &[&str]); 3] = [
+            (
+                &PI,
+                &[
+                    include_str!("../tests/fixtures/shim/pi-v2.golden.ts"),
+                    include_str!("../tests/fixtures/shim/pi-v1.golden.ts"),
+                ],
+            ),
             (
                 &LETTA,
-                include_str!("../tests/fixtures/shim/letta-v1.golden.js"),
+                &[
+                    include_str!("../tests/fixtures/shim/letta-v2.golden.js"),
+                    include_str!("../tests/fixtures/shim/letta-v1.golden.js"),
+                ],
             ),
             (
                 &OPENCODE,
-                include_str!("../tests/fixtures/shim/opencode-v1.golden.js"),
+                &[
+                    include_str!("../tests/fixtures/shim/opencode-v2.golden.js"),
+                    include_str!("../tests/fixtures/shim/opencode-v1.golden.js"),
+                ],
             ),
         ];
-        for (host, golden) in goldens {
-            let v1 = templates(host).last().unwrap();
-            assert_eq!(render_template(v1, exe, 90).unwrap(), golden, "{}", host.id);
+        for (host, goldens) in goldens {
+            assert_eq!(templates(host).len(), goldens.len(), "{}", host.id);
+            for (template, golden) in templates(host).iter().zip(goldens) {
+                assert_eq!(
+                    render_template(template, exe, 90).unwrap(),
+                    *golden,
+                    "{}",
+                    host.id
+                );
+            }
         }
     }
 

@@ -299,8 +299,9 @@ struct Run {
     stub: PathBuf,
 }
 
+/// Under a 10 s shim timeout, so a stub that a loaded machine starts slowly still answers.
 fn run(host: &str, file: &str, engine: &str, stub_mode: &str, scenario: &str) -> Run {
-    run_with(host, file, engine, stub_mode, scenario, 2)
+    run_with(host, file, engine, stub_mode, scenario, 10)
 }
 
 /// `timeout` is the shim's, in seconds.
@@ -417,7 +418,7 @@ fn shims_run_rotter_without_a_shell_with_only_path_and_lang() {
         // Spawned directly: the exe path with a space and a quote arrived as one argv[0].
         assert_eq!(
             call["argv"],
-            serde_json::json!(["hook", host, "--timeout", "2"])
+            serde_json::json!(["hook", host, "--timeout", "10"])
         );
         // macOS CoreFoundation adds its text encoding to the stub's own environment at start.
         let mut env = call["env"].clone();
@@ -466,32 +467,47 @@ fn shims_leave_the_cap_to_rotter_and_run_one_at_a_time() {
 #[test]
 fn shims_run_one_stop_at_a_time_per_session_only() {
     for (host, file, engine) in cells() {
-        let run = run_with(host, file, engine, "reply", "twosessions", 10);
+        let run = run(host, file, engine, "reply", "twosessions");
         let answers: Vec<&Value> = run.answers.iter().map(|(answer, _)| answer).collect();
         assert_eq!(answers, [REQUEST, REQUEST], "{host} {engine}");
-        assert_eq!(run.calls.len(), 2, "{host} {engine}");
+        let mut sessions: Vec<String> = run
+            .calls
+            .iter()
+            .map(|call| {
+                let stdin: Value = serde_json::from_str(call["stdin"].as_str().unwrap()).unwrap();
+                stdin["session_id"].as_str().unwrap().to_owned()
+            })
+            .collect();
+        sessions.sort();
+        assert_eq!(sessions, ["a", "b"], "{host} {engine}");
         let _ = fs::remove_dir_all(run.stub.parent().unwrap());
     }
 }
 
 #[test]
 fn shims_end_what_rotter_leaves_holding_stdout() {
-    for (host, file, engine) in cells() {
-        // The stub answers and exits, but its grandchild keeps stdout open: without ending the
-        // group at rotter's exit, the answer would wait for the 10 s timeout and be lost.
-        let run = run_with(host, file, engine, "linger", "once", 10);
-        let pid = fs::read_to_string(run.stub.join("grandchild")).unwrap();
-        let survived = alive(pid.trim());
-        if survived {
-            let _ = Command::new("/bin/kill").args(["-9", pid.trim()]).status();
+    // The stub answers and exits, but its grandchild keeps stdout open: without ending what holds
+    // it after rotter's exit, the answer would wait for the 10 s timeout and be lost. A grandchild
+    // in the process group is killed; one in a session of its own is out of reach and survives.
+    for (stub_mode, killed) in [("linger", true), ("escape", false)] {
+        for (host, file, engine) in cells() {
+            let run = run(host, file, engine, stub_mode, "once");
+            let pid = fs::read_to_string(run.stub.join("grandchild")).unwrap();
+            let survived = alive(pid.trim());
+            if survived {
+                let _ = Command::new("/bin/kill").args(["-9", pid.trim()]).status();
+            }
+            let [(answer, ms)] = run.answers.as_slice() else {
+                panic!("{host} {engine} {stub_mode}: {:?}", run.answers);
+            };
+            assert_eq!(answer, REQUEST, "{host} {engine} {stub_mode}");
+            assert!(*ms < 9000, "{host} {engine} {stub_mode}: {ms} ms");
+            assert_eq!(
+                !survived, killed,
+                "{host} {engine} {stub_mode}: grandchild {pid}"
+            );
+            let _ = fs::remove_dir_all(run.stub.parent().unwrap());
         }
-        let [(answer, ms)] = run.answers.as_slice() else {
-            panic!("{host} {engine}: {:?}", run.answers);
-        };
-        assert_eq!(answer, REQUEST, "{host} {engine}");
-        assert!(*ms < 9000, "{host} {engine}: {ms} ms");
-        assert!(!survived, "{host} {engine}: the grandchild {pid} survived");
-        let _ = fs::remove_dir_all(run.stub.parent().unwrap());
     }
 }
 
@@ -640,7 +656,7 @@ fn shims_resolve_quietly_whatever_rotter_does() {
             let _ = fs::remove_dir_all(run.stub.parent().unwrap());
         }
         // Answering exactly as the timeout fires settles once, either way.
-        let run = run(host, file, engine, "attimeout", "once");
+        let run = run_with(host, file, engine, "attimeout", "once", 2);
         assert_eq!(run.answers.len(), 1, "{host} {engine}");
         let _ = fs::remove_dir_all(run.stub.parent().unwrap());
     }

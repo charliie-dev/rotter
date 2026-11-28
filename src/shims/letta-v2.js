@@ -7,6 +7,8 @@ const EXE = __ROTTER_EXE__;
 const TIMEOUT = __ROTTER_TIMEOUT__;
 const HOST = "letta";
 const MAX_STDOUT = 65536;
+// How long stdout may stay open after rotter exits before the shim ends what holds it.
+const LINGER_MS = 500;
 
 // Never rejects; settles once, at the latest when the timeout fires.
 function ask(input) {
@@ -15,6 +17,7 @@ function ask(input) {
     let exited = false;
     let overflow = false;
     let timer = null;
+    let linger = null;
     let child = null;
     let size = 0;
     const chunks = [];
@@ -23,15 +26,17 @@ function ask(input) {
         if (settled) return;
         settled = true;
         if (timer !== null) clearTimeout(timer);
+        if (linger !== null) clearTimeout(linger);
         resolve(value);
       } catch {}
     };
-    // The whole process group, and only until rotter's exit is seen (its id may be reused).
+    // rotter's whole process group.
     const group = () => {
       try {
         if (child !== null && typeof child.pid === "number") process.kill(-child.pid, "SIGKILL");
       } catch {}
     };
+    // Until rotter's exit is seen, its pid, and with it the group's id, cannot be reused.
     const kill = () => {
       if (!exited) group();
     };
@@ -67,10 +72,18 @@ function ask(input) {
       });
       child.on("exit", () => {
         try {
-          // A descendant left in the group can hold stdout open, and `close` would wait for it
-          // until the timeout. While any member lives, the group keeps its id.
-          group();
           exited = true;
+          if (settled) return;
+          // Stdout still open: something rotter started holds it, and `close` would wait for it
+          // until the timeout. A group member that holds it keeps the group's id from reuse; one
+          // that left the group survives, but the pipe is closed on this side.
+          linger = setTimeout(() => {
+            try {
+              group();
+              child.stdout.destroy();
+            } catch {}
+          }, LINGER_MS);
+          linger.unref();
         } catch {}
       });
       child.on("close", () => {
